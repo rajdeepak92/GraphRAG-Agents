@@ -20,6 +20,7 @@ from multi_agentic_graph_rag.domain.enums import (
     ValidationStatus,
 )
 from multi_agentic_graph_rag.domain.runs import validate_run_transition
+from multi_agentic_graph_rag.domain.vectors import VectorRecord, VectorSearchResult
 
 __all__ = [
     "DerivationType",
@@ -33,6 +34,8 @@ __all__ = [
     "RunStatus",
     "RunStepName",
     "ValidationStatus",
+    "VectorRecord",
+    "VectorSearchResult",
     "VerifyArtifactCommand",
     "validate_run_transition",
 ]

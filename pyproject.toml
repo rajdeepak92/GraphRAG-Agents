@@ -59,6 +59,9 @@ target-version = "py312"
 line-length = 100
 src = ["src"]
 
+[[tool.mypy.overrides]]
+module = ["sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
 
 [tool.ruff.lint]
 select = [

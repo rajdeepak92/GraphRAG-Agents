@@ -9,6 +9,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from multi_agentic_graph_rag.domain.chunks import Chunk
 from multi_agentic_graph_rag.domain.documents import Document, DocumentVersion, Project
 from multi_agentic_graph_rag.domain.enums import RunStatus, RunStepName
 from multi_agentic_graph_rag.domain.runs import (
@@ -20,6 +21,7 @@ from multi_agentic_graph_rag.infrastructure.postgres.errors import (
     translate_postgres_error,
 )
 from multi_agentic_graph_rag.infrastructure.postgres.models import (
+    ChunkRow,
     DocumentRow,
     DocumentVersionRow,
     IngestionRunRow,
@@ -66,6 +68,22 @@ def _document_version_from_row(row: DocumentVersionRow) -> DocumentVersion:
         embedding_fingerprint=row.embedding_fingerprint,
         prompt_fingerprint=row.prompt_fingerprint,
         created_at=row.created_at,
+    )
+
+
+def _chunk_from_row(row: ChunkRow) -> Chunk:
+    return Chunk(
+        chunk_id=row.chunk_id,
+        document_version_id=row.document_version_id,
+        ordinal=row.chunk_ordinal,
+        content_hash=row.chunk_content_hash,
+        normalized_text=row.normalized_text,
+        original_text=row.original_text,
+        page_start=row.page_start,
+        page_end=row.page_end,
+        section_path=tuple(row.section_path),
+        character_start=row.character_start,
+        character_end=row.character_end,
     )
 
 
@@ -226,6 +244,27 @@ class SqlAlchemyDocumentVersionRepository:
             raise translate_postgres_error(exc) from exc
 
         return _document_version_from_row(row)
+
+
+class SqlAlchemyChunkRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_active_by_document_version(
+        self,
+        *,
+        document_version_id: UUID,
+    ) -> tuple[Chunk, ...]:
+        result = await self._session.execute(
+            select(ChunkRow)
+            .where(
+                ChunkRow.document_version_id == document_version_id,
+                ChunkRow.active.is_(True),
+            )
+            .order_by(ChunkRow.chunk_ordinal.asc())
+        )
+
+        return tuple(_chunk_from_row(row) for row in result.scalars().all())
 
 
 class SqlAlchemyIngestionRunRepository:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
+from multi_agentic_graph_rag.domain.chunks import Chunk
 from multi_agentic_graph_rag.domain.documents import Document, DocumentVersion, Project
 from multi_agentic_graph_rag.domain.enums import RunStatus
 from multi_agentic_graph_rag.domain.runs import IngestionRun, RunStep
@@ -41,6 +42,14 @@ class DocumentVersionRepository(Protocol):
     ) -> DocumentVersion | None: ...
 
     async def create(self, version: DocumentVersion) -> DocumentVersion: ...
+
+
+class ChunkRepository(Protocol):
+    async def list_active_by_document_version(
+        self,
+        *,
+        document_version_id: UUID,
+    ) -> tuple[Chunk, ...]: ...
 
 
 class IngestionRunRepository(Protocol):
