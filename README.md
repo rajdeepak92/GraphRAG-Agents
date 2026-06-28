@@ -3134,3 +3134,467 @@ Recommended merge request branch:
 ```text
 phase-4-postgres-control-plane
 ```
+
+---
+
+## 6. Phase 5 Update — Neo4j Graph Foundation
+
+Phase 5 adds the Neo4j-backed graph foundation for Agentic-GraphRAG.
+
+The goal of this phase is to project canonical PostgreSQL records into Neo4j as an idempotent relationship graph for traceability, evidence traversal, impact analysis, and future multi-hop reasoning.
+
+PostgreSQL remains the canonical transactional registry. Neo4j is used as the deterministic relationship projection layer.
+
+---
+
+### 6.1 Phase 5 Scope
+
+Phase 5 implements:
+
+- Neo4j async driver lifecycle management.
+- Neo4j uniqueness constraint creation.
+- Graph-store application port.
+- Neo4j infrastructure adapter.
+- Dedicated Cypher query module.
+- Deterministic document hierarchy projection.
+- Deterministic requirement traceability projection.
+- Idempotent graph writes using stable IDs.
+- Schema and projection smoke validation scripts.
+
+Out of scope for Phase 5:
+
+- Chroma vector indexing.
+- Embedding generation.
+- LLM requirement discovery.
+- Entity extraction.
+- Component extraction.
+- LangGraph orchestration.
+- Document parsing and chunking.
+
+---
+
+### 6.2 Added Files
+
+Phase 5 adds the graph-store application port:
+
+```text
+src/multi_agentic_graph_rag/application/ports/graph_store.py
+```
+
+Phase 5 adds the Neo4j infrastructure package:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/neo4j/
+├── __init__.py
+├── client.py
+├── schema.py
+├── queries.py
+└── projections.py
+```
+
+Phase 5 adds smoke validation scripts:
+
+```text
+scripts/
+├── phase5_neo4j_schema_smoke.py
+└── phase5_neo4j_projection_smoke.py
+```
+
+---
+
+### 6.3 Neo4j Node Model
+
+Implemented core Neo4j node labels:
+
+```text
+(:Project)
+(:Document)
+(:DocumentVersion)
+(:Chunk)
+(:Fact)
+(:Requirement)
+(:IngestionRun)
+```
+
+Reserved for later phases:
+
+```text
+(:Entity)
+(:Component)
+```
+
+Entity and component extraction are intentionally delayed until the deterministic graph foundation is stable.
+
+---
+
+### 6.4 Neo4j Relationship Model
+
+Implemented deterministic relationships:
+
+```text
+(Project)-[:OWNS]->(Document)
+(Document)-[:HAS_VERSION]->(DocumentVersion)
+(DocumentVersion)-[:CONTAINS]->(Chunk)
+
+(Fact)-[:EVIDENCED_BY]->(Chunk)
+(Requirement)-[:SUPPORTED_BY]->(Fact)
+
+(IngestionRun)-[:PRODUCED]->(Fact)
+(IngestionRun)-[:PRODUCED]->(Requirement)
+```
+
+Reserved for later reconciliation and impact-analysis phases:
+
+```text
+(DocumentVersion)-[:SUPERSEDES]->(DocumentVersion)
+(Fact)-[:CONFLICTS_WITH]->(Fact)
+(Requirement)-[:CONFLICTS_WITH]->(Requirement)
+(Requirement)-[:DUPLICATES]->(Requirement)
+(Requirement)-[:SUPERSEDES]->(Requirement)
+(Fact)-[:MENTIONS]->(Entity)
+(Requirement)-[:APPLIES_TO]->(Component)
+```
+
+---
+
+### 6.5 Neo4j Constraints
+
+Phase 5 creates uniqueness constraints for stable projection keys.
+
+Required constraints:
+
+```text
+Project.project_id
+Document.document_id
+DocumentVersion.document_version_id
+Chunk.chunk_id
+Fact.fact_id
+Requirement.requirement_id
+IngestionRun.run_id
+```
+
+These constraints are required because Neo4j `MERGE` alone is not enough to guarantee duplicate protection under concurrent projection workloads.
+
+Schema creation is handled by:
+
+```python
+ensure_neo4j_schema(driver, database=database)
+```
+
+Defined in:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/neo4j/schema.py
+```
+
+---
+
+### 6.6 Graph Store Port
+
+Phase 5 introduces a graph-store port in the application layer.
+
+Main contract:
+
+```text
+verify_schema()
+project_document_hierarchy(...)
+project_requirement_trace(...)
+```
+
+The application layer depends on this port. Neo4j-specific details remain inside the infrastructure layer.
+
+This preserves the architecture rule:
+
+```text
+Application code depends on ports.
+Infrastructure code implements adapters.
+Domain code does not import Neo4j.
+```
+
+---
+
+### 6.7 Neo4j Projection Adapter
+
+Phase 5 implements:
+
+```python
+Neo4jGraphStore
+```
+
+Defined in:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/neo4j/projections.py
+```
+
+Implemented projection methods:
+
+```text
+project_document_hierarchy()
+project_requirement_trace()
+```
+
+`project_document_hierarchy()` projects:
+
+```text
+Project -> Document -> DocumentVersion -> Chunk
+```
+
+`project_requirement_trace()` projects:
+
+```text
+Requirement -> Fact -> Chunk
+IngestionRun -> Fact
+IngestionRun -> Requirement
+```
+
+The projection adapter uses stable IDs as `MERGE` keys and consumes canonical PostgreSQL-shaped records.
+
+---
+
+### 6.8 Deterministic Projection Rules
+
+Phase 5 follows these rules:
+
+- PostgreSQL remains the canonical source.
+- Neo4j receives projected relationship data.
+- Stable IDs are used as Neo4j merge keys.
+- Cypher is isolated in `queries.py`.
+- Neo4j schema creation is explicit and repeatable.
+- Projection replay must not create duplicates.
+- Domain models do not import Neo4j.
+- Neo4j does not allocate canonical IDs.
+- LLM-based graph extraction is not introduced in Phase 5.
+
+---
+
+### 6.9 Neo4j Configuration
+
+Required `.env` values:
+
+```dotenv
+GRAPH_STORE_PROVIDER=neo4j_local
+
+NEO4J_URI=bolt://127.0.0.1:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=<local-password>
+NEO4J_DATABASE=neo4j
+```
+
+Passwords must remain in `.env` or an external secret manager. They must not be committed.
+
+Phase 5 also fixes numeric-looking Neo4j passwords being parsed as integers before validation.
+
+Validation command:
+
+```powershell
+uv run python -c "from multi_agentic_graph_rag.config.settings import load_settings; s=load_settings(); print('Neo4j settings OK'); print(type(s.neo4j.password.get_secret_value()).__name__)"
+```
+
+Expected output:
+
+```text
+Neo4j settings OK
+str
+```
+
+---
+
+### 6.10 Phase 5 Smoke Scripts
+
+#### Schema Smoke
+
+Script:
+
+```text
+scripts/phase5_neo4j_schema_smoke.py
+```
+
+Validates:
+
+```text
+1. Settings load correctly.
+2. Neo4j connection succeeds.
+3. Required constraints are created.
+4. SHOW CONSTRAINTS confirms required constraints exist.
+5. Script fails if any required constraint is missing.
+```
+
+Run:
+
+```powershell
+uv run python scripts\phase5_neo4j_schema_smoke.py
+```
+
+Observed successful output:
+
+```text
+PASS Neo4j schema smoke test.
+Verified constraints:
+  - Project.project_id
+  - Document.document_id
+  - DocumentVersion.document_version_id
+  - Chunk.chunk_id
+  - Fact.fact_id
+  - Requirement.requirement_id
+  - IngestionRun.run_id
+```
+
+#### Projection Smoke
+
+Script:
+
+```text
+scripts/phase5_neo4j_projection_smoke.py
+```
+
+Validates:
+
+```text
+1. Sample graph payloads are created.
+2. Projection runs once.
+3. Projection runs a second time.
+4. Stable-ID node counts remain exactly 1.
+5. Requirement -> Fact -> Chunk traceability exists.
+6. Document -> DocumentVersion -> Chunk traceability exists.
+```
+
+Run:
+
+```powershell
+uv run python scripts\phase5_neo4j_projection_smoke.py
+```
+
+Observed successful output:
+
+```text
+PASS Neo4j projection smoke test.
+Verified idempotent nodes:
+  - Project.project_id=...
+  - Document.document_id=...
+  - DocumentVersion.document_version_id=...
+  - Chunk.chunk_id=...
+  - Fact.fact_id=...
+  - Requirement.requirement_id=...
+  - IngestionRun.run_id=...
+Verified traceability:
+  - Requirement -> Fact -> Chunk
+  - Document -> DocumentVersion -> Chunk
+```
+
+---
+
+### 6.11 Verified Phase 5 Runtime Result
+
+The following Phase 5 runtime checks passed:
+
+```powershell
+uv run python scripts\phase5_neo4j_schema_smoke.py
+uv run python scripts\phase5_neo4j_projection_smoke.py
+```
+
+Confirmed:
+
+- Neo4j is reachable.
+- Required uniqueness constraints exist.
+- Projection replay is idempotent.
+- Duplicate graph nodes are not created.
+- Requirement-to-evidence traversal works.
+- Document-version-to-chunk traversal works.
+
+---
+
+### 6.12 Phase 5 Quality Gate
+
+Run the full Phase 5 validation gate:
+
+```powershell
+uv run ruff check . --fix
+uv run ruff format .
+uv run mypy src
+
+uv run marag config-check
+uv run marag db-check postgres
+
+uv run python scripts\phase5_neo4j_schema_smoke.py
+uv run python scripts\phase5_neo4j_projection_smoke.py
+```
+
+Expected final result:
+
+```text
+Success: no issues found
+PASS Neo4j schema smoke test.
+PASS Neo4j projection smoke test.
+```
+
+Phase 5 should not be tagged complete until Ruff, mypy, PostgreSQL diagnostics, and both Neo4j smoke scripts pass.
+
+---
+
+### 6.13 Phase 5 Completion Checklist
+
+Phase 5 is complete when all of the following are true:
+
+- Neo4j async client lifecycle exists.
+- Neo4j schema creation is explicit and repeatable.
+- Required uniqueness constraints exist.
+- Graph-store port exists in the application layer.
+- Neo4j implementation exists only in the infrastructure layer.
+- Cypher queries are isolated in `queries.py`.
+- Projection adapter uses deterministic stable IDs.
+- Replaying the same projection creates no duplicate nodes.
+- Requirement traceability works through:
+
+```text
+Requirement -> Fact -> Chunk
+```
+
+- Document hierarchy traceability works through:
+
+```text
+Document -> DocumentVersion -> Chunk
+```
+
+- Domain models do not import Neo4j.
+- Smoke scripts pass.
+- Ruff passes.
+- mypy passes.
+- LLM graph extraction is not introduced prematurely.
+
+Main Phase 5 success condition:
+
+```text
+The system can project canonical PostgreSQL-shaped records into Neo4j idempotently and traverse from requirements back to exact evidence chunks.
+```
+
+---
+
+### 6.14 Safe Commit Flow
+
+Recommended Git flow for Phase 5:
+
+```powershell
+git status
+
+uv run ruff check . --fix
+uv run ruff format .
+uv run mypy src
+
+uv run marag config-check
+uv run marag db-check postgres
+
+uv run python scripts\phase5_neo4j_schema_smoke.py
+uv run python scripts\phase5_neo4j_projection_smoke.py
+
+git add .
+git commit -m "Implement Phase 5 Neo4j graph foundation"
+git push origin main
+```
+
+Tag only after all Phase 5 checks pass:
+
+```powershell
+git tag -a phase-5-complete -m "Phase 5 complete"
+git push origin phase-5-complete
+```

@@ -135,14 +135,20 @@ class PostgresSettings(BaseModel):
 
 
 class Neo4jSettings(BaseModel):
-    """Neo4j configuration."""
-
     model_config = ConfigDict(extra="forbid")
 
-    uri: str | None = None
-    username: str | None = None
-    password: SecretStr | None = None
+    uri: str
+    username: str
+    password: SecretStr
     database: str = "neo4j"
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def coerce_password_to_string(cls, value: object) -> object:
+        if value is None:
+            return value
+
+        return str(value)
 
 
 class ChromaSettings(BaseModel):
@@ -236,7 +242,7 @@ class Settings(BaseModel):
     application: ApplicationSettings = Field(default_factory=ApplicationSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
-    neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
+    neo4j: Neo4jSettings = Field(default_factory=lambda: Neo4jSettings.model_validate({}))
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)

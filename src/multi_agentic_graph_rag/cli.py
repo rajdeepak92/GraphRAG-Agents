@@ -187,5 +187,11 @@ async def _db_check_postgres() -> None:
         await engine.dispose()
 
 
+@app.command("neo4j-schema")
+def neo4j_schema_command() -> None:
+    """Create or verify Neo4j constraints."""
+    # Compose settings -> driver -> ensure_neo4j_schema
+
+
 if __name__ == "__main__":
     app()
