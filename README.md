@@ -3598,3 +3598,561 @@ Tag only after all Phase 5 checks pass:
 git tag -a phase-5-complete -m "Phase 5 complete"
 git push origin phase-5-complete
 ```
+
+---
+
+## 7. Phase 6 Update — Chroma Vector Index Foundation
+
+Phase 6 adds the ChromaDB-backed vector index foundation for Agentic-GraphRAG.
+
+The goal of this phase is to index canonical PostgreSQL chunks into a rebuildable semantic retrieval store. PostgreSQL remains the canonical transactional registry. ChromaDB is used only as a projection layer for semantic chunk search.
+
+This phase establishes the vector-store port, Chroma infrastructure adapter, embedding-provider boundary, chunk-read repository, vector-indexing application service, vector CLI commands, and deterministic Phase 6 smoke validation.
+
+---
+
+### 7.1 Phase 6 Scope
+
+Phase 6 implements:
+
+- Vector domain contracts.
+- Vector-store application port.
+- Embedding-provider application port.
+- PostgreSQL chunk-read repository.
+- Chroma persistent client factory.
+- Chroma vector-store adapter.
+- Hugging Face embedding adapter boundary.
+- Vector-indexing application service.
+- CLI vector command group.
+- Chroma vector-store health check.
+- Chroma vector upsert and search path.
+- Deterministic Phase 6 smoke script.
+- Mypy-safe adapter boundaries for Chroma and embedding integrations.
+
+Out of scope for Phase 6:
+
+- Full document parsing.
+- Real document chunk generation.
+- LangGraph ingestion orchestration.
+- LLM requirement discovery.
+- Requirement reconciliation.
+- Azure OpenAI embedding execution.
+- Final requirement artifact generation.
+- Production Chroma server deployment.
+- Permanent projection-job lifecycle automation.
+- End-to-end indexing of real PostgreSQL ingestion runs.
+
+Canonical rule preserved:
+
+```text
+PostgreSQL controls completion state.
+ChromaDB is a rebuildable semantic retrieval projection.
+ChromaDB does not become the source of truth.
+```
+
+---
+
+### 7.2 Added Files
+
+Phase 6 adds vector domain contracts:
+
+```text
+src/multi_agentic_graph_rag/domain/vectors.py
+```
+
+Phase 6 adds vector and embedding application ports:
+
+```text
+src/multi_agentic_graph_rag/application/ports/vector_store.py
+```
+
+Phase 6 adds the vector-indexing application service:
+
+```text
+src/multi_agentic_graph_rag/application/services/index_chunk_vectors.py
+```
+
+Phase 6 adds the Chroma infrastructure package:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/chroma/
+├── __init__.py
+├── client.py
+└── vector_store.py
+```
+
+Phase 6 adds the embedding infrastructure package:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/embeddings/
+├── __init__.py
+└── huggingface.py
+```
+
+Phase 6 adds a deterministic Chroma smoke script:
+
+```text
+scripts/phase6_chroma_vector_smoke.py
+```
+
+Phase 6 also updates:
+
+```text
+src/multi_agentic_graph_rag/domain/__init__.py
+src/multi_agentic_graph_rag/application/ports/repositories.py
+src/multi_agentic_graph_rag/infrastructure/postgres/repositories.py
+src/multi_agentic_graph_rag/cli.py
+```
+
+---
+
+### 7.3 Vector Domain Model
+
+Phase 6 introduces `VectorRecord`.
+
+`VectorRecord` represents the vector-store projection payload for one canonical chunk.
+
+Core fields:
+
+```text
+chunk_id
+document_version_id
+normalized_text
+content_hash
+ordinal
+page_start
+page_end
+section_path
+embedding_fingerprint
+```
+
+`VectorRecord` is intentionally projection-oriented. It does not replace the canonical PostgreSQL `chunks` table.
+
+Phase 6 also introduces `VectorSearchResult`.
+
+Core fields:
+
+```text
+chunk_id
+document_version_id
+text
+distance
+metadata
+```
+
+The vector search result is used by retrieval and future discovery phases to locate semantically relevant chunks.
+
+---
+
+### 7.4 Application Ports
+
+Phase 6 adds an `EmbeddingPort`.
+
+Required behavior:
+
+```text
+fingerprint()
+embed_documents()
+embed_query()
+```
+
+This allows the application service to depend on an embedding boundary rather than a specific provider implementation.
+
+Phase 6 also adds a `VectorStorePort`.
+
+Required behavior:
+
+```text
+verify_connection()
+upsert_chunks()
+search_chunks()
+```
+
+This allows the vector-indexing service to target Chroma today and another vector backend later without changing the application service.
+
+---
+
+### 7.5 PostgreSQL Chunk Read Repository
+
+Phase 6 extends the repository layer with a chunk-read port:
+
+```text
+ChunkRepository.list_active_by_document_version()
+```
+
+This allows the vector-indexing application service to read canonical active chunks from PostgreSQL by `document_version_id`.
+
+The SQLAlchemy implementation is:
+
+```text
+SqlAlchemyChunkRepository
+```
+
+Its responsibility is limited to:
+
+```text
+Read active canonical chunks.
+Order chunks deterministically by chunk ordinal.
+Map SQLAlchemy rows to domain Chunk models.
+Return tuple[Chunk, ...].
+```
+
+This preserves the application/infrastructure boundary:
+
+```text
+application/ports/repositories.py
+    = Protocol interfaces only
+
+infrastructure/postgres/repositories.py
+    = SQLAlchemy implementations and row-to-domain mappers
+```
+
+---
+
+### 7.6 Chroma Infrastructure Adapter
+
+Phase 6 adds a persistent Chroma client factory:
+
+```text
+create_persistent_chroma_client()
+```
+
+The local Chroma path remains controlled by Phase 2 path settings:
+
+```text
+runtime/databases/chroma
+```
+
+Phase 6 adds `ChromaVectorStore`, which implements the vector-store port.
+
+Implemented behavior:
+
+```text
+Create or reuse a Chroma collection.
+Verify client and collection access.
+Upsert chunk vectors by stable chunk_id.
+Store chunk text as Chroma documents.
+Store traceability fields as Chroma metadata.
+Search chunks using query embeddings.
+Filter searches by document_version_id.
+Return typed VectorSearchResult models.
+```
+
+Chroma metadata includes:
+
+```text
+chunk_id
+document_version_id
+content_hash
+ordinal
+page_start
+page_end
+section_path
+embedding_fingerprint
+```
+
+---
+
+### 7.7 Embedding Adapter Boundary
+
+Phase 6 adds `HuggingFaceEmbeddingAdapter`.
+
+The adapter implements:
+
+```text
+fingerprint()
+embed_documents()
+embed_query()
+```
+
+The embedding fingerprint is derived from:
+
+```text
+provider
+model name
+normalization setting
+```
+
+This lets future indexing runs distinguish vector projections produced by different embedding configurations.
+
+The Hugging Face adapter is intentionally isolated behind `EmbeddingPort`.
+
+Current local-machine limitation:
+
+```text
+On the current Windows environment, sentence-transformers imports can be blocked by
+Windows Application Control through SciPy compiled .pyd files.
+```
+
+Because of that environment-specific policy, Phase 6 smoke validation uses a deterministic local smoke embedder instead of Hugging Face runtime execution.
+
+This does not invalidate the Phase 6 architecture. It only delays local Hugging Face execution until the Windows Application Control policy is resolved.
+
+---
+
+### 7.8 Vector Indexing Service
+
+Phase 6 adds:
+
+```text
+IndexChunkVectorsService
+```
+
+Its responsibility is:
+
+```text
+Read active chunks from PostgreSQL.
+Create vector projection records.
+Generate embeddings through EmbeddingPort.
+Upsert records into VectorStorePort.
+Return deterministic indexing result metadata.
+```
+
+Service input:
+
+```text
+document_version_id
+```
+
+Service output:
+
+```text
+IndexChunkVectorsResult
+```
+
+Result fields:
+
+```text
+document_version_id
+indexed_count
+embedding_fingerprint
+```
+
+This service does not create chunks. It only indexes existing canonical chunks.
+
+---
+
+### 7.9 CLI Commands
+
+Phase 6 adds the vector command group:
+
+```powershell
+uv run marag vectors --help
+```
+
+Implemented commands:
+
+```text
+check
+index-document-version
+```
+
+Vector-store check:
+
+```powershell
+uv run marag vectors check
+```
+
+Expected output:
+
+```text
+PASS Chroma vector store is ready.
+```
+
+Document-version indexing command:
+
+```powershell
+uv run marag vectors index-document-version <document-version-uuid>
+```
+
+This command is reserved for cases where PostgreSQL already contains active chunks for the supplied `document_version_id`.
+
+Current rule:
+
+```text
+Do not run index-document-version until real canonical chunks exist in PostgreSQL.
+```
+
+---
+
+### 7.10 Phase 6 Smoke Script
+
+Phase 6 adds:
+
+```text
+scripts/phase6_chroma_vector_smoke.py
+```
+
+The smoke script validates the Chroma vector path without importing Hugging Face or SciPy.
+
+It uses a deterministic local smoke embedder to validate:
+
+```text
+Chroma persistent client creation.
+Chroma collection creation.
+VectorRecord construction.
+Vector upsert.
+Vector search.
+Document-version metadata filtering.
+Top-result validation.
+```
+
+Run:
+
+```powershell
+uv run python scripts\phase6_chroma_vector_smoke.py
+```
+
+Expected output:
+
+```text
+PASS Phase 6 Chroma vector smoke test succeeded.
+Collection: knowledge_chunks_v1_phase6_smoke
+Document version: <uuid>
+Indexed chunks: 2
+Top result: CHUNK-PHASE6-SMOKE-TARGET-<suffix>
+Top result distance: <number>
+```
+
+---
+
+### 7.11 Validation Commands
+
+Phase 6 validation commands:
+
+```powershell
+uv run marag vectors check
+uv run python scripts\phase6_chroma_vector_smoke.py
+uv run ruff check src scripts
+uv run ruff format --check src scripts
+uv run mypy src
+```
+
+If optional local Hugging Face dependencies are required, use:
+
+```powershell
+uv sync --dev --extra local-llm
+```
+
+Do not use plain `uv sync` when validating local embedding execution, because it can remove optional local-LLM packages.
+
+---
+
+### 7.12 Current Phase 6 Acceptance Criteria
+
+Phase 6 is accepted when the following pass:
+
+```text
+marag vectors check
+scripts/phase6_chroma_vector_smoke.py
+ruff check src scripts
+ruff format --check src scripts
+mypy src
+```
+
+Functional acceptance:
+
+```text
+Chroma persistent storage resolves under runtime/databases/chroma.
+Chroma collection can be created or reused.
+Vector records can be upserted by chunk_id.
+Vector search returns typed VectorSearchResult records.
+document_version_id metadata filtering works.
+PostgreSQL remains the canonical source of chunks.
+Chroma remains rebuildable.
+The smoke path does not require Hugging Face runtime execution.
+```
+
+---
+
+### 7.13 Phase 6 Design Rules
+
+The following rules apply to Phase 6 and later vector-indexing work:
+
+```text
+PostgreSQL is canonical.
+Chroma is rebuildable.
+Chroma stores projection metadata, not authoritative state.
+chunk_id is the stable vector-store document ID.
+document_version_id must be preserved in vector metadata.
+embedding_fingerprint must be preserved in vector metadata.
+Application services depend on ports, not Chroma directly.
+Embedding providers are replaceable behind EmbeddingPort.
+Chroma adapters are isolated under infrastructure/chroma.
+Hugging Face adapters are isolated under infrastructure/embeddings.
+LangGraph state must not store embedding vectors.
+The LLM never writes vectors.
+The LLM never creates permanent IDs.
+```
+
+---
+
+### 7.14 Updated Current Development Baseline
+
+The repository is now a clean Phase 6 foundation when the following remain true:
+
+```text
+Configuration validation passes.
+PostgreSQL health checks pass when PostgreSQL is running.
+Neo4j schema checks pass when Neo4j is running.
+Chroma vector-store check passes.
+Deterministic Phase 6 Chroma smoke script passes.
+ChunkRepository port exists.
+SqlAlchemyChunkRepository exists.
+VectorStorePort exists.
+EmbeddingPort exists.
+VectorRecord and VectorSearchResult exist.
+IndexChunkVectorsService exists.
+marag vectors command group exists.
+Ruff lint passes.
+Ruff format check passes.
+mypy strict passes.
+Hugging Face runtime execution remains isolated from non-vector CLI commands.
+```
+
+---
+
+### 7.15 Next Planned Phase
+
+The next implementation phase is:
+
+```text
+Phase 7 — Document parsing and deterministic chunk generation
+```
+
+Primary goal:
+
+```text
+Convert source documents into canonical parsed blocks, chunk manifests, and PostgreSQL chunks that can feed both Neo4j projection and Chroma vector indexing.
+```
+
+Expected Phase 7 work:
+
+```text
+Add source document loading.
+Add parser abstraction.
+Add PDF parser using PyMuPDF.
+Add DOCX parser using python-docx.
+Add text/Markdown parser.
+Normalize extracted text.
+Preserve page and section traceability.
+Generate deterministic chunk IDs.
+Generate chunk manifests.
+Persist chunk manifests into PostgreSQL.
+Persist canonical chunks into PostgreSQL.
+Connect chunk persistence to existing Neo4j and Chroma projection foundations.
+Add parser and chunker fingerprints.
+Add smoke scripts for document parsing and chunk persistence.
+```
+
+Phase 7 must preserve these rules:
+
+```text
+Document parsing is deterministic.
+Chunk IDs are deterministic.
+PostgreSQL stores canonical chunks.
+Neo4j projects chunk relationships.
+Chroma indexes chunk text.
+Chroma and Neo4j remain rebuildable.
+The LLM is not involved in parsing or chunking.
+```
