@@ -1253,3 +1253,1336 @@ Ruff format check passes.
 mypy strict passes.
 Package build passes.
 ```
+
+---
+
+## 31. Phase 3 Completion Summary
+
+Phase 3 has been implemented and validated.
+
+Completed milestone:
+
+```text
+phase-3-complete
+```
+
+Phase 3 added the infrastructure-free domain contract layer for the Multi-Agentic GraphRAG platform.
+
+Primary objective:
+
+```text
+Define stable Pydantic domain contracts, identifier rules, document-versioning rules, evidence-trace contracts, requirement artifact contracts, and run-state transition validation before implementing PostgreSQL, Neo4j, ChromaDB, LangGraph workflow nodes, document parsing, chunking, or LLM extraction services.
+```
+
+Phase 3 converts the repository from a Phase 2 configuration foundation into a project with stable core business contracts for:
+
+- Document ingestion commands.
+- Provider override commands.
+- Project identity.
+- Logical document identity.
+- Document version identity.
+- Parsed document output.
+- Parsed text block traceability.
+- Chunk contracts.
+- Chunk manifest contracts.
+- Evidence references.
+- Fact candidates.
+- Validated facts.
+- Requirement candidates.
+- Validated requirements.
+- Discovery batches.
+- Discovery results.
+- Requirement artifacts.
+- Ingestion run lifecycle tracking.
+- Run step tracking.
+- Public traceability identifiers.
+- Temporary LLM identifiers.
+- Deterministic chunk identifiers.
+- Run state transition validation.
+- JSON Schema generation from domain models.
+
+Phase 3 is intentionally still **not** an ingestion implementation.
+
+It does not yet implement:
+
+- PostgreSQL tables.
+- Alembic migrations.
+- SQLAlchemy repositories.
+- Neo4j client writes.
+- Chroma indexing.
+- LangGraph workflow execution.
+- PDF/DOCX/TXT parsing.
+- Actual chunk creation.
+- LLM extraction.
+- Artifact writing.
+- Resume command execution.
+
+Those belong to later phases.
+
+---
+
+## 32. Phase 3 Source Modules
+
+Phase 3 added the domain package:
+
+```text
+src/multi_agentic_graph_rag/domain/
+```
+
+Added domain modules:
+
+```text
+src/multi_agentic_graph_rag/domain/__init__.py
+src/multi_agentic_graph_rag/domain/chunks.py
+src/multi_agentic_graph_rag/domain/commands.py
+src/multi_agentic_graph_rag/domain/documents.py
+src/multi_agentic_graph_rag/domain/enums.py
+src/multi_agentic_graph_rag/domain/errors.py
+src/multi_agentic_graph_rag/domain/evidence.py
+src/multi_agentic_graph_rag/domain/facts.py
+src/multi_agentic_graph_rag/domain/identifiers.py
+src/multi_agentic_graph_rag/domain/requirements.py
+src/multi_agentic_graph_rag/domain/runs.py
+```
+
+Added Phase 3 schema verification script:
+
+```text
+scripts/phase3_schema_check.py
+```
+
+Generated schema draft output directory:
+
+```text
+generated_artifacts/schema_drafts/
+```
+
+Generated schema files:
+
+```text
+generated_artifacts/schema_drafts/IngestDocumentCommand.schema.json
+generated_artifacts/schema_drafts/ParsedDocument.schema.json
+generated_artifacts/schema_drafts/ChunkManifest.schema.json
+generated_artifacts/schema_drafts/FactCandidate.schema.json
+generated_artifacts/schema_drafts/RequirementCandidate.schema.json
+generated_artifacts/schema_drafts/DiscoveryBatch.schema.json
+generated_artifacts/schema_drafts/DiscoveryResult.schema.json
+generated_artifacts/schema_drafts/RequirementArtifact.schema.json
+generated_artifacts/schema_drafts/IngestionRun.schema.json
+generated_artifacts/schema_drafts/RunStep.schema.json
+```
+
+---
+
+## 33. Phase 3 Domain Package Purpose
+
+The `domain` package defines the core business vocabulary and validation contracts for the platform.
+
+The domain package must remain infrastructure-free.
+
+It must not import:
+
+```text
+sqlalchemy
+asyncpg
+neo4j
+chromadb
+azure
+openai
+transformers
+torch
+langgraph runtime clients
+```
+
+The domain package is intentionally separate from:
+
+```text
+config/
+application/
+infrastructure/
+agents/
+interfaces/
+```
+
+Reason:
+
+```text
+Domain contracts define what the system means by project, document, version, chunk, evidence, fact, requirement, artifact, ingestion run, and run step.
+
+They are not database tables.
+They are not API request schemas.
+They are not LLM-provider-specific schemas.
+They are not workflow-node implementations.
+They are not persistence models.
+```
+
+Domain models are allowed to be Pydantic models because they act as validated business contracts.
+
+They are not placed under a generic `schemas/` directory because they represent stable business concepts, not boundary-specific request/response payloads.
+
+Boundary-specific schemas should later live closer to their boundary, for example:
+
+```text
+agents/requirement_discovery/schemas.py
+interfaces/api/schemas.py
+infrastructure/postgres/models.py
+```
+
+---
+
+## 34. Phase 3 Command Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/commands.py
+```
+
+Added command models:
+
+```text
+ProviderOverrides
+IngestDocumentCommand
+ResumeRunCommand
+RebuildProjectionCommand
+VerifyArtifactCommand
+```
+
+Responsibilities:
+
+```text
+ProviderOverrides
+  Captures optional per-command provider overrides for reasoning, embeddings, vector store, and graph store.
+
+IngestDocumentCommand
+  Represents the validated input contract for ingesting one logical document version.
+
+ResumeRunCommand
+  Represents the validated input contract for resuming an existing ingestion run.
+
+RebuildProjectionCommand
+  Represents the validated input contract for rebuilding a derived projection such as Neo4j or Chroma.
+
+VerifyArtifactCommand
+  Represents the validated input contract for verifying an emitted requirement artifact.
+```
+
+Important behavior:
+
+```text
+Command models are immutable.
+Unknown fields are rejected.
+project_key is normalized for ingestion.
+document_version is validated through shared version-normalization logic.
+Provider overrides are optional.
+Provider overrides do not replace global configuration.
+```
+
+Example ingestion command responsibility:
+
+```text
+Raw CLI/API input
+  → IngestDocumentCommand
+  → application service / future LangGraph workflow
+  → parser / chunker / persistence / projection phases
+```
+
+---
+
+## 35. Phase 3 Enum Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/enums.py
+```
+
+Added enums:
+
+```text
+ReplacePolicy
+FactType
+RequirementType
+DerivationType
+ValidationStatus
+RunStatus
+RunStepName
+```
+
+Responsibilities:
+
+```text
+ReplacePolicy
+  Controls behavior when the same logical document version already exists.
+
+FactType
+  Classifies extracted facts.
+
+RequirementType
+  Classifies final requirements.
+
+DerivationType
+  Describes whether a requirement is direct, normalized, inferred, or cross-chunk derived.
+
+ValidationStatus
+  Tracks whether a fact or requirement is candidate, validated, rejected, needs review, or conflicting.
+
+RunStatus
+  Defines allowed ingestion run lifecycle states.
+
+RunStepName
+  Defines stable workflow step names for run-step tracking.
+```
+
+Purpose:
+
+```text
+Avoid magic strings.
+Provide stable JSON-serializable values.
+Support deterministic workflow routing.
+Support PostgreSQL persistence later.
+Support Neo4j projection later.
+Support Chroma metadata later.
+Support strict validation of generated artifacts.
+Support consistent logs and diagnostics.
+```
+
+---
+
+## 36. Phase 3 Error Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/errors.py
+```
+
+Added errors:
+
+```text
+DomainError
+IdentifierError
+InvalidRunTransitionError
+```
+
+Responsibilities:
+
+```text
+DomainError
+  Base exception for domain-layer failures.
+
+IdentifierError
+  Raised when public IDs, temporary keys, versions, or deterministic identifiers are invalid.
+
+InvalidRunTransitionError
+  Raised when an ingestion run attempts to move through an illegal state transition.
+```
+
+Reason:
+
+```text
+Domain failures should have explicit domain-level exception types instead of generic exceptions spread across the codebase.
+```
+
+---
+
+## 37. Phase 3 Identifier and Versioning Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/identifiers.py
+```
+
+Added helpers:
+
+```text
+validate_public_id
+validate_temporary_key
+normalize_version
+sha256_text
+make_chunk_id
+```
+
+Identifier rules:
+
+```text
+Internal database identity uses UUIDs.
+Public traceability IDs use stable prefixes such as FACT-* and REQ-*.
+LLM outputs use temporary keys such as F1 and R1.
+The LLM does not create permanent fact IDs.
+The LLM does not create permanent requirement IDs.
+Permanent public IDs are allocated only after validation.
+Chunk IDs are deterministic.
+Document versions are normalized for comparison.
+Document versions are not forced into numeric parsing.
+```
+
+Validation behavior:
+
+```text
+validate_public_id
+  Validates public traceability IDs such as FACT-000001 and REQ-000001.
+
+validate_temporary_key
+  Validates temporary LLM-local keys such as F1 and R1.
+
+normalize_version
+  Normalizes document versions for comparison while preserving support for non-numeric versions.
+
+sha256_text
+  Produces deterministic SHA-256 text hashes.
+
+make_chunk_id
+  Produces deterministic CHUNK-* identifiers from document_version_id, ordinal, and content_hash.
+```
+
+Supported identifier split:
+
+```text
+Internal primary key
+  UUID
+
+Public traceability ID
+  FACT-000001
+  REQ-000001
+  CHUNK-<deterministic-hash>
+
+Temporary LLM-local key
+  F1
+  R1
+```
+
+This prevents the LLM from controlling permanent system identity.
+
+---
+
+## 38. Phase 3 Document Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/documents.py
+```
+
+Added models:
+
+```text
+Project
+Document
+DocumentVersion
+ParsedBlock
+ParsedDocument
+```
+
+Responsibilities:
+
+```text
+Project
+  Represents one project workspace.
+
+Document
+  Represents one logical document inside a project.
+
+DocumentVersion
+  Represents one exact version of a logical document.
+
+ParsedBlock
+  Represents one parser-produced source text block with page, section, paragraph, and character offset metadata.
+
+ParsedDocument
+  Represents the complete parsed output for one document version.
+```
+
+Traceability chain:
+
+```text
+Project
+  → Document
+    → DocumentVersion
+      → ParsedDocument
+        → ParsedBlock
+```
+
+Important rules:
+
+```text
+DocumentVersion stores supplied_version.
+DocumentVersion stores normalized_version.
+DocumentVersion stores source_checksum.
+DocumentVersion supports supersedes_document_version_id for version lineage.
+DocumentVersion supports parser_fingerprint.
+DocumentVersion supports chunker_fingerprint.
+DocumentVersion supports embedding_fingerprint.
+DocumentVersion supports prompt_fingerprint.
+ParsedBlock preserves raw_text.
+ParsedBlock preserves normalized_text.
+ParsedBlock preserves page number where applicable.
+ParsedBlock preserves section path where available.
+ParsedBlock preserves paragraph number where available.
+ParsedBlock preserves character offsets for later evidence validation.
+```
+
+The document contracts do not parse files.
+
+They define the valid shape of parsed document outputs that later parsing infrastructure must produce.
+
+---
+
+## 39. Phase 3 Chunk Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/chunks.py
+```
+
+Added models:
+
+```text
+Chunk
+ChunkManifestEntry
+ChunkManifest
+```
+
+Responsibilities:
+
+```text
+Chunk
+  Represents one final retrieval-ready, source-traceable text unit.
+
+ChunkManifestEntry
+  Represents lightweight metadata for one chunk.
+
+ChunkManifest
+  Represents the full chunk manifest for one document version.
+```
+
+Important distinction:
+
+```text
+chunks.py does not create chunks.
+chunks.py defines what a valid chunk must look like after a chunking service creates it.
+```
+
+Actual chunk creation belongs to a later parsing/chunking implementation phase.
+
+Chunk validation rules:
+
+```text
+chunk_id must not be empty.
+document_version_id is required.
+ordinal must be greater than or equal to 1.
+content_hash must be 64 characters.
+normalized_text must not be empty.
+original_text must not be empty.
+character_start must be greater than or equal to 0.
+character_end must be greater than character_start.
+page_start and page_end must be greater than or equal to 1 when present.
+page_end cannot be less than page_start.
+```
+
+Traceability chain:
+
+```text
+ParsedDocument
+  → Chunk
+    → ChunkManifest
+      → PostgreSQL canonical chunk records
+      → Neo4j chunk projection
+      → Chroma vector index
+      → EvidenceReference
+      → Fact
+      → Requirement
+      → RequirementArtifact
+```
+
+Storage intention:
+
+```text
+PostgreSQL
+  Stores canonical chunks and manifests later.
+
+Neo4j
+  Stores projected Chunk nodes and relationships later.
+
+ChromaDB
+  Stores chunk vectors and chunk metadata later.
+
+Generated artifacts
+  Refer back to chunks through source_trace later.
+```
+
+---
+
+## 40. Phase 3 Evidence Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/evidence.py
+```
+
+Added model:
+
+```text
+EvidenceReference
+```
+
+Responsibilities:
+
+```text
+Represents a verified or candidate evidence location.
+Links a fact or requirement back to a chunk.
+Stores exact quoted source text.
+Optionally stores document_version_id.
+Optionally stores character_start and character_end offsets.
+Rejects invalid character offset ranges.
+```
+
+Validation rules:
+
+```text
+chunk_id must not be empty.
+exact_quote must not be empty.
+character_start must be greater than or equal to 0 when present.
+character_end must be greater than or equal to 0 when present.
+If both offsets are present, character_end must be greater than character_start.
+```
+
+Purpose:
+
+```text
+EvidenceReference is the source-trace bridge between generated facts/requirements and exact source document text.
+```
+
+Traceability role:
+
+```text
+Requirement
+  → supporting Fact
+    → EvidenceReference
+      → Chunk
+        → DocumentVersion
+          → Document
+            → Project
+```
+
+---
+
+## 41. Phase 3 Fact Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/facts.py
+```
+
+Added models:
+
+```text
+FactCandidate
+Fact
+```
+
+Responsibilities:
+
+```text
+FactCandidate
+  Represents an untrusted candidate fact, usually produced from LLM extraction over chunks.
+
+Fact
+  Represents a validated, permanent fact with an internal UUID and public FACT-* traceability ID.
+```
+
+Important rules:
+
+```text
+FactCandidate uses temporary_fact_key such as F1.
+Fact uses permanent fact_id such as FACT-000001.
+FactCandidate defaults to ValidationStatus.CANDIDATE.
+FactCandidate requires evidence references.
+Fact requires evidence references.
+Fact IDs are validated through validate_public_id.
+Temporary fact keys are validated through validate_temporary_key.
+```
+
+Fact lifecycle:
+
+```text
+Chunk
+  → LLM or extraction service proposes fact
+  → FactCandidate
+  → evidence verification
+  → normalization and deduplication
+  → permanent ID allocation
+  → Fact
+  → PostgreSQL persistence later
+  → Neo4j projection later
+  → requirement derivation later
+```
+
+The file does not extract facts.
+
+It only defines what fact candidates and validated facts must look like.
+
+---
+
+## 42. Phase 3 Requirement Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/requirements.py
+```
+
+Added models:
+
+```text
+RequirementCandidate
+Requirement
+DiscoveryBatch
+DiscoveryResult
+RequirementArtifact
+```
+
+Responsibilities:
+
+```text
+RequirementCandidate
+  Represents an untrusted candidate requirement, usually derived from facts and source chunks.
+
+Requirement
+  Represents a validated permanent requirement with a REQ-* public traceability ID.
+
+DiscoveryBatch
+  Represents one batch of discovered fact and requirement candidates.
+
+DiscoveryResult
+  Represents the normalized result of a requirement discovery operation.
+
+RequirementArtifact
+  Represents the final emitted requirement artifact contract.
+```
+
+Important rules:
+
+```text
+RequirementCandidate uses temporary_requirement_key such as R1.
+Requirement uses permanent requirement_id such as REQ-000001.
+Requirement must include supporting facts.
+Requirement must include source evidence.
+RequirementArtifact total_requirements must match the number of requirements.
+RequirementArtifact contains traceable validated requirement records.
+```
+
+Requirement lifecycle:
+
+```text
+FactCandidate / Fact
+  → RequirementCandidate
+  → validation
+  → supporting fact verification
+  → source evidence verification
+  → permanent requirement ID allocation
+  → Requirement
+  → RequirementArtifact
+```
+
+The file does not call the LLM.
+
+It does not perform requirement discovery.
+
+It only defines valid requirement discovery and artifact contracts.
+
+---
+
+## 43. Phase 3 Run Contracts
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/runs.py
+```
+
+Added models and functions:
+
+```text
+IngestionRun
+RunStep
+validate_run_transition
+```
+
+Responsibilities:
+
+```text
+IngestionRun
+  Represents the lifecycle of one ingestion run.
+
+RunStep
+  Represents one step executed inside an ingestion run.
+
+validate_run_transition
+  Validates legal transitions between RunStatus values.
+```
+
+Run state machine purpose:
+
+```text
+Prevent an ingestion run from being marked completed before required lifecycle states have been reached.
+```
+
+Valid transition tested:
+
+```text
+requested -> validated
+```
+
+Invalid transition tested and rejected:
+
+```text
+requested -> completed
+```
+
+Observed rejection:
+
+```text
+InvalidRunTransitionError: Invalid run transition: requested -> completed
+```
+
+Reason:
+
+```text
+A run cannot jump directly from requested to completed.
+It must pass through the required lifecycle states for validation, registration, parsing, chunking, persistence, projection, indexing, requirement validation, artifact writing, and completion.
+```
+
+---
+
+## 44. Phase 3 Domain Public API
+
+Implemented in:
+
+```text
+src/multi_agentic_graph_rag/domain/__init__.py
+```
+
+Purpose:
+
+```text
+Expose a clean public API for commonly used domain contracts.
+Keep internal module layout hidden from most callers.
+Define the stable import surface of the domain package.
+```
+
+Example supported import style:
+
+```python
+from multi_agentic_graph_rag.domain import (
+    IngestDocumentCommand,
+    ReplacePolicy,
+    RunStatus,
+    validate_run_transition,
+)
+```
+
+Instead of forcing every caller to import from separate internal files:
+
+```python
+from multi_agentic_graph_rag.domain.commands import IngestDocumentCommand
+from multi_agentic_graph_rag.domain.enums import ReplacePolicy
+from multi_agentic_graph_rag.domain.enums import RunStatus
+from multi_agentic_graph_rag.domain.runs import validate_run_transition
+```
+
+Important rule:
+
+```text
+__init__.py exports selected stable contracts.
+It should not become a dumping ground for every internal helper.
+```
+
+---
+
+## 45. Phase 3 Schema Generation Script
+
+Implemented in:
+
+```text
+scripts/phase3_schema_check.py
+```
+
+Purpose:
+
+```text
+Verify that selected Phase 3 Pydantic domain models can generate JSON Schema.
+```
+
+The script generates schema drafts under:
+
+```text
+generated_artifacts/schema_drafts/
+```
+
+Models validated by the script:
+
+```text
+IngestDocumentCommand
+ParsedDocument
+ChunkManifest
+FactCandidate
+RequirementCandidate
+DiscoveryBatch
+DiscoveryResult
+RequirementArtifact
+IngestionRun
+RunStep
+```
+
+Command:
+
+```powershell
+uv run python scripts\phase3_schema_check.py
+```
+
+Observed output:
+
+```text
+PASS IngestDocumentCommand -> generated_artifacts\schema_drafts\IngestDocumentCommand.schema.json
+PASS ParsedDocument -> generated_artifacts\schema_drafts\ParsedDocument.schema.json
+PASS ChunkManifest -> generated_artifacts\schema_drafts\ChunkManifest.schema.json
+PASS FactCandidate -> generated_artifacts\schema_drafts\FactCandidate.schema.json
+PASS RequirementCandidate -> generated_artifacts\schema_drafts\RequirementCandidate.schema.json
+PASS DiscoveryBatch -> generated_artifacts\schema_drafts\DiscoveryBatch.schema.json
+PASS DiscoveryResult -> generated_artifacts\schema_drafts\DiscoveryResult.schema.json
+PASS RequirementArtifact -> generated_artifacts\schema_drafts\RequirementArtifact.schema.json
+PASS IngestionRun -> generated_artifacts\schema_drafts\IngestionRun.schema.json
+PASS RunStep -> generated_artifacts\schema_drafts\RunStep.schema.json
+```
+
+Meaning:
+
+```text
+All selected Phase 3 Pydantic domain contracts can generate JSON Schema successfully.
+```
+
+Why this matters:
+
+```text
+The generated JSON Schema files can later support:
+- LLM structured output validation.
+- Artifact validation.
+- API contract documentation.
+- Regression tests.
+- Contract drift detection.
+```
+
+---
+
+## 46. Phase 3 Validation Commands
+
+Phase 3 type checking command:
+
+```powershell
+uv run mypy src
+```
+
+Observed result:
+
+```text
+Success: no issues found in 20 source files
+```
+
+Phase 3 schema generation command:
+
+```powershell
+uv run python scripts\phase3_schema_check.py
+```
+
+Observed result:
+
+```text
+All selected schema generation checks passed.
+```
+
+Phase 3 Ruff format check:
+
+```powershell
+uv run ruff format --check src scripts
+```
+
+Observed result:
+
+```text
+21 files already formatted
+```
+
+Phase 3 Ruff lint check:
+
+```powershell
+uv run ruff check src scripts
+```
+
+Observed result:
+
+```text
+All checks passed!
+```
+
+Valid run transition command:
+
+```powershell
+uv run python -c "from multi_agentic_graph_rag.domain.enums import RunStatus; from multi_agentic_graph_rag.domain.runs import validate_run_transition; validate_run_transition(RunStatus.REQUESTED, RunStatus.VALIDATED); print('valid transition PASS')"
+```
+
+Observed result:
+
+```text
+valid transition PASS
+```
+
+Invalid run transition command:
+
+```powershell
+uv run python -c "from multi_agentic_graph_rag.domain.enums import RunStatus; from multi_agentic_graph_rag.domain.runs import validate_run_transition; validate_run_transition(RunStatus.REQUESTED, RunStatus.COMPLETED)"
+```
+
+Observed result:
+
+```text
+multi_agentic_graph_rag.domain.errors.InvalidRunTransitionError: Invalid run transition: requested -> completed
+```
+
+The invalid-transition failure is expected and correct.
+
+---
+
+## 47. Phase 3 Quality Gate Snapshot
+
+Current Phase 3 validation status:
+
+```text
+mypy src
+  PASS
+
+phase3_schema_check.py
+  PASS
+
+ruff format --check src scripts
+  PASS
+
+ruff check src scripts
+  PASS
+
+valid run transition check
+  PASS
+
+invalid run transition rejection
+  PASS
+```
+
+Phase 3 acceptance conditions satisfied:
+
+```text
+Domain contracts exist.
+Domain contracts are immutable where required.
+Unknown fields are rejected by Pydantic models.
+Identifier helpers exist.
+Temporary LLM keys are validated.
+Public traceability IDs are validated.
+Document versions are normalized.
+Chunk IDs are deterministic.
+Evidence offsets are validated.
+Chunk ranges are validated.
+Requirement artifact totals are validated.
+Run transitions are validated.
+JSON Schema generation succeeds.
+Domain layer remains infrastructure-free.
+```
+
+---
+
+## 48. Phase 3 Cleanup Note
+
+During Phase 3 staging, accidental duplicate files were detected under:
+
+```text
+.src/
+```
+
+The real source folder is:
+
+```text
+src/
+```
+
+The accidental folder must not be committed.
+
+Temporary file also detected:
+
+```text
+test.md
+```
+
+Cleanup commands:
+
+```powershell
+git restore --staged .src
+Remove-Item -Recurse -Force .src
+
+git restore --staged test.md
+Remove-Item -Force test.md
+```
+
+After cleanup, verify:
+
+```powershell
+git status
+```
+
+The status must not include:
+
+```text
+.src/
+test.md
+```
+
+Only valid Phase 3 paths should remain staged:
+
+```text
+src/multi_agentic_graph_rag/domain/
+scripts/phase3_schema_check.py
+generated_artifacts/schema_drafts/
+README.md
+```
+
+---
+
+## 49. Phase 3 Commit and Tag Commands
+
+After cleanup and final validation, stage Phase 3 files:
+
+```powershell
+git add src\multi_agentic_graph_rag\domain scripts\phase3_schema_check.py generated_artifacts\schema_drafts README.md
+```
+
+Commit:
+
+```powershell
+git commit -m "feat: add phase 3 domain contracts"
+```
+
+Create milestone tag:
+
+```powershell
+git tag phase-3-complete
+```
+
+Push commit:
+
+```powershell
+git push origin main
+```
+
+Push tag:
+
+```powershell
+git push origin phase-3-complete
+```
+
+Verify final state:
+
+```powershell
+git status
+git tag --list "phase-*"
+```
+
+Expected final working tree:
+
+```text
+nothing to commit, working tree clean
+```
+
+Expected milestone tags include:
+
+```text
+phase-2-complete
+phase-3-complete
+```
+
+---
+
+## 50. Updated Implementation Scope After Phase 3
+
+Implemented through Phase 3:
+
+- Python 3.12 project pinning.
+- `uv`-managed installable Python package.
+- `src/` package layout.
+- Hatchling build backend.
+- Version loading through `importlib.metadata`.
+- Typer/Rich CLI.
+- `marag version`.
+- `marag config-check`.
+- `marag doctor`.
+- Central validated configuration model.
+- Config precedence model.
+- Provider enum validation.
+- Runtime path bootstrap.
+- Cache environment redirection.
+- Secret masking in diagnostics.
+- `.env.example`.
+- `config.json`.
+- `.gitignore`.
+- Ruff, mypy, and pre-commit hooks.
+- Local runtime placeholder directories with `.gitkeep`.
+- Infrastructure-free domain package.
+- Command contracts.
+- Document contracts.
+- Chunk contracts.
+- Evidence contracts.
+- Fact contracts.
+- Requirement contracts.
+- Ingestion run contracts.
+- Run step contracts.
+- Domain enums.
+- Domain exceptions.
+- Identifier validation helpers.
+- Version normalization helpers.
+- Deterministic chunk ID helper.
+- Run transition validation.
+- JSON Schema generation script.
+- Generated schema drafts.
+
+Still not implemented:
+
+- PostgreSQL schema.
+- SQLAlchemy ORM models.
+- Alembic migration environment.
+- PostgreSQL repositories.
+- Neo4j client and projections.
+- Chroma adapter and embedding indexing.
+- LangGraph ingestion workflow.
+- Document parsing implementation.
+- Chunk creation implementation.
+- LLM requirement discovery implementation.
+- Evidence quote verification implementation.
+- Requirement reconciliation implementation.
+- Artifact writer implementation.
+- Resume/reconciliation CLI commands.
+
+---
+
+## 51. Updated Current Validation Snapshot
+
+The implementation through Phase 3 has passed:
+
+```text
+uv run ruff check src scripts
+uv run ruff format --check src scripts
+uv run mypy src
+uv run python scripts\phase3_schema_check.py
+```
+
+Observed successful outputs include:
+
+```text
+All checks passed!
+21 files already formatted
+Success: no issues found in 20 source files
+PASS IngestDocumentCommand
+PASS ParsedDocument
+PASS ChunkManifest
+PASS FactCandidate
+PASS RequirementCandidate
+PASS DiscoveryBatch
+PASS DiscoveryResult
+PASS RequirementArtifact
+PASS IngestionRun
+PASS RunStep
+```
+
+Run transition validation has also been checked:
+
+```text
+requested -> validated
+  PASS
+
+requested -> completed
+  correctly rejected
+```
+
+---
+
+## 52. Updated Current Development Baseline
+
+The repository is now a clean Phase 3 foundation when the following remain true:
+
+```text
+Configuration validation passes.
+Runtime paths resolve under the project root.
+Secrets remain outside Git.
+Provider values are explicit enums.
+Domain code remains infrastructure-free.
+Domain models generate JSON Schema.
+Invalid run transitions are rejected.
+Ruff lint passes.
+Ruff format check passes.
+mypy strict passes.
+No accidental .src/ duplicate folder exists.
+No temporary test.md file is staged.
+Phase 3 commit exists.
+phase-3-complete tag exists.
+```
+
+---
+
+## 53. Next Planned Phase
+
+The next implementation phase is:
+
+```text
+Phase 4 — PostgreSQL canonical registry and migrations
+```
+
+Primary goal:
+
+```text
+Implement the canonical transactional persistence layer for projects, documents, document versions, ingestion runs, run steps, chunks, chunk manifests, facts, requirements, evidence, artifacts, and projection status.
+```
+
+Expected Phase 4 work:
+
+```text
+Add SQLAlchemy models.
+Add Alembic migration environment.
+Create initial PostgreSQL schema.
+Create canonical repository interfaces and implementations.
+Persist projects.
+Persist documents.
+Persist document versions.
+Persist ingestion runs.
+Persist run steps.
+Persist chunk manifests.
+Persist chunks.
+Prepare fact tables.
+Prepare requirement tables.
+Prepare evidence tables.
+Prepare artifact registry tables.
+Prepare projection status tracking.
+Add database health checks.
+Add idempotent upsert behavior where needed.
+Keep PostgreSQL as the completion-state source of truth.
+```
+
+Phase 4 must preserve these rules:
+
+```text
+PostgreSQL is canonical.
+Neo4j is a rebuildable relationship projection.
+ChromaDB is a rebuildable semantic retrieval projection.
+Generated artifacts are filesystem outputs registered back in PostgreSQL.
+The LLM never writes to databases.
+The LLM never creates permanent IDs.
+Domain code remains infrastructure-free.
+```
