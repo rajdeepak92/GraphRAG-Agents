@@ -2586,3 +2586,551 @@ The LLM never writes to databases.
 The LLM never creates permanent IDs.
 Domain code remains infrastructure-free.
 ```
+
+## 5. Phase 4 Update — PostgreSQL Control Plane
+
+Phase 4 adds the PostgreSQL-backed control plane for Agentic-GraphRAG. The goal of this phase is to make PostgreSQL the canonical transactional registry for document ingestion state, document-version safety, workflow runs, run steps, schema health, and Phase 4 database diagnostics.
+
+This phase intentionally stays PostgreSQL-only. It does not implement Neo4j projection, Chroma indexing, LangGraph workflow nodes, PDF parsing, LLM extraction, requirement discovery, embedding generation, or final artifact writing.
+
+---
+
+### 5.1 Phase 4 Scope
+
+Phase 4 focuses on durable control-plane state.
+
+Implemented scope:
+
+- Alembic-managed PostgreSQL schema baseline.
+- PostgreSQL ORM models for Phase 4 tables.
+- PostgreSQL async engine/session setup.
+- Application repository ports.
+- SQLAlchemy repository implementations.
+- PostgreSQL Unit of Work.
+- Document-version safety gate.
+- Run lifecycle transition enforcement using existing domain validation.
+- PostgreSQL health-check module.
+- CLI database diagnostic command.
+- Phase 4 smoke-test scripts.
+- Ruff and mypy validation for the Phase 4 code path.
+
+Out of scope for Phase 4:
+
+- Neo4j graph projection.
+- Chroma vector indexing.
+- LangGraph workflow orchestration.
+- PDF parsing.
+- Chunk extraction from real documents.
+- LLM requirement discovery.
+- Azure/OpenAI calls.
+- Hugging Face inference.
+- Final JSON artifact writing.
+
+Canonical rule preserved:
+
+```text
+PostgreSQL controls completion state.
+Neo4j, ChromaDB, and generated artifacts are projections registered back in PostgreSQL.
+```
+
+---
+
+### 5.2 PostgreSQL Schema Baseline
+
+Phase 4 adds an Alembic baseline migration for the PostgreSQL control plane.
+
+Migration file:
+
+```text
+migrations/versions/95d3d37e4060_phase_4_postgres_control_plane_baseline.py
+```
+
+Alembic revision:
+
+```text
+95d3d37e4060
+```
+
+Expected database state:
+
+```text
+18 Phase 4 application tables + alembic_version
+```
+
+Phase 4 application tables:
+
+```text
+projects
+documents
+document_versions
+source_files
+ingestion_runs
+run_steps
+chunk_manifests
+chunks
+discovery_runs
+discovery_batches
+facts
+fact_evidence
+requirements
+requirement_fact_links
+requirement_relations
+artifacts
+projection_jobs
+outbox_events
+```
+
+The schema uses named constraints and indexes. Alembic is the source of truth for database schema changes; `metadata.create_all()` is not used for production schema creation.
+
+---
+
+### 5.3 PostgreSQL ORM Models
+
+Phase 4 adds PostgreSQL ORM models under:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/postgres/models.py
+```
+
+The models define the Phase 4 control-plane entities, including:
+
+- Project rows.
+- Logical document rows.
+- Document version rows.
+- Source file rows.
+- Ingestion run rows.
+- Run step rows.
+- Chunk manifest rows.
+- Chunk rows.
+- Discovery run rows.
+- Discovery batch rows.
+- Fact rows.
+- Fact evidence rows.
+- Requirement rows.
+- Requirement fact links.
+- Requirement relation rows.
+- Artifact rows.
+- Projection job rows.
+- Outbox event rows.
+
+The schema separates internal database UUID primary keys from stable public identifiers such as `run_id`, `fact_id`, and `requirement_id`.
+
+---
+
+### 5.4 PostgreSQL Session Layer
+
+Phase 4 adds async PostgreSQL session infrastructure under:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/postgres/session.py
+```
+
+Responsibilities:
+
+- Create the SQLAlchemy async engine.
+- Create the async session factory.
+- Keep PostgreSQL infrastructure isolated from the domain layer.
+- Support repository and Unit of Work usage.
+
+The PostgreSQL DSN continues to be loaded from project configuration and environment settings.
+
+---
+
+### 5.5 Repository Ports and SQLAlchemy Implementations
+
+Phase 4 separates repository contracts from database implementation.
+
+Application repository ports:
+
+```text
+src/multi_agentic_graph_rag/application/ports/repositories.py
+```
+
+Infrastructure implementations:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/postgres/repositories.py
+```
+
+Implemented PostgreSQL repositories:
+
+- `SqlAlchemyProjectRepository`
+- `SqlAlchemyDocumentRepository`
+- `SqlAlchemyDocumentVersionRepository`
+- `SqlAlchemyIngestionRunRepository`
+- `SqlAlchemyRunStepRepository`
+
+Repository behavior added:
+
+- Get/create project by `project_key`.
+- Get/create logical document by `project_id` and `logical_document_name`.
+- Lock document row with `SELECT ... FOR UPDATE`.
+- Get/create document version by document and supplied version.
+- Create ingestion runs.
+- Query ingestion runs by `run_id`.
+- Query latest open ingestion run for a document version.
+- Transition ingestion run status using domain validation.
+- Create run steps.
+
+SQLAlchemy remains inside the infrastructure layer. Domain and application layers do not depend on SQLAlchemy session objects or ORM row types.
+
+---
+
+### 5.6 PostgreSQL Unit of Work
+
+Phase 4 adds:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/postgres/unit_of_work.py
+```
+
+The Unit of Work owns transaction boundaries and wires all PostgreSQL repositories to the same `AsyncSession`.
+
+Unit of Work responsibilities:
+
+- Open one database session.
+- Attach repositories to that session.
+- Commit only after the workflow succeeds.
+- Roll back on failure.
+- Close the session safely.
+
+The Unit of Work coordinates this transactional flow:
+
+```text
+get/create project
+get/create document
+lock document row
+get/create document version
+create ingestion run
+create run step
+commit or rollback
+```
+
+This prevents partial state from being persisted when a workflow step fails.
+
+---
+
+### 5.7 Document-Version Safety
+
+Phase 4 implements document-version safety under:
+
+```text
+src/multi_agentic_graph_rag/application/services/document_version_safety.py
+```
+
+Implemented rules:
+
+- Same project + document + supplied version + checksum reuses or resumes the existing run.
+- Same project + document + supplied version + different checksum is rejected by default.
+- Document row locking uses PostgreSQL `SELECT ... FOR UPDATE`.
+- An ingestion run is created only after the document-version safety checks pass.
+- A `register_run` run step is created transactionally.
+- The Unit of Work commits only after the safety workflow succeeds.
+
+Document lock behavior:
+
+```text
+select(DocumentRow)
+    .where(DocumentRow.document_id == document_id)
+    .with_for_update()
+```
+
+Validated behavior:
+
+```text
+FIRST: created_new_document_version RUN-20260628192910-503E1581
+SECOND: resumed_existing_open_run RUN-20260628192910-503E1581
+CONFLICT: rejected different checksum as expected
+PASS Phase 4 document-version safety smoke test
+```
+
+This confirms that unsafe checksum conflicts are rejected instead of silently overwriting or corrupting version history.
+
+---
+
+### 5.8 Replacement Lineage Status
+
+The current Phase 4 schema has this uniqueness rule:
+
+```text
+UNIQUE(document_id, supplied_version)
+```
+
+Because of that, full replacement lineage for the same logical document version is intentionally deferred.
+
+Current behavior:
+
+- Same version and same checksum: reuse/resume.
+- Same version and different checksum: reject.
+- Replacement request: must not silently overwrite existing version history.
+
+Future replacement-lineage support should use a schema strategy such as:
+
+```text
+is_current boolean
+partial unique index on (document_id, supplied_version) where is_current = true
+supersedes_document_version_id lineage tracking
+```
+
+Until that schema exists, rejecting conflicting checksums is the safe behavior.
+
+---
+
+### 5.9 PostgreSQL Health Check
+
+Phase 4 adds:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/postgres/health.py
+```
+
+The health check verifies:
+
+- PostgreSQL connection.
+- Alembic revision.
+- Required Phase 4 tables.
+- Required unique constraints or unique indexes.
+- Read/write transaction behavior.
+- Rollback behavior.
+
+Minimum checks implemented:
+
+```text
+SELECT 1
+SELECT version_num FROM alembic_version
+information_schema.tables validation
+pg_catalog constraint/index validation
+temporary insert inside a transaction
+rollback
+verify temporary row does not exist
+```
+
+Expected CLI output:
+
+```text
+PostgreSQL: PASS - connection OK
+Alembic: PASS - required revision present
+Tables: PASS - 18 required tables present
+Constraints: PASS - required unique constraints/indexes present
+Transaction rollback: PASS - rollback OK
+```
+
+---
+
+### 5.10 CLI Database Diagnostics
+
+Phase 4 extends the CLI with PostgreSQL health diagnostics.
+
+Command:
+
+```powershell
+uv run marag db-check postgres
+```
+
+Expected deterministic output shape:
+
+```text
+PostgreSQL: PASS - connection OK
+Alembic: PASS - required revision present
+Tables: PASS - 18 required tables present
+Constraints: PASS - required unique constraints/indexes present
+Transaction rollback: PASS - rollback OK
+```
+
+The CLI command validates that PostgreSQL is ready to support the Phase 4 control-plane workflow.
+
+---
+
+### 5.11 Phase 4 Smoke Scripts
+
+Phase 4 adds PostgreSQL-only smoke validation scripts.
+
+Document-version safety smoke script:
+
+```text
+scripts/phase4_document_version_safety_smoke.py
+```
+
+Run:
+
+```powershell
+uv run python scripts/phase4_document_version_safety_smoke.py
+```
+
+Expected output:
+
+```text
+FIRST: created_new_document_version RUN-...
+SECOND: resumed_existing_open_run RUN-...
+CONFLICT: rejected different checksum as expected
+PASS Phase 4 document-version safety smoke test
+```
+
+PostgreSQL control-plane smoke script:
+
+```text
+scripts/phase4_postgres_smoke.py
+```
+
+Run:
+
+```powershell
+uv run python scripts/phase4_postgres_smoke.py
+```
+
+Expected output:
+
+```text
+PASS Phase 4 PostgreSQL smoke test: RUN-SMOKE-...
+```
+
+The smoke scripts are intentionally independent of:
+
+- Neo4j
+- Chroma
+- LangGraph
+- LLM providers
+- filesystem artifact generation
+- PDF parsing
+
+---
+
+### 5.12 Verified Phase 4 Checks
+
+Confirmed during Phase 4 implementation:
+
+```text
+Ruff lint: passed
+mypy strict type check: passed
+document-version safety smoke test: passed
+PostgreSQL connection check: passed
+Alembic revision check: passed
+required table check: passed
+transaction rollback check: passed
+```
+
+Confirmed document-version safety output:
+
+```text
+FIRST: created_new_document_version RUN-20260628192910-503E1581
+SECOND: resumed_existing_open_run RUN-20260628192910-503E1581
+CONFLICT: rejected different checksum as expected
+PASS Phase 4 document-version safety smoke test
+```
+
+A commit-time pre-commit gate also validated:
+
+```text
+Ruff lint: passed
+mypy strict type check: passed
+```
+
+If Ruff format check reports files that would be reformatted, run:
+
+```powershell
+uv run ruff format .
+```
+
+Then re-run:
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+```
+
+---
+
+### 5.13 Phase 4 Verification Gate
+
+Run the full Phase 4 verification gate in this order:
+
+```powershell
+uv sync --dev
+
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+
+uv run marag config-check
+uv run alembic upgrade head
+uv run marag db-check postgres
+uv run python scripts/phase3_schema_check.py
+uv run python scripts/phase4_document_version_safety_smoke.py
+uv run python scripts/phase4_postgres_smoke.py
+```
+
+Manual PostgreSQL inspection:
+
+```powershell
+$rawDsn = $env:POSTGRES_DSN
+
+if (-not $rawDsn) {
+    $envLine = Get-Content .env | Where-Object { $_ -match '^POSTGRES_DSN=' } | Select-Object -First 1
+    $rawDsn = ($envLine -replace '^POSTGRES_DSN=', '').Trim('"').Trim("'")
+}
+
+$psqlDsn = $rawDsn -replace '^postgresql\+asyncpg://', 'postgresql://'
+$psqlDsn = $psqlDsn -replace 'ssl=disable', 'sslmode=disable'
+
+psql $psqlDsn -c "\dt"
+```
+
+Expected database table count:
+
+```text
+18 application tables + alembic_version
+```
+
+---
+
+### 5.14 Phase 4 Completion Checklist
+
+Phase 4 is complete when all of the following are true:
+
+- Alembic migrations exist and `alembic upgrade head` works.
+- PostgreSQL schema contains all 18 Phase 4 application tables.
+- Required uniqueness rules are enforced through constraints or unique indexes.
+- SQLAlchemy ORM models define the Phase 4 control-plane tables.
+- Repository ports exist in the application layer.
+- SQLAlchemy repository implementations exist in the infrastructure layer.
+- SQLAlchemy does not leak into domain models.
+- PostgreSQL Unit of Work owns commit and rollback.
+- Document-version conflict policy is enforced.
+- Run transition policy uses existing domain validation.
+- `marag db-check postgres` passes.
+- Phase 4 smoke scripts pass.
+- No Neo4j, Chroma, LangGraph, PDF parsing, LLM, or artifact-writing dependency is required.
+
+Main Phase 4 success condition:
+
+```text
+The system can create, query, validate, and transition a document version and ingestion run using PostgreSQL only.
+```
+
+---
+
+### 5.15 Safe Commit Flow
+
+Recommended Git flow for Phase 4:
+
+```powershell
+git status
+
+uv run ruff format .
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+
+git add .
+git commit -m "Implement Phase 4 PostgreSQL control plane"
+git push -u origin phase-4-postgres-control-plane
+```
+
+Because `main` is protected, Phase 4 should be merged through a merge request instead of direct push to `main`.
+
+Recommended merge request branch:
+
+```text
+phase-4-postgres-control-plane
+```
