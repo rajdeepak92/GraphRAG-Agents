@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
@@ -17,6 +18,13 @@ from multi_agentic_graph_rag.config.providers import (
     VectorStoreProvider,
 )
 from multi_agentic_graph_rag.config.settings import load_settings
+from multi_agentic_graph_rag.infrastructure.postgres.health import (
+    format_postgres_health_report,
+    run_postgres_health_check,
+)
+from multi_agentic_graph_rag.infrastructure.postgres.session import (
+    create_postgres_engine,
+)
 
 from . import __version__
 from .bootstrap import CheckResult, CheckStatus, configuration_checks, doctor_checks
@@ -27,6 +35,8 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+db_check_app = typer.Typer(help="Database health checks.")
+app.add_typer(db_check_app, name="db-check")
 
 console = Console()
 
@@ -152,6 +162,29 @@ def doctor_command() -> None:
         title="MARAG Environment Doctor",
         results=doctor_checks(),
     )
+
+
+@db_check_app.command("postgres")
+def db_check_postgres() -> None:
+    """Run PostgreSQL Phase 4 health checks."""
+    asyncio.run(_db_check_postgres())
+
+
+async def _db_check_postgres() -> None:
+    settings = load_settings()
+    engine = create_postgres_engine(settings)
+
+    try:
+        report = await run_postgres_health_check(engine)
+
+        for line in format_postgres_health_report(report):
+            typer.echo(line)
+
+        if not report.passed:
+            raise typer.Exit(code=1)
+
+    finally:
+        await engine.dispose()
 
 
 if __name__ == "__main__":
