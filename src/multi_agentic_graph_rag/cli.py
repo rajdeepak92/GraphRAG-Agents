@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -18,6 +18,8 @@ from multi_agentic_graph_rag.config.providers import (
     VectorStoreProvider,
 )
 from multi_agentic_graph_rag.config.settings import load_settings
+from multi_agentic_graph_rag.infrastructure.neo4j.client import neo4j_driver_scope
+from multi_agentic_graph_rag.infrastructure.neo4j.schema import ensure_neo4j_schema
 from multi_agentic_graph_rag.infrastructure.postgres.health import (
     format_postgres_health_report,
     run_postgres_health_check,
@@ -187,10 +189,32 @@ async def _db_check_postgres() -> None:
         await engine.dispose()
 
 
+def _secret_value(value: Any) -> str:
+    if hasattr(value, "get_secret_value"):
+        return str(value.get_secret_value())
+    return str(value)
+
+
 @app.command("neo4j-schema")
 def neo4j_schema_command() -> None:
     """Create or verify Neo4j constraints."""
-    # Compose settings -> driver -> ensure_neo4j_schema
+    asyncio.run(_neo4j_schema())
+
+
+async def _neo4j_schema() -> None:
+    settings = load_settings()
+    neo4j_settings = settings.neo4j
+
+    async with neo4j_driver_scope(
+        uri=str(neo4j_settings.uri),
+        username=str(neo4j_settings.username),
+        password=_secret_value(neo4j_settings.password),
+        database=str(neo4j_settings.database),
+    ) as driver:
+        await driver.verify_connectivity()
+        await ensure_neo4j_schema(driver, database=str(neo4j_settings.database))
+
+    typer.echo("PASS Neo4j schema constraints are ready.")
 
 
 if __name__ == "__main__":

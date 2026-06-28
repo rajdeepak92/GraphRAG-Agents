@@ -126,3 +126,65 @@ MATCH (req:Requirement {requirement_id: $requirement_id})
 MATCH (f:Fact {fact_id: $fact_id})
 MERGE (req)-[:SUPPORTED_BY]->(f)
 """
+
+PROJECT_DOCUMENT_VERSION_LINEAGE = """
+MATCH (current:DocumentVersion {document_version_id: $document_version_id})
+MATCH (previous:DocumentVersion {document_version_id: $supersedes_document_version_id})
+MERGE (current)-[:SUPERSEDES]->(previous)
+"""
+
+PROJECT_REQUIREMENT_CONFLICT = """
+MATCH (source:Requirement {requirement_id: $source_requirement_id})
+MATCH (target:Requirement {requirement_id: $target_requirement_id})
+MERGE (source)-[rel:CONFLICTS_WITH]->(target)
+ON CREATE SET
+    rel.created_at = datetime()
+ON MATCH SET
+    rel.updated_at = datetime()
+SET
+    rel.relation_source = $relation_source,
+    rel.run_id = $run_id,
+    rel.reason = $reason
+"""
+
+PROJECT_REQUIREMENT_DUPLICATE = """
+MATCH (source:Requirement {requirement_id: $source_requirement_id})
+MATCH (target:Requirement {requirement_id: $target_requirement_id})
+MERGE (source)-[rel:DUPLICATES]->(target)
+ON CREATE SET
+    rel.created_at = datetime()
+ON MATCH SET
+    rel.updated_at = datetime()
+SET
+    rel.relation_source = $relation_source,
+    rel.run_id = $run_id,
+    rel.reason = $reason
+"""
+
+PROJECT_REQUIREMENT_SUPERSEDES = """
+MATCH (source:Requirement {requirement_id: $source_requirement_id})
+MATCH (target:Requirement {requirement_id: $target_requirement_id})
+MERGE (source)-[rel:SUPERSEDES]->(target)
+ON CREATE SET
+    rel.created_at = datetime()
+ON MATCH SET
+    rel.updated_at = datetime()
+SET
+    rel.relation_source = $relation_source,
+    rel.run_id = $run_id,
+    rel.reason = $reason
+"""
+
+PROJECT_FACT_CONFLICT = """
+MATCH (source:Fact {fact_id: $source_fact_id})
+MATCH (target:Fact {fact_id: $target_fact_id})
+MERGE (source)-[rel:CONFLICTS_WITH]->(target)
+ON CREATE SET
+    rel.created_at = datetime()
+ON MATCH SET
+    rel.updated_at = datetime()
+SET
+    rel.relation_source = $relation_source,
+    rel.run_id = $run_id,
+    rel.reason = $reason
+"""
