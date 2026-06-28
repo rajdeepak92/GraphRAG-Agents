@@ -1,0 +1,72 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Development-tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+coverage.xml
+htmlcov/
+
+# Python package build outputs
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.code-workspace
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Disposable application caches
+.global_cache/*
+!.global_cache/.gitkeep
+
+# Source-document inbox
+documents/inbox/*
+!documents/inbox/.gitkeep
+
+# Generated artifacts
+generated_artifacts/*
+!generated_artifacts/.gitkeep
+
+# Chroma local database
+runtime/databases/chroma/*
+!runtime/databases/chroma/.gitkeep
+
+# Runtime staging files
+runtime/staging/*
+!runtime/staging/.gitkeep
+
+# Runtime locks
+runtime/locks/*
+!runtime/locks/.gitkeep
+
+# Runtime logs
+runtime/logs/*
+!runtime/logs/.gitkeep
+
+# Generic logs
+*.log
