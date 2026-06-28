@@ -4156,3 +4156,251 @@ Chroma indexes chunk text.
 Chroma and Neo4j remain rebuildable.
 The LLM is not involved in parsing or chunking.
 ```
+## Phase 7 Summary
+
+Phase 7 added the first executable LangGraph ingestion workflow skeleton.
+
+This phase does **not** implement real document ingestion yet. Its purpose is to prove the orchestration structure before adding parsing, persistence, vector indexing, graph projection, LLM discovery, reconciliation, and artifact generation in later phases.
+
+Completed work:
+
+- Added the `application.workflows` package.
+- Added the `application.workflows.ingestion` package.
+- Added serializable LangGraph ingestion state.
+- Added checkpoint-safe `IngestionState`.
+- Added Phase 7 placeholder ingestion nodes.
+- Added structured logging for every workflow node.
+- Added deterministic node execution order.
+- Added LangGraph graph construction.
+- Added in-memory checkpoint support.
+- Added PostgreSQL checkpoint support wiring.
+- Added ingestion skeleton runner.
+- Added `marag ingest` CLI command.
+- Added dry-run execution mode.
+- Added JSON output mode.
+- Added resumable run argument support.
+- Added checkpoint mode selection:
+  - `memory`
+  - `postgres`
+- Added PostgreSQL checkpointer setup option.
+- Fixed LangGraph edge construction using `itertools.pairwise()`.
+- Fixed Ruff import-order and line-length issues.
+- Fixed Ruff formatting hook issues.
+- Fixed strict mypy issues for:
+  - TypedDict state updates.
+  - LangGraph `ainvoke()` return casting.
+- Verified the graph executes from the first node to the final node.
+- Verified the final state reaches `complete_run`.
+- Verified warnings and errors are preserved in workflow state.
+- Verified Phase 7 dry-run has no real ingestion side effects.
+
+Phase 7 workflow nodes:
+
+```text
+validate_command
+bootstrap_runtime
+check_dependencies
+register_run
+resolve_version_lineage
+parse_document
+chunk_document
+persist_manifest
+persist_source_records
+project_chunk_graph
+index_chunk_vectors
+create_discovery_run
+discover_requirements
+reconcile_requirements
+persist_requirements
+project_requirement_graph
+write_artifact
+verify_outputs
+complete_run
+```
+
+Phase 7 added this ingestion command:
+
+```powershell
+uv run marag ingest `
+  --project PROJECT_1 `
+  --document ".\documents\inbox\PROJECT_1\requirements.pdf" `
+  --version "1.0" `
+  --dry-run `
+  --json-output
+```
+
+Successful Phase 7 dry-run result:
+
+```json
+{
+  "command": {
+    "project_key": "PROJECT_1",
+    "document_path": "documents\\inbox\\PROJECT_1\\requirements.pdf",
+    "document_version": "1.0",
+    "logical_document_name": null,
+    "provider_overrides": {
+      "reasoning_provider": null,
+      "embedding_provider": null,
+      "vector_store_provider": null,
+      "graph_store_provider": null
+    },
+    "replace_policy": "reject",
+    "dry_run": true
+  },
+  "run_id": "<generated-run-id>",
+  "chunk_ids": [],
+  "batch_ids": [],
+  "current_step": "complete_run",
+  "warnings": [],
+  "errors": []
+}
+```
+
+Phase 7 validation commands:
+
+```powershell
+uv run ruff format .
+uv run ruff check . --fix
+uv run ruff check .
+uv run mypy src
+uv run marag version
+uv run marag config-check
+uv run marag doctor
+uv run marag ingest `
+  --project PROJECT_1 `
+  --document ".\documents\inbox\PROJECT_1\requirements.pdf" `
+  --version "1.0" `
+  --dry-run `
+  --json-output
+```
+
+Validated results:
+
+```text
+ruff format: PASS
+ruff check: PASS
+mypy: PASS
+marag version: PASS
+marag config-check: PASS
+marag doctor: PASS
+marag ingest --dry-run --json-output: PASS
+```
+
+Phase 7 implementation files:
+
+```text
+src/multi_agentic_graph_rag/application/workflows/__init__.py
+src/multi_agentic_graph_rag/application/workflows/ingestion/__init__.py
+src/multi_agentic_graph_rag/application/workflows/ingestion/state.py
+src/multi_agentic_graph_rag/application/workflows/ingestion/graph.py
+src/multi_agentic_graph_rag/application/workflows/ingestion/runner.py
+src/multi_agentic_graph_rag/application/workflows/ingestion/nodes/__init__.py
+src/multi_agentic_graph_rag/application/workflows/ingestion/nodes/placeholders.py
+src/multi_agentic_graph_rag/cli.py
+```
+
+Phase 7 state model:
+
+```text
+IngestionState
+```
+
+The state intentionally stores only small, serializable workflow data:
+
+- Command payload.
+- Run ID.
+- Project ID.
+- Document ID.
+- Document version ID.
+- Source checksum.
+- Manifest ID.
+- Chunk IDs.
+- Discovery run ID.
+- Batch IDs.
+- Artifact ID.
+- Current step.
+- Warnings.
+- Errors.
+
+The state must not store:
+
+- PostgreSQL sessions.
+- Neo4j drivers.
+- Chroma clients.
+- Model instances.
+- Full document bytes.
+- Full parsed document text.
+- Embedding vectors.
+- Large persisted records.
+
+Phase 7 architectural rule:
+
+```text
+LangGraph state stores identifiers and workflow status only.
+Real records belong in PostgreSQL, Neo4j, ChromaDB, and generated artifacts.
+```
+
+Current Phase 7 scope:
+
+```text
+Implemented:
+- CLI-to-graph execution
+- Serializable state passing
+- Placeholder node execution
+- Structured node logging
+- In-memory checkpoint execution
+- PostgreSQL checkpoint wiring
+- Dry-run JSON output
+
+Not implemented yet:
+- Real source file registration
+- Real version lineage enforcement
+- Real document parsing
+- Real chunking
+- Real PostgreSQL persistence
+- Real Neo4j projection
+- Real Chroma indexing
+- Real LLM requirement discovery
+- Real requirement reconciliation
+- Real artifact writing
+- Real output verification
+```
+
+Important note for Windows development:
+
+PostgreSQL checkpoint mode uses Psycopg async support. On Windows, Psycopg async checkpointing requires the Selector event loop policy instead of the default Proactor event loop.
+
+Required CLI boundary behavior:
+
+```python
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+```
+
+This must be configured before `asyncio.run(...)`.
+
+Phase 7 completion criteria:
+
+```text
+The ingestion graph must compile.
+The CLI must invoke the graph.
+Every placeholder node must execute in order.
+Structured logs must show the execution path.
+The final state must reach current_step = "complete_run".
+The final state must contain errors = [].
+Ruff format must pass.
+Ruff check must pass.
+mypy must pass.
+```
+
+Phase 7 successful final state:
+
+```text
+current_step = complete_run
+warnings = []
+errors = []
+```
+
+Phase 7 is the orchestration foundation for the remaining ingestion phases.
+
+Later phases will replace placeholder nodes with real behavior while preserving the same graph shape and state contract.
