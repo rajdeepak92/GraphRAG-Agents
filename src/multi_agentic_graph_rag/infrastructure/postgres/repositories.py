@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import desc, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from multi_agentic_graph_rag.domain.documents import Document, DocumentVersion, Project
@@ -14,6 +15,9 @@ from multi_agentic_graph_rag.domain.runs import (
     IngestionRun,
     RunStep,
     validate_run_transition,
+)
+from multi_agentic_graph_rag.infrastructure.postgres.errors import (
+    translate_postgres_error,
 )
 from multi_agentic_graph_rag.infrastructure.postgres.models import (
     DocumentRow,
@@ -112,9 +116,13 @@ class SqlAlchemyProjectRepository:
             project_key=project_key,
             name=name,
         )
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+
+        try:
+            self._session.add(row)
+            await self._session.flush()
+            await self._session.refresh(row)
+        except SQLAlchemyError as exc:
+            raise translate_postgres_error(exc) from exc
 
         return _project_from_row(row)
 
@@ -152,9 +160,13 @@ class SqlAlchemyDocumentRepository:
             project_id=project_id,
             logical_document_name=logical_document_name,
         )
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+
+        try:
+            self._session.add(row)
+            await self._session.flush()
+            await self._session.refresh(row)
+        except SQLAlchemyError as exc:
+            raise translate_postgres_error(exc) from exc
 
         return _document_from_row(row)
 
@@ -205,9 +217,13 @@ class SqlAlchemyDocumentVersionRepository:
             prompt_fingerprint=version.prompt_fingerprint,
             created_at=version.created_at,
         )
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+
+        try:
+            self._session.add(row)
+            await self._session.flush()
+            await self._session.refresh(row)
+        except SQLAlchemyError as exc:
+            raise translate_postgres_error(exc) from exc
 
         return _document_version_from_row(row)
 
@@ -231,9 +247,13 @@ class SqlAlchemyIngestionRunRepository:
             error_code=None,
             error_message=None,
         )
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+
+        try:
+            self._session.add(row)
+            await self._session.flush()
+            await self._session.refresh(row)
+        except SQLAlchemyError as exc:
+            raise translate_postgres_error(exc) from exc
 
         return _ingestion_run_from_row(row)
 
@@ -310,8 +330,12 @@ class SqlAlchemyRunStepRepository:
             error_code=step.error_code,
             error_message=step.error_message,
         )
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+
+        try:
+            self._session.add(row)
+            await self._session.flush()
+            await self._session.refresh(row)
+        except SQLAlchemyError as exc:
+            raise translate_postgres_error(exc) from exc
 
         return _run_step_from_row(row)
