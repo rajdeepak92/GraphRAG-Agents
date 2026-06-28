@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import typer
@@ -13,6 +15,9 @@ from rich.console import Console
 from rich.table import Table
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from multi_agentic_graph_rag.application.workflows.ingestion.runner import (
+    run_ingestion_skeleton,
+)
 from multi_agentic_graph_rag.config.providers import (
     EmbeddingProvider,
     GraphStoreProvider,
@@ -20,6 +25,11 @@ from multi_agentic_graph_rag.config.providers import (
     VectorStoreProvider,
 )
 from multi_agentic_graph_rag.config.settings import load_settings
+from multi_agentic_graph_rag.domain.commands import (
+    IngestDocumentCommand,
+    ProviderOverrides,
+)
+from multi_agentic_graph_rag.domain.enums import ReplacePolicy
 from multi_agentic_graph_rag.infrastructure.neo4j.client import neo4j_driver_scope
 from multi_agentic_graph_rag.infrastructure.neo4j.schema import ensure_neo4j_schema
 from multi_agentic_graph_rag.infrastructure.postgres.health import (
@@ -311,6 +321,101 @@ async def _vector_index_document_version(document_version_id: UUID) -> None:
 
     finally:
         await engine.dispose()
+
+
+@app.command("ingest")
+def ingest_command(
+    project: Annotated[
+        str,
+        typer.Option("--project", help="Project key, for example PROJECT_1."),
+    ],
+    document: Annotated[
+        Path,
+        typer.Option("--document", help="Path to the document to ingest."),
+    ],
+    version: Annotated[
+        str,
+        typer.Option("--version", help="Logical document version, for example 1.0."),
+    ],
+    logical_name: Annotated[
+        str | None,
+        typer.Option("--logical-name", help="Stable logical document name."),
+    ] = None,
+    reasoning_provider: Annotated[
+        ReasoningLLMProvider | None,
+        typer.Option("--reasoning-provider", help="Override reasoning provider."),
+    ] = None,
+    embedding_provider: Annotated[
+        EmbeddingProvider | None,
+        typer.Option("--embedding-provider", help="Override embedding provider."),
+    ] = None,
+    replace_version: Annotated[
+        bool,
+        typer.Option("--replace-version", help="Explicitly replace same document/version."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Run orchestration skeleton without real ingestion side effects.",
+        ),
+    ] = False,
+    resume_run: Annotated[
+        str | None,
+        typer.Option("--resume-run", help="Resume/checkpoint thread id."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json-output", help="Print final graph state as JSON."),
+    ] = False,
+    checkpoint: Annotated[
+        Literal["memory", "postgres"],
+        typer.Option("--checkpoint", help="Checkpoint backend for Phase 7 skeleton."),
+    ] = "memory",
+    setup_checkpointer: Annotated[
+        bool,
+        typer.Option(
+            "--setup-checkpointer",
+            help="Create LangGraph checkpoint tables. Use once for postgres mode.",
+        ),
+    ] = False,
+) -> None:
+    """Run the Phase 7 LangGraph ingestion skeleton."""
+
+    command = IngestDocumentCommand(
+        project_key=project,
+        document_path=document,
+        document_version=version,
+        logical_document_name=logical_name,
+        provider_overrides=ProviderOverrides(
+            reasoning_provider=reasoning_provider.value if reasoning_provider else None,
+            embedding_provider=embedding_provider.value if embedding_provider else None,
+        ),
+        replace_policy=(ReplacePolicy.REPLACE_VERSION if replace_version else ReplacePolicy.REJECT),
+        dry_run=dry_run,
+    )
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    final_state = asyncio.run(
+        run_ingestion_skeleton(
+            command=command,
+            resume_run=resume_run,
+            checkpoint_mode=checkpoint,
+            setup_checkpointer=setup_checkpointer,
+        )
+    )
+
+    if json_output:
+        console.print_json(json.dumps(final_state, indent=2, default=str))
+        return
+
+    console.print(
+        "[green]PASS[/green] ingestion skeleton completed "
+        f"run_id={final_state.get('run_id')} "
+        f"current_step={final_state.get('current_step')}"
+    )
 
 
 if __name__ == "__main__":
