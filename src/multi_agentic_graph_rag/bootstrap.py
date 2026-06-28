@@ -5,11 +5,15 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+
+from multi_agentic_graph_rag.config.paths import create_directories, set_cache_environment
+from multi_agentic_graph_rag.config.settings import SettingsError, load_settings
 
 from . import DISTRIBUTION_NAME
 
@@ -62,87 +66,36 @@ def _is_git_ignored(root: Path, relative_path: str) -> bool:
     return completed.returncode == 0
 
 
-def configuration_checks() -> tuple[CheckResult, ...]:
-    """Validate the Phase 1 repository configuration."""
+def configuration_checks(
+    *,
+    config_path: Path | None = None,
+    overrides: Mapping[str, Any] | None = None,
+) -> tuple[CheckResult, ...]:
+    """Validate Phase 2 configuration and runtime paths."""
 
-    root = find_project_root()
-
-    if root is None:
+    try:
+        settings = load_settings(config_path=config_path, overrides=overrides)
+    except SettingsError as exc:
         return (
             CheckResult(
-                name="Project root",
+                name="Settings",
                 status="FAIL",
-                detail="No pyproject.toml was found.",
+                detail=str(exc),
             ),
         )
 
-    results: list[CheckResult] = [
+    create_directories(settings.paths.approved_runtime_directories())
+    create_directories(tuple(settings.paths.cache_environment().values()))
+    set_cache_environment(settings.paths.cache_environment())
+
+    return tuple(
         CheckResult(
-            name="Project root",
-            status="PASS",
-            detail=str(root),
-        ),
-    ]
-
-    required_files = (
-        ".python-version",
-        ".env.example",
-        ".gitignore",
-        ".pre-commit-config.yaml",
-        "README.md",
-        "pyproject.toml",
-        "uv.lock",
-        "src/multi_agentic_graph_rag/__init__.py",
-        "src/multi_agentic_graph_rag/bootstrap.py",
-        "src/multi_agentic_graph_rag/cli.py",
-    )
-
-    for relative_path in required_files:
-        exists = (root / relative_path).is_file()
-
-        results.append(
-            CheckResult(
-                name=relative_path,
-                status="PASS" if exists else "FAIL",
-                detail="Present" if exists else "Missing",
-            ),
+            name=check.name,
+            status=check.status,
+            detail=check.detail,
         )
-
-    python_pin_path = root / ".python-version"
-    python_pin = (
-        python_pin_path.read_text(encoding="utf-8").strip() if python_pin_path.is_file() else ""
+        for check in settings.diagnostics()
     )
-    python_pin_valid = python_pin == "3.12" or python_pin.startswith("3.12.")
-
-    results.append(
-        CheckResult(
-            name="Python pin",
-            status="PASS" if python_pin_valid else "FAIL",
-            detail=python_pin or "Missing",
-        ),
-    )
-
-    env_is_ignored = _is_git_ignored(root, ".env")
-
-    results.append(
-        CheckResult(
-            name=".env ignore rule",
-            status="PASS" if env_is_ignored else "FAIL",
-            detail=(".env is ignored by Git." if env_is_ignored else ".env is not ignored by Git."),
-        ),
-    )
-
-    git_repository_exists = (root / ".git").is_dir()
-
-    results.append(
-        CheckResult(
-            name="Git repository",
-            status="PASS" if git_repository_exists else "FAIL",
-            detail=(str(root / ".git") if git_repository_exists else ".git directory is missing."),
-        ),
-    )
-
-    return tuple(results)
 
 
 def doctor_checks() -> tuple[CheckResult, ...]:

@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+from multi_agentic_graph_rag.config.providers import (
+    EmbeddingProvider,
+    GraphStoreProvider,
+    ReasoningLLMProvider,
+    VectorStoreProvider,
+)
+from multi_agentic_graph_rag.config.settings import load_settings
 
 from . import __version__
 from .bootstrap import CheckResult, CheckStatus, configuration_checks, doctor_checks
@@ -70,12 +80,67 @@ def version_command() -> None:
 
 
 @app.command("config-check")
-def config_check_command() -> None:
-    """Validate the Phase 1 repository configuration."""
+def config_check_command(
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", help="Path to config.json override."),
+    ] = None,
+    project_root: Annotated[
+        Path | None,
+        typer.Option("--project-root", help="Override resolved project root."),
+    ] = None,
+    reasoning_provider: Annotated[
+        ReasoningLLMProvider | None,
+        typer.Option("--reasoning-provider", help="Override reasoning LLM provider."),
+    ] = None,
+    embedding_provider: Annotated[
+        EmbeddingProvider | None,
+        typer.Option("--embedding-provider", help="Override embedding provider."),
+    ] = None,
+    vector_store_provider: Annotated[
+        VectorStoreProvider | None,
+        typer.Option("--vector-store-provider", help="Override vector store provider."),
+    ] = None,
+    graph_store_provider: Annotated[
+        GraphStoreProvider | None,
+        typer.Option("--graph-store-provider", help="Override graph store provider."),
+    ] = None,
+) -> None:
+    """Validate Phase 2 configuration and create approved runtime directories."""
+
+    overrides: dict[str, object] = {}
+
+    if project_root is not None:
+        overrides.setdefault("paths", {})
+        assert isinstance(overrides["paths"], dict)
+        overrides["paths"]["project_root"] = project_root
+
+    if reasoning_provider is not None:
+        overrides.setdefault("requirement_discovery", {})
+        assert isinstance(overrides["requirement_discovery"], dict)
+        overrides["requirement_discovery"]["reasoning_provider"] = reasoning_provider.value
+
+    if embedding_provider is not None:
+        overrides.setdefault("embedding", {})
+        assert isinstance(overrides["embedding"], dict)
+        overrides["embedding"]["provider"] = embedding_provider.value
+
+    if vector_store_provider is not None:
+        overrides.setdefault("providers", {})
+        assert isinstance(overrides["providers"], dict)
+        overrides["providers"]["vector_store_provider"] = vector_store_provider.value
+
+    if graph_store_provider is not None:
+        overrides.setdefault("providers", {})
+        assert isinstance(overrides["providers"], dict)
+        overrides["providers"]["graph_store_provider"] = graph_store_provider.value
+
+    # Force-load once so enum/provider errors are raised before rendering.
+    load_settings(config_path=config, overrides=overrides)
 
     _execute_checks(
         title="MARAG Configuration Check",
-        results=configuration_checks(),
+        results=configuration_checks(config_path=config, overrides=overrides),
     )
 
 

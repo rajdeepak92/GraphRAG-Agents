@@ -1,0 +1,41 @@
+{
+  "application": {
+    "app_env": "development",
+    "log_level": "INFO"
+  },
+  "paths": {
+    "global_cache_dir": ".global_cache",
+    "documents_inbox_dir": "documents/inbox",
+    "generated_artifacts_dir": "generated_artifacts",
+    "chroma_persist_dir": "runtime/databases/chroma",
+    "runtime_staging_dir": "runtime/staging",
+    "runtime_logs_dir": "runtime/logs",
+    "runtime_locks_dir": "runtime/locks"
+  },
+  "providers": {
+    "vector_store_provider": "chroma_local",
+    "graph_store_provider": "neo4j_local"
+  },
+  "embedding": {
+    "provider": "huggingface",
+    "normalize": true
+  },
+  "requirement_discovery": {
+    "reasoning_provider": "azure_openai",
+    "max_correction_retries": 2,
+    "temperature": 0.0
+  },
+  "chunking": {
+    "chunk_size": 1200,
+    "chunk_overlap": 150,
+    "minimum_chunk_size": 200,
+    "maximum_chunk_size": 2000,
+    "preserve_page_boundaries": true,
+    "preserve_heading_context": true
+  },
+  "observability": {
+    "structured_logging": true,
+    "log_full_prompts": false,
+    "log_full_documents": false
+  }
+}
