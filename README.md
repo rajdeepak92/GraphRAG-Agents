@@ -4404,3 +4404,626 @@ errors = []
 Phase 7 is the orchestration foundation for the remaining ingestion phases.
 
 Later phases will replace placeholder nodes with real behavior while preserving the same graph shape and state contract.
+
+## Phase 8 — Document Parsing, Chunking, and Manifest Generation
+
+### Summary
+
+Phase 8 implemented the document-processing layer for the Agentic GraphRAG pipeline.
+
+This phase converts supported source documents into parsed blocks, normalizes extracted text, generates deterministic chunks, and builds a validated chunk manifest before any PostgreSQL persistence, Neo4j projection, Chroma indexing, embedding generation, or LLM extraction.
+
+The implementation is intentionally scoped to parsing, chunking, manifest generation, and local verification only.
+
+---
+
+### Phase 8 Scope Completed So Far
+
+Completed Phase 8 work:
+
+- Added document parser infrastructure.
+- Added shared normalization and hashing utilities.
+- Added parser registry for file-extension-based parser selection.
+- Added PDF parser support.
+- Added DOCX parser support.
+- Added TXT parser support.
+- Added Markdown parser support.
+- Added structure-aware chunking.
+- Added deterministic chunk ID generation.
+- Added chunk manifest builder service.
+- Updated domain contracts for parsed documents, parsed blocks, chunks, and manifests.
+- Added a direct Phase 8 verification script.
+- Verified PDF parsing and chunk manifest generation locally.
+
+Phase 8 does not yet perform:
+
+- PostgreSQL chunk persistence.
+- Neo4j graph projection.
+- Chroma vector indexing.
+- Embedding generation.
+- LLM requirement extraction.
+- Production LangGraph ingestion wiring.
+
+Those are intentionally deferred to later phases.
+
+---
+
+### Files Added / Updated
+
+Document infrastructure added under:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/
+├── __init__.py
+├── base.py
+├── normalization.py
+├── parser_registry.py
+├── pdf_parser.py
+├── docx_parser.py
+├── text_parser.py
+├── markdown_parser.py
+└── chunker.py
+```
+
+Application service added:
+
+```text
+src/multi_agentic_graph_rag/application/services/manifest_builder.py
+```
+
+Verification script added:
+
+```text
+scripts/phase8_parse_manifest_check.py
+```
+
+Domain contracts updated:
+
+```text
+src/multi_agentic_graph_rag/domain/documents.py
+src/multi_agentic_graph_rag/domain/chunks.py
+```
+
+---
+
+### Domain Contracts Updated
+
+Phase 8 updated the domain layer with parser and chunking contracts.
+
+Document parsing contracts:
+
+```text
+ParsedBlock
+ParsedDocument
+```
+
+Chunking and manifest contracts:
+
+```text
+Chunk
+ChunkManifestEntry
+ChunkManifest
+```
+
+The domain contracts now support source-traceable document processing metadata, including:
+
+- Source path.
+- Source checksum.
+- Parser name.
+- Parser version.
+- Parser fingerprint.
+- Page number.
+- Section path.
+- Paragraph number.
+- Character start offset.
+- Character end offset.
+- Raw extracted text.
+- Normalized text.
+- Chunk ordinal.
+- Chunk content hash.
+- Deterministic chunk ID.
+- Chunker fingerprint.
+- Manifest schema version.
+
+The domain layer remains infrastructure-free and does not import SQLAlchemy, Neo4j, Chroma, Azure, Transformers, PyMuPDF, python-docx parser logic, database sessions, or embedding models.
+
+---
+
+### Parser Interface
+
+Added parser protocol:
+
+```text
+DocumentParser
+```
+
+Location:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/base.py
+```
+
+Required parser contract:
+
+```text
+parser_name: str
+parser_version: str
+supported_extensions: frozenset[str]
+parse(path) -> ParsedDocument
+```
+
+Purpose:
+
+- Provide one common parser interface.
+- Allow PDF, DOCX, TXT, and Markdown parsers to behave consistently.
+- Keep parser implementation details outside the application workflow.
+- Allow `ParserRegistry` to dispatch by file extension.
+
+---
+
+### Parser Registry
+
+Added:
+
+```text
+ParserRegistry
+```
+
+Location:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/parser_registry.py
+```
+
+Responsibilities:
+
+- Register supported document parsers.
+- Select parser based on file extension.
+- Parse supported documents through a common interface.
+- Reject unsupported file types before persistence, projection, indexing, or LLM processing.
+
+Supported file types:
+
+| Extension | Parser |
+|---|---|
+| `.pdf` | PyMuPDF parser |
+| `.docx` | python-docx parser |
+| `.txt` | plain text parser |
+| `.md` | Markdown parser |
+| `.markdown` | Markdown parser |
+
+---
+
+### Normalization and Hashing
+
+Added normalization utilities:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/normalization.py
+```
+
+Implemented functions:
+
+```text
+sha256_file(path)
+sha256_text(text)
+normalize_text(text)
+```
+
+Purpose:
+
+- Generate source file checksums.
+- Generate deterministic text hashes.
+- Normalize parser output before chunking.
+- Stabilize text across different document formats and operating-system line endings.
+- Preserve paragraph boundaries while removing extraction noise.
+
+Normalization behavior:
+
+- Unicode normalization.
+- Windows and Unix line-ending normalization.
+- Repeated horizontal whitespace cleanup.
+- Excess blank-line cleanup.
+- Leading/trailing whitespace removal.
+
+---
+
+### PDF Parser
+
+Added PDF parser:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/pdf_parser.py
+```
+
+Responsibilities:
+
+- Parse `.pdf` files.
+- Extract page-level text blocks.
+- Preserve page numbers.
+- Preserve character offsets.
+- Preserve parser metadata.
+- Preserve PDF block metadata such as bounding box and block number.
+- Reject encrypted PDFs before downstream processing.
+- Return validated `ParsedDocument`.
+
+---
+
+### DOCX Parser
+
+Added DOCX parser:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/docx_parser.py
+```
+
+Responsibilities:
+
+- Parse `.docx` files.
+- Extract paragraph text.
+- Detect heading styles.
+- Preserve section path from heading hierarchy.
+- Preserve paragraph numbers.
+- Preserve character offsets.
+- Return validated `ParsedDocument`.
+
+---
+
+### TXT Parser
+
+Added text parser:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/text_parser.py
+```
+
+Responsibilities:
+
+- Parse `.txt` files.
+- Decode source text.
+- Split text into paragraph-like parsed blocks.
+- Preserve character offsets.
+- Normalize extracted text.
+- Return validated `ParsedDocument`.
+
+---
+
+### Markdown Parser
+
+Added Markdown parser:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/markdown_parser.py
+```
+
+Responsibilities:
+
+- Parse `.md` and `.markdown` files.
+- Detect Markdown headings.
+- Preserve heading hierarchy as section path.
+- Preserve paragraph numbers.
+- Preserve character offsets.
+- Normalize extracted text.
+- Return validated `ParsedDocument`.
+
+---
+
+### Chunking
+
+Added chunking implementation:
+
+```text
+src/multi_agentic_graph_rag/infrastructure/documents/chunker.py
+```
+
+Core classes:
+
+```text
+ChunkingConfig
+StructureAwareChunker
+```
+
+Default chunking behavior:
+
+- Preserves page boundaries when available.
+- Preserves section path / heading context.
+- Uses normalized text for chunking and hashing.
+- Keeps raw text for evidence verification.
+- Splits oversized blocks with recursive character splitting.
+- Generates deterministic chunk IDs.
+- Generates contiguous chunk ordinals starting from `1`.
+
+Default chunk configuration:
+
+```text
+chunk_size = 1200
+chunk_overlap = 150
+minimum_chunk_size = 100
+maximum_chunk_size = 1800
+preserve_page_boundaries = True
+preserve_heading_context = True
+length_strategy = "characters"
+```
+
+---
+
+### Deterministic Chunk IDs
+
+Chunk IDs follow this format:
+
+```text
+CHUNK-000001-<hash>
+CHUNK-000002-<hash>
+CHUNK-000003-<hash>
+```
+
+Chunk ID generation uses:
+
+```text
+document_version_id
+chunk ordinal
+chunk content hash
+```
+
+Purpose:
+
+- Stable reprocessing.
+- Idempotent persistence in later phases.
+- Safe retry.
+- Rebuildable vector indexes.
+- Graph projection reconciliation.
+- Evidence-level traceability.
+
+---
+
+### Manifest Builder
+
+Added manifest builder service:
+
+```text
+src/multi_agentic_graph_rag/application/services/manifest_builder.py
+```
+
+Function:
+
+```text
+build_chunk_manifest(...)
+```
+
+Responsibilities:
+
+- Accept canonical `document_version_id`.
+- Accept parser output as `ParsedDocument`.
+- Accept `ChunkingConfig`.
+- Run `StructureAwareChunker`.
+- Build a validated `ChunkManifest`.
+- Bind chunks to source checksum.
+- Bind chunks to document version.
+- Attach parser fingerprint.
+- Attach chunker fingerprint.
+- Avoid random manifest IDs during deterministic Phase 8 verification.
+
+Important design decision:
+
+```text
+Parser output does not own document_version_id.
+document_version_id is supplied by the workflow / document-version control plane.
+```
+
+---
+
+### Verification Script
+
+Added direct verification script:
+
+```text
+scripts/phase8_parse_manifest_check.py
+```
+
+Purpose:
+
+- Verify Phase 8 without requiring full LangGraph ingestion.
+- Verify Phase 8 without PostgreSQL, Neo4j, Chroma, embeddings, or LLM calls.
+- Exercise parser registry, parser implementation, chunker, and manifest builder together.
+
+Usage:
+
+```powershell
+uv run python scripts\phase8_parse_manifest_check.py documents\inbox\PROJECT_1\v1.pdf
+```
+
+The script performs:
+
+1. Accepts a document path.
+2. Selects the correct parser through `ParserRegistry`.
+3. Parses the document into `ParsedDocument`.
+4. Builds a `ChunkManifest`.
+5. Emits JSON verification output.
+6. Prints parser metadata.
+7. Prints source checksum.
+8. Prints total parsed blocks.
+9. Prints total generated chunks.
+10. Prints deterministic chunk IDs.
+
+---
+
+### Local PDF Verification Performed
+
+Verified with:
+
+```text
+documents\inbox\PROJECT_1\v1.pdf
+```
+
+Observed output:
+
+```text
+parser_name: pymupdf
+parser_version: 1.27.2.3
+source_checksum: 1113bb979583d5f03d7eb17741783dc2075a3493807072c894b3be29a2c18f3c
+total_blocks: 413
+total_chunks: 63
+manifest_schema_version: 1.0
+```
+
+Generated chunk ID range:
+
+```text
+CHUNK-000001-15ba9ff9a37fbdae
+...
+CHUNK-000063-5fdfb0e00a48ca74
+```
+
+This confirms:
+
+- PDF parser works.
+- Parser registry works.
+- Source checksum generation works.
+- Parsed block extraction works.
+- Text normalization works.
+- Chunker works.
+- Deterministic chunk IDs are generated.
+- Manifest builder works.
+- Phase 8 verification script runs successfully.
+
+---
+
+### Validation Commands Run
+
+Ruff lint fix:
+
+```powershell
+uv run ruff check --fix src scripts
+```
+
+Ruff format:
+
+```powershell
+uv run ruff format src scripts
+```
+
+Compile check:
+
+```powershell
+uv run python -m compileall src scripts
+```
+
+Mypy check:
+
+```powershell
+uv run mypy src
+```
+
+Phase 8 PDF verification:
+
+```powershell
+uv run python scripts\phase8_parse_manifest_check.py documents\inbox\PROJECT_1\v1.pdf
+```
+
+---
+
+### Current Validation Status
+
+Confirmed working:
+
+```text
+ruff check --fix executed
+ruff format executed
+compileall executed successfully
+PDF parse-manifest verification executed successfully
+```
+
+Remaining cleanup observed before final Phase 8 commit:
+
+```text
+1. Ruff import sorting cleanup in parser_registry.py.
+2. mypy compatibility cleanup in PostgreSQL repository hydration.
+```
+
+The remaining mypy errors are caused by mismatch between the updated Phase 8 `Chunk` domain contract and existing PostgreSQL `ChunkRow` hydration fields.
+
+Known mismatch:
+
+```text
+Domain Chunk expects:
+  ordinal
+  source_checksum
+  content_hash
+
+Existing ChunkRow currently exposes:
+  chunk_content_hash
+  no ordinal
+  no source_checksum
+```
+
+This is a compatibility cleanup issue, not a Phase 8 parser/chunker runtime failure.
+
+---
+
+### Phase 8 Result So Far
+
+Phase 8 is functionally implemented and locally verified for PDF parsing, parsed block extraction, deterministic chunk generation, and chunk manifest preview generation.
+
+The current implementation successfully performs:
+
+```text
+source PDF
+  ↓
+ParserRegistry
+  ↓
+PdfParser
+  ↓
+ParsedDocument
+  ↓
+StructureAwareChunker
+  ↓
+ChunkManifest
+  ↓
+JSON verification output
+```
+
+Phase 8 is ready for final code-quality cleanup and commit once Ruff and mypy gates pass.
+
+---
+
+### Phase 8 Boundary Maintained
+
+LangGraph production wiring was not added in strict Phase 8.
+
+Reason:
+
+```text
+Phase 8 = parsing + chunking + manifest generation + deterministic verification
+Phase 9 = persistence + projection + indexing + ingestion orchestration
+```
+
+This keeps Phase 8 focused, independently testable, and free from premature coupling to PostgreSQL, Neo4j, Chroma, embeddings, or LLM extraction.
+
+---
+
+### Next Immediate Cleanup
+
+Before final Phase 8 commit:
+
+```powershell
+uv run ruff check --fix src scripts
+uv run ruff format src scripts
+uv run ruff check src scripts
+uv run ruff format --check src scripts
+uv run python -m compileall src scripts
+uv run mypy src
+```
+
+Then re-run:
+
+```powershell
+uv run python scripts\phase8_parse_manifest_check.py documents\inbox\PROJECT_1\v1.pdf
+```
+
+After all checks pass:
+
+```powershell
+git add .
+git commit -m "Phase 8"
+git push origin phase-8-parsing-chunking-manifest
+```
