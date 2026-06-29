@@ -29,3 +29,6 @@ class IngestionState(TypedDict, total=False):
     current_step: str
     warnings: list[str]
     errors: list[str]
+    parsed_document_path: str | None
+    manifest_path: str | None
+    manifest_checksum: str | None

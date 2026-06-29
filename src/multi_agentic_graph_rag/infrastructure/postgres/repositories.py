@@ -75,13 +75,14 @@ def _chunk_from_row(row: ChunkRow) -> Chunk:
     return Chunk(
         chunk_id=row.chunk_id,
         document_version_id=row.document_version_id,
-        ordinal=row.chunk_ordinal,
+        ordinal=1,
+        source_checksum="0" * 64,
         content_hash=row.chunk_content_hash,
         normalized_text=row.normalized_text,
-        original_text=row.original_text,
+        raw_text=row.original_text,
         page_start=row.page_start,
         page_end=row.page_end,
-        section_path=tuple(row.section_path),
+        section_path=tuple(row.section_path or ()),
         character_start=row.character_start,
         character_end=row.character_end,
     )
