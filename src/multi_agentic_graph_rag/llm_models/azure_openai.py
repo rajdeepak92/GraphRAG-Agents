@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from importlib import import_module
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
 from multi_agentic_graph_rag.config.settings import AzureOpenAISettings
+from multi_agentic_graph_rag.llm_models.json_output import parse_json_object
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -45,7 +45,7 @@ class AzureOpenAIReasoningModel:
             temperature=0,
         )
         content = response.choices[0].message.content or "{}"
-        return schema.model_validate(json.loads(content))
+        return schema.model_validate(parse_json_object(content))
 
 
 class AzureOpenAIEmbeddingModel:

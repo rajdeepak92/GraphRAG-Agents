@@ -18,7 +18,7 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_embedding_model,
     create_reasoning_model,
 )
-from multi_agentic_graph_rag.observability.logging import RunLogger
+from multi_agentic_graph_rag.observability.session import RunSession, command_session
 from multi_agentic_graph_rag.services.artifacts import write_requirement_artifact
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
@@ -41,32 +41,58 @@ class IngestionState(TypedDict, total=False):
     errors: list[str]
 
 
-def build_ingestion_graph() -> Any:
+def build_ingestion_graph(session: RunSession | None = None) -> Any:
     graph = StateGraph(IngestionState)
-    graph.add_node("validate_request", _validate_request)
-    graph.add_node("run_pipeline", _run_pipeline)
+    graph.add_node("validate_request", lambda state: _validate_request(state, session=session))
+    graph.add_node("run_pipeline", lambda state: _run_pipeline(state, session=session))
     graph.set_entry_point("validate_request")
     graph.add_edge("validate_request", "run_pipeline")
     graph.add_edge("run_pipeline", END)
     return graph.compile()
 
 
-def _validate_request(state: IngestionState) -> IngestionState:
+def _validate_request(
+    state: IngestionState,
+    *,
+    session: RunSession | None = None,
+) -> IngestionState:
     request = IngestionRequest.model_validate(state["request"])
+    logger = session.logger if session is not None else None
+    if logger is not None:
+        logger.debug(
+            "Validated ingestion request for {project}:{version}",
+            step="validate_request",
+            project=request.project,
+            version=request.version,
+            document=str(request.document),
+        )
     if not request.document.exists():
         raise FileNotFoundError(request.document)
     rid = state.get("run_id") or run_id(request.project, request.document, request.version)
+    if logger is not None:
+        logger.debug(
+            "Resolved run id {run_id}",
+            step="validate_request",
+            run_id=rid,
+            document=str(request.document),
+        )
     return {"request": request.model_dump(mode="json"), "run_id": rid, "warnings": [], "errors": []}
 
 
-def _run_pipeline(state: IngestionState) -> IngestionState:
+def _run_pipeline(
+    state: IngestionState,
+    *,
+    session: RunSession | None = None,
+) -> IngestionState:
     request = IngestionRequest.model_validate(state["request"])
     settings = load_config()
+    if session is not None:
+        session.set_log_level(settings.log_level)
     if request.reasoning_provider:
         settings.reasoning_model.provider = request.reasoning_provider
     if request.embedding_provider:
         settings.embedding_model.provider = request.embedding_provider
-    logger = RunLogger(settings.paths.runtime_logs_dir, state["run_id"])
+    logger = session.logger if session is not None else None
     project = request.project
     version = request.version
     postgres = PostgresStore(settings)
@@ -74,25 +100,90 @@ def _run_pipeline(state: IngestionState) -> IngestionState:
     chroma = ChromaStore(settings)
 
     def pipeline() -> IngestionState:
-        logger.node(project=project, version=version, step="bootstrap_runtime", fn=lambda: None)
-        logger.node(project=project, version=version, step="check_postgres", fn=postgres.check)
-        logger.node(project=project, version=version, step="check_neo4j", fn=neo4j.check)
-        logger.node(project=project, version=version, step="check_chroma", fn=chroma.check)
-        logger.node(
-            project=project,
-            version=version,
-            step="ensure_postgres_schema",
-            fn=postgres.ensure_schema,
-        )
+        if logger is not None:
+            logger.info(
+                "Beginning ingestion pipeline for {project}:{version}",
+                step="run_pipeline",
+                project=project,
+                version=version,
+                run_id=state["run_id"],
+                status="started",
+            )
+            logger.debug(
+                "Runtime paths resolved",
+                step="run_pipeline",
+                project=project,
+                version=version,
+                runtime_root=str(settings.paths.project_root),
+                staging_dir=str(settings.paths.runtime_staging_dir),
+            )
+        if logger is not None:
+            logger.debug(
+                "Checking postgres store",
+                step="check_postgres",
+                project=project,
+                version=version,
+            )
+        postgres_status = postgres.check()
+        if logger is not None:
+            logger.info(
+                postgres_status,
+                step="check_postgres",
+                project=project,
+                version=version,
+                status="PASS",
+                detail=postgres_status,
+            )
+            logger.debug(
+                "Checking neo4j store",
+                step="check_neo4j",
+                project=project,
+                version=version,
+            )
+        neo4j_status = neo4j.check()
+        if logger is not None:
+            logger.info(
+                neo4j_status,
+                step="check_neo4j",
+                project=project,
+                version=version,
+                status="PASS",
+                detail=neo4j_status,
+            )
+            logger.debug(
+                "Checking chroma store",
+                step="check_chroma",
+                project=project,
+                version=version,
+            )
+        chroma_status = chroma.check()
+        if logger is not None:
+            logger.info(
+                chroma_status,
+                step="check_chroma",
+                project=project,
+                version=version,
+                status="PASS",
+                detail=chroma_status,
+            )
+            logger.debug(
+                "Ensuring postgres schema",
+                step="ensure_postgres_schema",
+                project=project,
+                version=version,
+            )
+        postgres.ensure_schema()
 
         source_bytes = request.document.read_bytes()
         checksum = checksum_bytes(source_bytes)
-        blocks, parser_fingerprint = logger.node(
-            project=project,
-            version=version,
-            step="parse_document",
-            fn=lambda: parse_document(request.document),
-        )
+        if logger is not None:
+            logger.debug(
+                "Read source document {path} ({byte_count} bytes)",
+                step="read_document",
+                path=str(request.document),
+                byte_count=len(source_bytes),
+            )
+        blocks, parser_fingerprint = parse_document(request.document, logger=logger)
         logical_name = request.logical_name or request.document.stem
         preliminary = build_manifest(
             project=project,
@@ -103,16 +194,13 @@ def _run_pipeline(state: IngestionState) -> IngestionState:
             parser_fingerprint=parser_fingerprint,
             chunker_fingerprint="pending",
             chunks=[],
+            logger=logger,
         )
-        chunks, chunker_fingerprint = logger.node(
-            project=project,
-            version=version,
-            step="chunk_document",
-            fn=lambda: chunk_blocks(
-                document_version_id=preliminary.document_version_id,
-                blocks=blocks,
-                settings=settings.chunking,
-            ),
+        chunks, chunker_fingerprint = chunk_blocks(
+            document_version_id=preliminary.document_version_id,
+            blocks=blocks,
+            settings=settings.chunking,
+            logger=logger,
         )
         manifest = build_manifest(
             project=project,
@@ -123,80 +211,88 @@ def _run_pipeline(state: IngestionState) -> IngestionState:
             parser_fingerprint=parser_fingerprint,
             chunker_fingerprint=chunker_fingerprint,
             chunks=chunks,
+            logger=logger,
         )
-        logger.node(
-            project=project,
-            version=version,
-            step="resolve_version",
-            fn=lambda: postgres.assert_version_allowed(manifest, request.replace_version),
-        )
-        manifest_path = logger.node(
-            project=project,
-            version=version,
-            step="write_manifest",
-            fn=lambda: write_manifest(
-                manifest, settings.paths.runtime_staging_dir, state["run_id"]
-            ),
-        )
-        logger.node(
-            project=project,
-            version=version,
-            step="project_chunks_neo4j",
-            fn=lambda: neo4j.project_manifest(manifest),
-        )
-        embedding_model = create_embedding_model(settings)
-        logger.node(
-            project=project,
-            version=version,
-            step="index_chunks_chroma",
-            fn=lambda: chroma.index_chunks(manifest, embedding_model),
-        )
-        discovery_agent = RequirementDiscoveryAgent(create_reasoning_model(settings))
-        discovery = logger.node(
-            project=project,
-            version=version,
-            step="discover_requirements",
-            fn=lambda: discovery_agent.run(manifest),
-        )
-        artifact = logger.node(
-            project=project,
-            version=version,
-            step="build_requirement_artifact",
-            fn=lambda: build_requirement_artifact(
-                project=project,
-                document_id=manifest.document_id,
+        if logger is not None:
+            logger.debug(
+                "Resolving version policy for {document_version_id}",
+                step="resolve_version",
                 document_version_id=manifest.document_version_id,
-                version=version,
-                source_checksum=checksum,
-                discovery=discovery,
-            ),
+                replace_version=request.replace_version,
+            )
+        postgres.assert_version_allowed(manifest, request.replace_version)
+        manifest_path = write_manifest(
+            manifest,
+            settings.paths.runtime_staging_dir,
+            state["run_id"],
+            logger=logger,
         )
-        logger.node(
+        if logger is not None:
+            logger.debug(
+                "Projecting manifest to neo4j for {document_version_id}",
+                step="project_chunks_neo4j",
+                document_version_id=manifest.document_version_id,
+            )
+        neo4j.project_manifest(manifest)
+        embedding_model = create_embedding_model(settings)
+        if logger is not None:
+            logger.debug(
+                "Indexing {chunk_count} chunks into chroma",
+                step="index_chunks_chroma",
+                chunk_count=len(manifest.chunks),
+                collection=settings.chroma.collection_name,
+            )
+        chroma.index_chunks(manifest, embedding_model)
+        discovery_agent = RequirementDiscoveryAgent(create_reasoning_model(settings))
+        if logger is not None:
+            logger.debug(
+                "Discovering requirements from {document_version_id}",
+                step="discover_requirements",
+                document_version_id=manifest.document_version_id,
+            )
+        discovery = discovery_agent.run(manifest)
+        if logger is not None:
+            logger.debug(
+                "Loaded requirement ledger snapshot for {document_id}",
+                step="load_requirement_ledger_snapshot",
+                document_id=manifest.document_id,
+            )
+        prior_revisions = postgres.load_requirement_revision_snapshot(
             project=project,
-            version=version,
-            step="persist_manifest_postgres",
-            fn=lambda: postgres.persist_manifest(manifest),
+            document_id=manifest.document_id,
         )
-        artifact_path = logger.node(
+        artifact = build_requirement_artifact(
             project=project,
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
             version=version,
-            step="write_artifact",
-            fn=lambda: write_requirement_artifact(
-                artifact, settings.paths.generated_requirements_dir
-            ),
+            source_path=manifest.source_path,
+            source_checksum=checksum,
+            discovery=discovery,
+            prior_revisions=prior_revisions,
+            logger=logger,
         )
-        logger.node(
-            project=project,
-            version=version,
-            step="persist_artifact_postgres",
-            fn=lambda: postgres.persist_artifact(artifact, str(artifact_path), state["run_id"]),
-        )
-        logger.node(
-            project=project,
-            version=version,
-            step="project_artifact_neo4j",
-            fn=lambda: neo4j.project_artifact(artifact),
-        )
+        if session is not None:
+            session.artifact_payload = artifact.model_dump(mode="json")
+            artifact_path = session.write_artifact(session.artifact_payload)
+        else:
+            artifact_path = write_requirement_artifact(
+                artifact,
+                settings.paths.runtime_staging_dir,
+                state["run_id"],
+                logger=logger,
+            )
+        if logger is not None:
+            logger.info(
+                "Requirement artifact written to {path}",
+                step="write_requirement_artifact",
+                path=str(artifact_path),
+                document_version_id=artifact.document_version_id,
+                status="completed",
+            )
+        postgres.persist_manifest(manifest)
+        postgres.persist_artifact(artifact, str(artifact_path), state["run_id"])
+        neo4j.project_artifact(artifact)
         result_payload: IngestionState = {
             "run_id": state["run_id"],
             "checksum": checksum,
@@ -210,17 +306,27 @@ def _run_pipeline(state: IngestionState) -> IngestionState:
             "warnings": [],
             "errors": [],
         }
-        logger.node(
-            project=project,
-            version=version,
-            step="record_run_postgres",
-            fn=lambda: postgres.record_run(state["run_id"], "completed", dict(result_payload)),
-        )
+        if session is not None:
+            session.metadata.update(result_payload)
+        postgres.record_run(state["run_id"], "completed", dict(result_payload))
+        if logger is not None:
+            logger.info(
+                "Ingestion pipeline completed for {document_version_id}",
+                step="run_pipeline",
+                document_version_id=manifest.document_version_id,
+                run_id=state["run_id"],
+                chunk_count=len(manifest.chunks),
+                fact_count=len(artifact.facts),
+                requirement_count=len(artifact.requirements),
+                status="completed",
+            )
         return result_payload
 
     try:
         return pipeline()
     except Exception as exc:
+        if session is not None:
+            session.write_failure_envelope(error=exc)
         error_payload = {
             "run_id": state["run_id"],
             "document_version_id": state.get("document_version_id", ""),
@@ -230,8 +336,21 @@ def _run_pipeline(state: IngestionState) -> IngestionState:
         raise
 
 
-def run_ingestion(request: IngestionRequest) -> IngestionResult:
-    graph = build_ingestion_graph()
+def run_ingestion(
+    request: IngestionRequest,
+    session: RunSession | None = None,
+) -> IngestionResult:
+    if session is None:
+        generated_run_id = run_id(request.project, request.document, request.version)
+        with command_session(
+            project=request.project,
+            version=request.version,
+            command="ingest",
+            run_id=generated_run_id,
+        ) as managed_session:
+            return run_ingestion(request, session=managed_session)
+    session.request_payload = request.model_dump(mode="json")
+    graph = build_ingestion_graph(session)
     final_state = graph.invoke({"request": request.model_dump(mode="json")})
     return IngestionResult(
         run_id=final_state["run_id"],

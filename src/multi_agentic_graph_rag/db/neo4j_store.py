@@ -125,42 +125,90 @@ def _project_manifest_tx(tx: Any, manifest: dict[str, Any]) -> None:
 
 
 def _project_artifact_tx(tx: Any, artifact: dict[str, Any]) -> None:
+    for canonical_fact in artifact.get("canonical_facts", []):
+        tx.run(
+            """
+            MERGE (f:CanonicalFact {canonical_fact_id: $canonical_fact_id})
+            SET f.normalized_text = $normalized_text,
+                f.representative_text = $representative_text
+            """,
+            canonical_fact_id=canonical_fact["canonical_fact_id"],
+            normalized_text=canonical_fact["normalized_text"],
+            representative_text=canonical_fact["representative_text"],
+        )
     for fact in artifact["facts"]:
         tx.run(
             """
             MATCH (c:Chunk {chunk_id: $chunk_id})
-            MERGE (f:Fact {fact_id: $fact_id})
-            SET f.text = $text
-            MERGE (f)-[:SUPPORTED_BY {quote: $quote}]->(c)
+            MERGE (f:FactOccurrence {fact_id: $fact_id})
+            SET f.text = $text,
+                f.canonical_fact_id = $canonical_fact_id
+            MERGE (cf:CanonicalFact {canonical_fact_id: $canonical_fact_id})
+            MERGE (cf)-[:HAS_OCCURRENCE]->(f)
+            MERGE (f)-[:SUPPORTED_BY {quote: $quote, start_char: $start_char,
+                                      end_char: $end_char}]->(c)
             """,
             fact_id=fact["fact_id"],
+            canonical_fact_id=fact.get("canonical_fact_id", ""),
             text=fact["text"],
             chunk_id=fact["source_trace"]["chunk_id"],
             quote=fact["source_trace"]["quote"],
+            start_char=fact["source_trace"]["start_char"],
+            end_char=fact["source_trace"]["end_char"],
         )
     for req in artifact["requirements"]:
         tx.run(
             """
-            MATCH (c:Chunk {chunk_id: $chunk_id})
             MERGE (r:Requirement {requirement_id: $requirement_id})
-            SET r.statement = $statement,
-                r.priority = $priority,
-                r.requirement_type = $requirement_type
-            MERGE (r)-[:TRACED_TO {quote: $quote}]->(c)
+            SET r.requirement_key = $requirement_key
+            MERGE (rv:RequirementRevision {revision_id: $revision_id})
+            SET rv.statement = $statement,
+                rv.priority = $priority,
+                rv.requirement_type = $requirement_type,
+                rv.status = $status
+            MERGE (r)-[:HAS_REVISION]->(rv)
             """,
             requirement_id=req["requirement_id"],
+            revision_id=req.get("revision_id", req["requirement_id"]),
+            requirement_key=req.get("requirement_key", ""),
             statement=req["statement"],
             priority=req["priority"],
             requirement_type=req["requirement_type"],
-            chunk_id=req["source_trace"]["chunk_id"],
-            quote=req["source_trace"]["quote"],
+            status=req.get("status", "active"),
         )
+        for evidence in req.get("evidence", []):
+            trace = evidence["source_trace"]
+            tx.run(
+                """
+                MATCH (rv:RequirementRevision {revision_id: $revision_id})
+                MATCH (c:Chunk {chunk_id: $chunk_id})
+                MERGE (rv)-[:TRACED_TO {evidence_id: $evidence_id, quote: $quote,
+                                        start_char: $start_char, end_char: $end_char}]->(c)
+                """,
+                revision_id=req.get("revision_id", req["requirement_id"]),
+                chunk_id=trace["chunk_id"],
+                evidence_id=evidence["evidence_id"],
+                quote=trace["quote"],
+                start_char=trace["start_char"],
+                end_char=trace["end_char"],
+            )
+            fact_ids = evidence["fact_ids"]
+            for fact_id in fact_ids:
+                tx.run(
+                    """
+                    MATCH (rv:RequirementRevision {revision_id: $revision_id})
+                    MATCH (f:FactOccurrence {fact_id: $fact_id})
+                    MERGE (rv)-[:DERIVED_FROM]->(f)
+                    """,
+                    revision_id=req.get("revision_id", req["requirement_id"]),
+                    fact_id=fact_id,
+                )
         for fact_id in req["fact_ids"]:
             tx.run(
                 """
                 MATCH (r:Requirement {requirement_id: $requirement_id})
-                MATCH (f:Fact {fact_id: $fact_id})
-                MERGE (r)-[:DERIVED_FROM]->(f)
+                MATCH (f:FactOccurrence {fact_id: $fact_id})
+                MERGE (r)-[:HAS_FACT_OCCURRENCE]->(f)
                 """,
                 requirement_id=req["requirement_id"],
                 fact_id=fact_id,

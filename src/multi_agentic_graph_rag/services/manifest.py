@@ -7,6 +7,7 @@ from pathlib import Path
 
 from multi_agentic_graph_rag.domain.identifiers import document_id, document_version_id
 from multi_agentic_graph_rag.domain.schemas import DocumentChunk, DocumentManifest
+from multi_agentic_graph_rag.observability.logging import RunLogger
 
 
 def build_manifest(
@@ -19,7 +20,17 @@ def build_manifest(
     parser_fingerprint: str,
     chunker_fingerprint: str,
     chunks: list[DocumentChunk],
+    logger: RunLogger | None = None,
 ) -> DocumentManifest:
+    if logger is not None:
+        logger.debug(
+            "Building manifest for {project}:{logical_name}:{version}",
+            step="build_manifest",
+            project=project,
+            logical_name=logical_name,
+            version=version,
+            chunk_count=len(chunks),
+        )
     doc_id = document_id(project, logical_name)
     doc_version_id = document_version_id(doc_id, version, source_checksum)
     return DocumentManifest(
@@ -36,9 +47,21 @@ def build_manifest(
     )
 
 
-def write_manifest(manifest: DocumentManifest, staging_dir: Path, run_id: str) -> Path:
+def write_manifest(
+    manifest: DocumentManifest,
+    staging_dir: Path,
+    run_id: str,
+    logger: RunLogger | None = None,
+) -> Path:
     path = staging_dir / run_id / "chunk_manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    if logger is not None:
+        logger.debug(
+            "Writing manifest to {path}",
+            step="write_manifest",
+            path=str(path),
+            document_version_id=manifest.document_version_id,
+        )
     path.write_text(
         json.dumps(manifest.model_dump(mode="json"), indent=2),
         encoding="utf-8",

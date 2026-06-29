@@ -28,10 +28,32 @@ uv run marag ingest --project PROJECT_1 --document .\documents\inbox\PROJECT_1\s
 Generated requirement JSON is written under:
 
 ```text
-generated/inbox/<PROJECT>/requirements/
+.generated/<PROJECT>/run/
 ```
 
-Runtime manifests, run logs, and local trace stores are written under `runtime/`.
+Runtime manifests stay under `runtime/staging/`, while run logs and run
+metadata are written under `.generated/<PROJECT>/run/`.
+
+## Requirement Ledger
+
+Ingestion now extracts a nested `chunks[] -> facts[] -> requirements[]` structure
+from the reasoning model. Python-owned artifact generation converts that into:
+
+- `FACT-*` fact occurrence IDs tied to one chunk quote and source span.
+- Canonical fact groups for repeated fact text across chunks.
+- Stable `REQ-*` requirement lineage IDs derived from a hybrid requirement key.
+- `REQREV-*` revision IDs for exact requirement statement versions.
+- Evidence rows and delta events for `new`, `duplicate`, `changed`, and
+  `superseded` lifecycle outcomes.
+
+Storage ownership is intentionally split:
+
+- Neo4j owns chunk nodes and graph relationships for GraphRAG traversal.
+- ChromaDB owns semantic vector search over chunks by `chunk_id`.
+- PostgreSQL owns generated requirement ledger state, revisions, evidence
+  references, lifecycle status, delta events, and the JSON requirement artifact
+  snapshot. PostgreSQL stores chunk references, quotes, offsets, pages, sections,
+  and source paths; it is not the primary chunk-body store.
 
 ## Providers
 
@@ -47,6 +69,6 @@ direct and Gemini are future adapters.
 ## Future User Stories
 
 User-story generation is intentionally not implemented yet. The future contract
-is: read requirement JSON when present, regenerate from PostgreSQL if missing,
-retrieve semantic context from Chroma, expand graph context from Neo4j, rerank
-candidates, then call the reasoning model.
+is: read authoritative requirement lifecycle state from PostgreSQL, retrieve
+semantic context from Chroma, expand graph context from Neo4j, rerank candidates,
+then call the reasoning model.

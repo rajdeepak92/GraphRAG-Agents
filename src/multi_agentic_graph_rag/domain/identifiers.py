@@ -47,3 +47,84 @@ def fact_id(project: str, version: str, text: str, ordinal: int) -> str:
 
 def requirement_id(project: str, version: str, text: str, ordinal: int) -> str:
     return f"REQ-{stable_token(project, version, text, ordinal, length=14)}"
+
+
+def canonical_fact_id(project: str, document_identifier: str, normalized_text: str) -> str:
+    return f"FACTCAN-{stable_token(project, document_identifier, normalized_text, length=14)}"
+
+
+def fact_occurrence_id(
+    *,
+    project: str,
+    document_version_identifier: str,
+    chunk_identifier: str,
+    text: str,
+    quote: str,
+    start_char: int,
+    end_char: int,
+) -> str:
+    token = stable_token(
+        project,
+        document_version_identifier,
+        chunk_identifier,
+        text,
+        quote,
+        start_char,
+        end_char,
+        length=14,
+    )
+    return f"FACT-{token}"
+
+
+def requirement_lineage_id(
+    project: str,
+    document_identifier: str,
+    requirement_key: str,
+) -> str:
+    return f"REQ-{stable_token(project, document_identifier, requirement_key, length=14)}"
+
+
+def requirement_revision_id(requirement_identifier: str, normalized_statement: str) -> str:
+    return f"REQREV-{stable_token(requirement_identifier, normalized_statement, length=14)}"
+
+
+def requirement_evidence_id(
+    *,
+    requirement_identifier: str,
+    revision_identifier: str,
+    document_version_identifier: str,
+    chunk_identifier: str,
+    quote: str,
+    start_char: int,
+    end_char: int,
+) -> str:
+    token = stable_token(
+        requirement_identifier,
+        revision_identifier,
+        document_version_identifier,
+        chunk_identifier,
+        quote,
+        start_char,
+        end_char,
+        length=14,
+    )
+    return f"REQEVID-{token}"
+
+
+def requirement_delta_event_id(
+    *,
+    event_type: str,
+    requirement_identifier: str,
+    revision_identifier: str | None,
+    previous_revision_identifier: str | None,
+    document_version_identifier: str,
+) -> str:
+    token = stable_token(
+        event_type,
+        requirement_identifier,
+        revision_identifier or "",
+        previous_revision_identifier or "",
+        document_version_identifier,
+        length=14,
+    )
+    return f"REQDELTA-{token}"

@@ -1,0 +1,11 @@
+{
+  "artifact_schema_version": "session-metadata",
+  "status": "completed",
+  "run_id": "RUN-20260629173359-VERSION",
+  "project": "_system",
+  "version": "0.1.0",
+  "command": "version",
+  "stamp": "20260629-173359__system_0.1.0_RUN-20260629173359-VERSION",
+  "request": null,
+  "metadata": {}
+}

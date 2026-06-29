@@ -3,33 +3,42 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import tempfile
 from pathlib import Path
 
 from multi_agentic_graph_rag.domain.schemas import RequirementArtifact
+from multi_agentic_graph_rag.observability.logging import RunLogger
 
 
 def write_requirement_artifact(
     artifact: RequirementArtifact,
-    generated_root: Path,
+    run_dir: Path,
+    stamp: str,
+    logger: RunLogger | None = None,
 ) -> Path:
-    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-    project_dir = generated_root / artifact.project / "requirements"
-    project_dir.mkdir(parents=True, exist_ok=True)
-    for existing in sorted(project_dir.glob(f"requirements_*_{artifact.version}.json")):
-        try:
-            current = verify_requirement_artifact(existing)
-        except Exception:
-            continue
-        if current.document_version_id == artifact.document_version_id:
-            path = existing
-            break
-    else:
-        path = project_dir / f"requirements_{timestamp}_{artifact.version}.json"
-    path.write_text(
-        json.dumps(artifact.model_dump(mode="json"), indent=2),
+    path = run_dir / f"req_{stamp}.json"
+    if logger is not None:
+        logger.debug(
+            "Writing requirement artifact for {document_version_id} to {path}",
+            step="write_requirement_artifact",
+            document_version_id=artifact.document_version_id,
+            path=str(path),
+            requirement_count=len(artifact.requirements),
+            fact_count=len(artifact.facts),
+        )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
         encoding="utf-8",
-    )
+        dir=run_dir,
+        prefix=path.stem + ".",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        json.dump(artifact.model_dump(mode="json"), handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        temp_name = Path(handle.name)
+    temp_name.replace(path)
     return path
 
 

@@ -8,7 +8,11 @@ from typing import Any
 
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.domain.errors import VersionConflictError
-from multi_agentic_graph_rag.domain.schemas import DocumentManifest, RequirementArtifact
+from multi_agentic_graph_rag.domain.schemas import (
+    DocumentManifest,
+    RequirementArtifact,
+    RequirementRevisionSnapshot,
+)
 
 
 class PostgresStore:
@@ -54,6 +58,95 @@ class PostgresStore:
                       payload jsonb not null,
                       created_at timestamptz not null default now()
                     );
+                    create table if not exists canonical_facts (
+                      canonical_fact_id text primary key,
+                      project text not null,
+                      document_id text not null,
+                      normalized_text text not null,
+                      representative_text text not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists fact_occurrences (
+                      fact_id text primary key,
+                      canonical_fact_id text not null,
+                      project text not null,
+                      document_id text not null,
+                      document_version_id text not null,
+                      chunk_id text not null,
+                      page integer,
+                      section text,
+                      quote text not null,
+                      start_char integer not null,
+                      end_char integer not null,
+                      source_path text not null,
+                      text text not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists requirements (
+                      requirement_id text primary key,
+                      project text not null,
+                      document_id text not null,
+                      requirement_key text not null,
+                      status text not null,
+                      first_seen_document_version_id text not null,
+                      active_revision_id text,
+                      created_at timestamptz not null default now(),
+                      updated_at timestamptz not null default now(),
+                      unique(project, document_id, requirement_key)
+                    );
+                    create table if not exists requirement_revisions (
+                      revision_id text primary key,
+                      requirement_id text not null,
+                      statement text not null,
+                      normalized_statement text not null,
+                      requirement_type text not null,
+                      priority text not null,
+                      status text not null,
+                      first_seen_document_version_id text not null,
+                      created_at timestamptz not null default now(),
+                      updated_at timestamptz not null default now()
+                    );
+                    create table if not exists requirement_evidence (
+                      evidence_id text primary key,
+                      requirement_id text not null,
+                      revision_id text not null,
+                      document_version_id text not null,
+                      chunk_id text not null,
+                      page integer,
+                      section text,
+                      quote text not null,
+                      start_char integer not null,
+                      end_char integer not null,
+                      source_path text not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists requirement_fact_links (
+                      evidence_id text not null,
+                      fact_id text not null,
+                      requirement_id text not null,
+                      revision_id text not null,
+                      created_at timestamptz not null default now(),
+                      primary key(evidence_id, fact_id)
+                    );
+                    create table if not exists requirement_delta_events (
+                      event_id text primary key,
+                      event_type text not null,
+                      requirement_id text not null,
+                      revision_id text,
+                      previous_revision_id text,
+                      superseded_by_revision_id text,
+                      document_version_id text not null,
+                      evidence_ids jsonb not null,
+                      impacted_artifact_types jsonb not null,
+                      payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create index if not exists requirement_revisions_requirement_idx
+                      on requirement_revisions(requirement_id);
+                    create index if not exists requirement_evidence_revision_idx
+                      on requirement_evidence(revision_id);
+                    create index if not exists fact_occurrences_chunk_idx
+                      on fact_occurrences(chunk_id);
                     """
                 )
             connection.commit()
@@ -81,12 +174,48 @@ class PostgresStore:
                 "use --replace-version to overwrite"
             )
 
+    def load_requirement_revision_snapshot(
+        self,
+        *,
+        project: str,
+        document_id: str,
+    ) -> dict[str, RequirementRevisionSnapshot]:
+        if self.settings.postgres.mode == "local_json":
+            return self._local_requirement_revision_snapshot(project, document_id)
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select r.requirement_id,
+                       rr.revision_id,
+                       rr.statement,
+                       rr.normalized_statement
+                from requirements r
+                join requirement_revisions rr on rr.revision_id = r.active_revision_id
+                where r.project = %s
+                  and r.document_id = %s
+                  and r.status = 'active'
+                  and rr.status = 'active'
+                """,
+                (project, document_id),
+            )
+            rows = cursor.fetchall()
+        return {
+            str(row[0]): RequirementRevisionSnapshot(
+                requirement_id=str(row[0]),
+                revision_id=str(row[1]),
+                statement=str(row[2]),
+                normalized_statement=str(row[3]),
+            )
+            for row in rows
+        }
+
     def persist_manifest(self, manifest: DocumentManifest) -> None:
+        manifest_payload = _manifest_reference_payload(manifest)
         if self.settings.postgres.mode == "local_json":
             self._upsert_local(
                 "document_version",
                 manifest.document_version_id,
-                {"kind": "document_version", "manifest": manifest.model_dump(mode="json")},
+                {"kind": "document_version", "manifest": manifest_payload},
             )
             return
         with self._connect() as connection:
@@ -104,7 +233,7 @@ class PostgresStore:
                         manifest.project,
                         manifest.version,
                         manifest.source_checksum,
-                        json.dumps(manifest.model_dump(mode="json")),
+                        json.dumps(manifest_payload),
                     ),
                 )
             connection.commit()
@@ -124,6 +253,7 @@ class PostgresStore:
                     "artifact": payload,
                 },
             )
+            self._persist_requirement_ledger_local(artifact)
             return
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -136,6 +266,7 @@ class PostgresStore:
                     """,
                     (artifact_path, artifact.document_version_id, json.dumps(payload)),
                 )
+                self._persist_requirement_ledger_postgres(cursor, artifact)
             connection.commit()
 
     def record_run(self, run_id: str, status: str, payload: dict[str, Any]) -> None:
@@ -164,6 +295,275 @@ class PostgresStore:
                 )
             connection.commit()
 
+    def _persist_requirement_ledger_postgres(
+        self,
+        cursor: Any,
+        artifact: RequirementArtifact,
+    ) -> None:
+        for canonical_fact in artifact.canonical_facts:
+            cursor.execute(
+                """
+                insert into canonical_facts
+                  (canonical_fact_id, project, document_id, normalized_text, representative_text)
+                values (%s, %s, %s, %s, %s)
+                on conflict (canonical_fact_id) do update
+                set representative_text = excluded.representative_text
+                """,
+                (
+                    canonical_fact.canonical_fact_id,
+                    artifact.project,
+                    artifact.document_id,
+                    canonical_fact.normalized_text,
+                    canonical_fact.representative_text,
+                ),
+            )
+
+        for fact_occurrence in artifact.facts:
+            trace = fact_occurrence.source_trace
+            cursor.execute(
+                """
+                insert into fact_occurrences
+                  (fact_id, canonical_fact_id, project, document_id, document_version_id,
+                   chunk_id, page, section, quote, start_char, end_char, source_path, text)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (fact_id) do update
+                set quote = excluded.quote,
+                    page = excluded.page,
+                    section = excluded.section
+                """,
+                (
+                    fact_occurrence.fact_id,
+                    fact_occurrence.canonical_fact_id,
+                    artifact.project,
+                    artifact.document_id,
+                    artifact.document_version_id,
+                    trace.chunk_id,
+                    trace.page,
+                    trace.section,
+                    trace.quote,
+                    trace.start_char,
+                    trace.end_char,
+                    artifact.source_path,
+                    fact_occurrence.text,
+                ),
+            )
+
+        for requirement in artifact.requirements:
+            cursor.execute(
+                """
+                insert into requirements
+                  (requirement_id, project, document_id, requirement_key, status,
+                   first_seen_document_version_id, active_revision_id)
+                values (%s, %s, %s, %s, 'active', %s, %s)
+                on conflict (requirement_id) do update
+                set status = 'active',
+                    active_revision_id = excluded.active_revision_id,
+                    updated_at = now()
+                """,
+                (
+                    requirement.requirement_id,
+                    artifact.project,
+                    artifact.document_id,
+                    requirement.requirement_key,
+                    artifact.document_version_id,
+                    requirement.revision_id,
+                ),
+            )
+            cursor.execute(
+                """
+                insert into requirement_revisions
+                  (revision_id, requirement_id, statement, normalized_statement,
+                   requirement_type, priority, status, first_seen_document_version_id)
+                values (%s, %s, %s, %s, %s, %s, 'active', %s)
+                on conflict (revision_id) do update
+                set statement = excluded.statement,
+                    normalized_statement = excluded.normalized_statement,
+                    requirement_type = excluded.requirement_type,
+                    priority = excluded.priority,
+                    status = 'active',
+                    updated_at = now()
+                """,
+                (
+                    requirement.revision_id,
+                    requirement.requirement_id,
+                    requirement.statement,
+                    requirement.normalized_statement,
+                    requirement.requirement_type,
+                    requirement.priority,
+                    artifact.document_version_id,
+                ),
+            )
+            for evidence in requirement.evidence:
+                trace = evidence.source_trace
+                cursor.execute(
+                    """
+                    insert into requirement_evidence
+                      (evidence_id, requirement_id, revision_id, document_version_id, chunk_id,
+                       page, section, quote, start_char, end_char, source_path)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (evidence_id) do update
+                    set quote = excluded.quote,
+                        page = excluded.page,
+                        section = excluded.section
+                    """,
+                    (
+                        evidence.evidence_id,
+                        requirement.requirement_id,
+                        requirement.revision_id,
+                        artifact.document_version_id,
+                        trace.chunk_id,
+                        trace.page,
+                        trace.section,
+                        trace.quote,
+                        trace.start_char,
+                        trace.end_char,
+                        artifact.source_path,
+                    ),
+                )
+                for fact_id in evidence.fact_ids:
+                    cursor.execute(
+                        """
+                        insert into requirement_fact_links
+                          (evidence_id, fact_id, requirement_id, revision_id)
+                        values (%s, %s, %s, %s)
+                        on conflict (evidence_id, fact_id) do nothing
+                        """,
+                        (
+                            evidence.evidence_id,
+                            fact_id,
+                            requirement.requirement_id,
+                            requirement.revision_id,
+                        ),
+                    )
+
+        for event in artifact.delta_events:
+            if event.event_type == "superseded" and event.revision_id:
+                cursor.execute(
+                    """
+                    update requirement_revisions
+                    set status = 'superseded', updated_at = now()
+                    where revision_id = %s
+                    """,
+                    (event.revision_id,),
+                )
+            cursor.execute(
+                """
+                insert into requirement_delta_events
+                  (event_id, event_type, requirement_id, revision_id, previous_revision_id,
+                   superseded_by_revision_id, document_version_id, evidence_ids,
+                   impacted_artifact_types, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (event_id) do update
+                set payload = excluded.payload
+                """,
+                (
+                    event.event_id,
+                    event.event_type,
+                    event.requirement_id,
+                    event.revision_id,
+                    event.previous_revision_id,
+                    event.superseded_by_revision_id,
+                    event.document_version_id,
+                    json.dumps(event.evidence_ids),
+                    json.dumps(event.impacted_artifact_types),
+                    json.dumps(event.model_dump(mode="json")),
+                ),
+            )
+
+    def _persist_requirement_ledger_local(self, artifact: RequirementArtifact) -> None:
+        for canonical_fact in artifact.canonical_facts:
+            self._upsert_local(
+                "canonical_fact",
+                canonical_fact.canonical_fact_id,
+                {
+                    "kind": "canonical_fact",
+                    "project": artifact.project,
+                    "document_id": artifact.document_id,
+                    "canonical_fact": canonical_fact.model_dump(mode="json"),
+                },
+            )
+
+        for fact_occurrence in artifact.facts:
+            self._upsert_local(
+                "fact_occurrence",
+                fact_occurrence.fact_id,
+                {
+                    "kind": "fact_occurrence",
+                    "project": artifact.project,
+                    "document_id": artifact.document_id,
+                    "document_version_id": artifact.document_version_id,
+                    "source_path": artifact.source_path,
+                    "fact": fact_occurrence.model_dump(mode="json"),
+                },
+            )
+
+        for requirement in artifact.requirements:
+            self._upsert_local(
+                "requirement",
+                requirement.requirement_id,
+                {
+                    "kind": "requirement",
+                    "project": artifact.project,
+                    "document_id": artifact.document_id,
+                    "requirement_id": requirement.requirement_id,
+                    "requirement_key": requirement.requirement_key,
+                    "status": "active",
+                    "active_revision_id": requirement.revision_id,
+                    "first_seen_document_version_id": artifact.document_version_id,
+                },
+            )
+            self._upsert_local(
+                "requirement_revision",
+                requirement.revision_id,
+                {
+                    "kind": "requirement_revision",
+                    "project": artifact.project,
+                    "document_id": artifact.document_id,
+                    "document_version_id": artifact.document_version_id,
+                    "requirement": requirement.model_dump(mode="json"),
+                    "status": "active",
+                },
+            )
+            for evidence in requirement.evidence:
+                self._upsert_local(
+                    "requirement_evidence",
+                    evidence.evidence_id,
+                    {
+                        "kind": "requirement_evidence",
+                        "project": artifact.project,
+                        "document_id": artifact.document_id,
+                        "document_version_id": artifact.document_version_id,
+                        "requirement_id": requirement.requirement_id,
+                        "revision_id": requirement.revision_id,
+                        "source_path": artifact.source_path,
+                        "evidence": evidence.model_dump(mode="json"),
+                    },
+                )
+                for fact_id in evidence.fact_ids:
+                    self._upsert_local(
+                        "requirement_fact_link",
+                        f"{evidence.evidence_id}:{fact_id}",
+                        {
+                            "kind": "requirement_fact_link",
+                            "evidence_id": evidence.evidence_id,
+                            "fact_id": fact_id,
+                            "requirement_id": requirement.requirement_id,
+                            "revision_id": requirement.revision_id,
+                        },
+                    )
+
+        for event in artifact.delta_events:
+            if event.event_type == "superseded" and event.revision_id:
+                self._update_local_revision_status(event.revision_id, "superseded")
+            self._upsert_local(
+                "requirement_delta_event",
+                event.event_id,
+                {
+                    "kind": "requirement_delta_event",
+                    "event": event.model_dump(mode="json"),
+                },
+            )
+
     def _connect(self) -> Any:
         import psycopg
 
@@ -177,15 +577,7 @@ class PostgresStore:
 
     def _upsert_local(self, kind: str, key: str, payload: dict[str, Any]) -> None:
         self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)
-        rows: list[dict[str, Any]] = []
-        if self.settings.postgres.local_path.exists():
-            rows = [
-                json.loads(line)
-                for line in self.settings.postgres.local_path.read_text(
-                    encoding="utf-8"
-                ).splitlines()
-                if line.strip()
-            ]
+        rows = self._read_local_rows()
         payload["written_at"] = datetime.now(UTC).isoformat()
         payload["_local_key"] = key
         replaced = False
@@ -196,22 +588,89 @@ class PostgresStore:
                 break
         if not replaced:
             rows.append(payload)
+        self._write_local_rows(rows)
+
+    def _read_local_rows(self) -> list[dict[str, Any]]:
+        if not self.settings.postgres.local_path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in self.settings.postgres.local_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def _write_local_rows(self, rows: list[dict[str, Any]]) -> None:
         self.settings.postgres.local_path.write_text(
             "".join(json.dumps(row) + "\n" for row in rows),
             encoding="utf-8",
         )
 
+    def _update_local_revision_status(self, revision_id: str, status: str) -> None:
+        rows = self._read_local_rows()
+        for row in rows:
+            if row.get("kind") != "requirement_revision" or row.get("_local_key") != revision_id:
+                continue
+            row["status"] = status
+            requirement = row.get("requirement")
+            if isinstance(requirement, dict):
+                requirement["status"] = status
+            row["written_at"] = datetime.now(UTC).isoformat()
+            break
+        self._write_local_rows(rows)
+
     def _local_document_versions(self) -> dict[tuple[str, str], str]:
         versions: dict[tuple[str, str], str] = {}
-        if not self.settings.postgres.local_path.exists():
-            return versions
-        for line in self.settings.postgres.local_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            payload = json.loads(line)
+        for payload in self._read_local_rows():
             if payload.get("kind") == "document_version":
                 manifest = payload["manifest"]
                 versions[(manifest["document_id"], manifest["version"])] = manifest[
                     "source_checksum"
                 ]
         return versions
+
+    def _local_requirement_revision_snapshot(
+        self,
+        project: str,
+        document_id: str,
+    ) -> dict[str, RequirementRevisionSnapshot]:
+        active_by_requirement: dict[str, str] = {}
+        revisions: dict[str, dict[str, Any]] = {}
+        for row in self._read_local_rows():
+            if (
+                row.get("kind") == "requirement"
+                and row.get("project") == project
+                and row.get("document_id") == document_id
+                and row.get("status") == "active"
+            ):
+                active_by_requirement[str(row["requirement_id"])] = str(row["active_revision_id"])
+            if (
+                row.get("kind") == "requirement_revision"
+                and row.get("project") == project
+                and row.get("document_id") == document_id
+                and row.get("status") == "active"
+            ):
+                requirement = row.get("requirement")
+                if isinstance(requirement, dict):
+                    revisions[str(row["_local_key"])] = requirement
+
+        snapshot: dict[str, RequirementRevisionSnapshot] = {}
+        for requirement_id, revision_id in active_by_requirement.items():
+            revision = revisions.get(revision_id)
+            if not revision:
+                continue
+            snapshot[requirement_id] = RequirementRevisionSnapshot(
+                requirement_id=requirement_id,
+                revision_id=revision_id,
+                statement=str(revision["statement"]),
+                normalized_statement=str(revision["normalized_statement"]),
+            )
+        return snapshot
+
+
+def _manifest_reference_payload(manifest: DocumentManifest) -> dict[str, Any]:
+    payload = manifest.model_dump(mode="json")
+    payload["chunks"] = [
+        {key: value for key, value in chunk.items() if key not in {"text", "normalized_text"}}
+        for chunk in payload["chunks"]
+    ]
+    return payload

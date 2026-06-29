@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from importlib import import_module
 from typing import Any, TypeVar, cast
@@ -12,11 +11,13 @@ from pydantic import BaseModel
 
 from multi_agentic_graph_rag.config.settings import HuggingFaceSettings
 from multi_agentic_graph_rag.domain.schemas import (
+    LLMChunkExtraction,
     LLMFactCandidate,
     LLMRequirementCandidate,
     RequirementDiscoveryOutput,
     SourceTrace,
 )
+from multi_agentic_graph_rag.llm_models.json_output import parse_json_object
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -34,9 +35,8 @@ class HuggingFaceReasoningModel:
 
         generator = pipeline("text-generation", model=self.settings.reasoning_model)
         result = generator(prompt, max_new_tokens=1024, do_sample=False)[0]["generated_text"]
-        json_start = result.find("{")
-        json_end = result.rfind("}") + 1
-        return schema.model_validate(json.loads(result[json_start:json_end]))
+        completion = result.removeprefix(prompt)
+        return schema.model_validate(parse_json_object(completion or result))
 
 
 class HuggingFaceEmbeddingModel:
@@ -76,8 +76,7 @@ class LocalHeuristicReasoningModel:
         if schema is not RequirementDiscoveryOutput:
             raise RuntimeError("local_heuristic only supports requirement discovery")
         chunks = _extract_chunks(prompt)
-        facts: list[LLMFactCandidate] = []
-        requirements: list[LLMRequirementCandidate] = []
+        chunk_outputs: list[LLMChunkExtraction] = []
         for index, (chunk_id, text) in enumerate(chunks[:20], start=1):
             sentence = _first_meaningful_sentence(text)
             if not sentence:
@@ -89,19 +88,28 @@ class LocalHeuristicReasoningModel:
                 end_char=text.find(sentence) + len(sentence),
             )
             fact_temp = f"F{index}"
-            facts.append(LLMFactCandidate(temp_id=fact_temp, text=sentence, source_trace=trace))
             statement = _to_requirement(sentence)
-            requirements.append(
-                LLMRequirementCandidate(
-                    temp_id=f"R{index}",
-                    statement=statement,
-                    fact_temp_ids=[fact_temp],
-                    source_trace=trace,
+            chunk_outputs.append(
+                LLMChunkExtraction(
+                    chunk_id=chunk_id,
+                    facts=[
+                        LLMFactCandidate(
+                            temp_id=fact_temp,
+                            text=sentence,
+                            source_trace=trace,
+                            requirements=[
+                                LLMRequirementCandidate(
+                                    temp_id=f"R{index}",
+                                    statement=statement,
+                                    requirement_key=_to_requirement_key(statement),
+                                    source_trace=trace,
+                                )
+                            ],
+                        )
+                    ],
                 )
             )
-        return schema.model_validate(
-            RequirementDiscoveryOutput(facts=facts, requirements=requirements).model_dump()
-        )
+        return schema.model_validate(RequirementDiscoveryOutput(chunks=chunk_outputs).model_dump())
 
 
 def _hash_vector(text: str, dimensions: int = 384) -> list[float]:
@@ -134,3 +142,10 @@ def _to_requirement(sentence: str) -> str:
     if lowered.lower().startswith(("the system shall", "system shall")):
         return lowered
     return f"The system shall satisfy the documented behavior: {lowered}"
+
+
+def _to_requirement_key(statement: str) -> str:
+    key = statement.lower()
+    key = re.sub(r"\b\d+(?:\.\d+)?\b", "{number}", key)
+    key = re.sub(r"[^a-z0-9{}]+", " ", key)
+    return " ".join(key.split())

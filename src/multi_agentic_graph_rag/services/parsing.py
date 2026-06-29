@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from multi_agentic_graph_rag.domain.schemas import ParsedBlock
+from multi_agentic_graph_rag.observability.logging import RunLogger
 
 PARSER_FINGERPRINT = "parsing-v1"
 
@@ -19,14 +20,48 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def parse_document(path: Path) -> tuple[list[ParsedBlock], str]:
+def parse_document(
+    path: Path,
+    logger: RunLogger | None = None,
+) -> tuple[list[ParsedBlock], str]:
+    if logger is not None:
+        logger.debug(
+            "Parsing document at {path}",
+            step="parse_document",
+            path=str(path),
+            suffix=path.suffix.lower(),
+        )
     suffix = path.suffix.lower()
     if suffix in {".txt", ".md"}:
-        return _parse_text(path), PARSER_FINGERPRINT
+        blocks = _parse_text(path)
+        if logger is not None:
+            logger.debug(
+                "Parsed {count} blocks from {path}",
+                step="parse_document",
+                path=str(path),
+                count=len(blocks),
+            )
+        return blocks, PARSER_FINGERPRINT
     if suffix == ".docx":
-        return _parse_docx(path), PARSER_FINGERPRINT
+        blocks = _parse_docx(path)
+        if logger is not None:
+            logger.debug(
+                "Parsed {count} blocks from {path}",
+                step="parse_document",
+                path=str(path),
+                count=len(blocks),
+            )
+        return blocks, PARSER_FINGERPRINT
     if suffix == ".pdf":
-        return _parse_pdf(path), PARSER_FINGERPRINT
+        blocks = _parse_pdf(path)
+        if logger is not None:
+            logger.debug(
+                "Parsed {count} blocks from {path}",
+                step="parse_document",
+                path=str(path),
+                count=len(blocks),
+            )
+        return blocks, PARSER_FINGERPRINT
     raise ValueError(f"Unsupported document type: {suffix}")
 
 
