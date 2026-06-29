@@ -1,421 +1,187 @@
-"""Command-line interface for the MARAG platform."""
+"""Typer CLI for the ingestion-first MARAG rebuild."""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import sys
-from collections.abc import Sequence
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Literal
-from uuid import UUID
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from multi_agentic_graph_rag.application.workflows.ingestion.runner import (
-    run_ingestion_skeleton,
-)
-from multi_agentic_graph_rag.config.providers import (
-    EmbeddingProvider,
-    GraphStoreProvider,
-    ReasoningLLMProvider,
-    VectorStoreProvider,
-)
-from multi_agentic_graph_rag.config.settings import load_settings
-from multi_agentic_graph_rag.domain.commands import (
-    IngestDocumentCommand,
-    ProviderOverrides,
-)
-from multi_agentic_graph_rag.domain.enums import ReplacePolicy
-from multi_agentic_graph_rag.infrastructure.neo4j.client import neo4j_driver_scope
-from multi_agentic_graph_rag.infrastructure.neo4j.schema import ensure_neo4j_schema
-from multi_agentic_graph_rag.infrastructure.postgres.health import (
-    format_postgres_health_report,
-    run_postgres_health_check,
-)
-from multi_agentic_graph_rag.infrastructure.postgres.session import create_postgres_engine
-
-from . import __version__
-from .bootstrap import CheckResult, CheckStatus, configuration_checks, doctor_checks
+from multi_agentic_graph_rag import __version__
+from multi_agentic_graph_rag.agents.ingestion_document_agent import IngestionDocumentAgent
+from multi_agentic_graph_rag.config.config_loader import load_config
+from multi_agentic_graph_rag.db.chroma_store import ChromaStore
+from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
+from multi_agentic_graph_rag.db.postgres import PostgresStore
+from multi_agentic_graph_rag.domain.schemas import IngestionRequest
+from multi_agentic_graph_rag.services.artifacts import verify_requirement_artifact
 
 app = typer.Typer(
     name="marag",
-    help="Multi-Agentic Knowledge-Graph RAG command-line interface.",
+    help="Multi-Agentic Graph RAG ingestion CLI.",
     no_args_is_help=True,
     add_completion=False,
 )
-
-db_check_app = typer.Typer(help="Database health checks.")
-vector_app = typer.Typer(help="Vector index commands.")
-
-app.add_typer(db_check_app, name="db-check")
-app.add_typer(vector_app, name="vectors")
-
+run_app = typer.Typer(help="Run status and recovery commands.")
+artifact_app = typer.Typer(help="Generated artifact commands.")
+app.add_typer(run_app, name="run")
+app.add_typer(artifact_app, name="artifact")
 console = Console()
-
-_STATUS_STYLE: dict[CheckStatus, str] = {
-    "PASS": "green",
-    "WARN": "yellow",
-    "FAIL": "red",
-}
-
-
-def _render_results(
-    title: str,
-    results: Sequence[CheckResult],
-) -> None:
-    """Render diagnostic results in a table."""
-
-    table = Table(title=title)
-    table.add_column("Check", style="bold")
-    table.add_column("Status")
-    table.add_column("Detail")
-
-    for result in results:
-        style = _STATUS_STYLE[result.status]
-
-        table.add_row(
-            result.name,
-            f"[{style}]{result.status}[/{style}]",
-            result.detail,
-        )
-
-    console.print(table)
-
-
-def _execute_checks(
-    title: str,
-    results: Sequence[CheckResult],
-) -> None:
-    """Render checks and return a nonzero exit code on failure."""
-
-    _render_results(title, results)
-
-    if any(result.status == "FAIL" for result in results):
-        raise typer.Exit(code=1)
 
 
 @app.command("version")
 def version_command() -> None:
-    """Print the installed application version."""
-
     console.print(f"marag {__version__}")
 
 
 @app.command("config-check")
-def config_check_command(
-    config: Annotated[
-        Path | None,
-        typer.Option("--config", help="Path to config.json override."),
-    ] = None,
-    project_root: Annotated[
-        Path | None,
-        typer.Option("--project-root", help="Override resolved project root."),
-    ] = None,
-    reasoning_provider: Annotated[
-        ReasoningLLMProvider | None,
-        typer.Option("--reasoning-provider", help="Override reasoning LLM provider."),
-    ] = None,
-    embedding_provider: Annotated[
-        EmbeddingProvider | None,
-        typer.Option("--embedding-provider", help="Override embedding provider."),
-    ] = None,
-    vector_store_provider: Annotated[
-        VectorStoreProvider | None,
-        typer.Option("--vector-store-provider", help="Override vector store provider."),
-    ] = None,
-    graph_store_provider: Annotated[
-        GraphStoreProvider | None,
-        typer.Option("--graph-store-provider", help="Override graph store provider."),
-    ] = None,
+def config_check(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
 ) -> None:
-    """Validate Phase 2 configuration and create approved runtime directories."""
-
-    overrides: dict[str, object] = {}
-
-    if project_root is not None:
-        overrides.setdefault("paths", {})
-        assert isinstance(overrides["paths"], dict)
-        overrides["paths"]["project_root"] = project_root
-
-    if reasoning_provider is not None:
-        overrides.setdefault("requirement_discovery", {})
-        assert isinstance(overrides["requirement_discovery"], dict)
-        overrides["requirement_discovery"]["reasoning_provider"] = reasoning_provider.value
-
-    if embedding_provider is not None:
-        overrides.setdefault("embedding", {})
-        assert isinstance(overrides["embedding"], dict)
-        overrides["embedding"]["provider"] = embedding_provider.value
-
-    if vector_store_provider is not None:
-        overrides.setdefault("providers", {})
-        assert isinstance(overrides["providers"], dict)
-        overrides["providers"]["vector_store_provider"] = vector_store_provider.value
-
-    if graph_store_provider is not None:
-        overrides.setdefault("providers", {})
-        assert isinstance(overrides["providers"], dict)
-        overrides["providers"]["graph_store_provider"] = graph_store_provider.value
-
-    # Force-load once so enum/provider errors are raised before rendering.
-    load_settings(config_path=config, overrides=overrides)
-
-    _execute_checks(
-        title="MARAG Configuration Check",
-        results=configuration_checks(config_path=config, overrides=overrides),
-    )
+    settings = load_config(config_path=config)
+    rows: list[tuple[str, str]] = [
+        ("project_root", str(settings.paths.project_root)),
+        ("reasoning_model.provider", settings.reasoning_model.provider),
+        ("embedding_model.provider", settings.embedding_model.provider),
+        ("reranker_model.provider", settings.reranker_model.provider),
+        ("postgres.mode", settings.postgres.mode),
+        ("neo4j.mode", settings.neo4j.mode),
+        ("chroma.collection", settings.chroma.collection_name),
+        ("global_cache_dir", str(settings.paths.global_cache_dir)),
+    ]
+    _render_kv("Configuration", rows)
 
 
 @app.command("doctor")
-def doctor_command() -> None:
-    """Validate the Phase 1 local development environment."""
-
-    _execute_checks(
-        title="MARAG Environment Doctor",
-        results=doctor_checks(),
-    )
-
-
-@db_check_app.command("postgres")
-def db_check_postgres() -> None:
-    """Run PostgreSQL Phase 4 health checks."""
-
-    asyncio.run(_db_check_postgres())
+def doctor() -> None:
+    settings = load_config()
+    checks = [
+        ("python_package", "PASS", "multi_agentic_graph_rag imports"),
+        ("config", "PASS", "config.json/.env/defaults loaded"),
+        ("cache_policy", "PASS", f"cache root {settings.paths.global_cache_dir}"),
+        ("runtime_dirs", "PASS", "runtime directories exist"),
+    ]
+    _render_checks("Doctor", checks)
 
 
-async def _db_check_postgres() -> None:
-    settings = load_settings()
-    engine = create_postgres_engine(settings)
-
-    try:
-        report = await run_postgres_health_check(engine)
-
-        for line in format_postgres_health_report(report):
-            typer.echo(line)
-
-        if not report.passed:
-            raise typer.Exit(code=1)
-
-    finally:
-        await engine.dispose()
-
-
-def _secret_value(value: Any) -> str:
-    """Return a plain string from pydantic SecretStr or normal string."""
-
-    if hasattr(value, "get_secret_value"):
-        return str(value.get_secret_value())
-
-    return str(value)
-
-
-@app.command("neo4j-schema")
-def neo4j_schema_command() -> None:
-    """Create or verify Neo4j constraints."""
-
-    asyncio.run(_neo4j_schema())
-
-
-async def _neo4j_schema() -> None:
-    settings = load_settings()
-    neo4j_settings = settings.neo4j
-
-    async with neo4j_driver_scope(
-        uri=str(neo4j_settings.uri),
-        username=str(neo4j_settings.username),
-        password=_secret_value(neo4j_settings.password),
-        database=str(neo4j_settings.database),
-    ) as driver:
-        await driver.verify_connectivity()
-        await ensure_neo4j_schema(driver, database=str(neo4j_settings.database))
-
-    typer.echo("PASS Neo4j schema constraints are ready.")
-
-
-@vector_app.command("check")
-def vector_check_command() -> None:
-    """Verify local Chroma vector store."""
-
-    from multi_agentic_graph_rag.infrastructure.chroma.client import (
-        create_persistent_chroma_client,
-    )
-    from multi_agentic_graph_rag.infrastructure.chroma.vector_store import ChromaVectorStore
-
-    settings = load_settings()
-
-    client = create_persistent_chroma_client(settings.paths.chroma_persist_dir)
-    store = ChromaVectorStore(
-        client=client,
-        collection_name=settings.chroma.collection_name,
-    )
-
-    store.verify_connection()
-
-    typer.echo("PASS Chroma vector store is ready.")
-
-
-@vector_app.command("index-document-version")
-def vector_index_document_version_command(
-    document_version_id: Annotated[
-        UUID,
-        typer.Argument(help="Document version UUID to index into Chroma."),
-    ],
-) -> None:
-    """Index active chunks for one document version into Chroma."""
-
-    asyncio.run(_vector_index_document_version(document_version_id))
-
-
-async def _vector_index_document_version(document_version_id: UUID) -> None:
-    from multi_agentic_graph_rag.application.services.index_chunk_vectors import (
-        IndexChunkVectorsService,
-    )
-    from multi_agentic_graph_rag.infrastructure.chroma.client import (
-        create_persistent_chroma_client,
-    )
-    from multi_agentic_graph_rag.infrastructure.chroma.vector_store import ChromaVectorStore
-    from multi_agentic_graph_rag.infrastructure.embeddings.huggingface import (
-        HuggingFaceEmbeddingAdapter,
-    )
-    from multi_agentic_graph_rag.infrastructure.postgres.repositories import (
-        SqlAlchemyChunkRepository,
-    )
-
-    settings = load_settings()
-
-    engine = create_postgres_engine(settings)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    client = create_persistent_chroma_client(settings.paths.chroma_persist_dir)
-    vector_store = ChromaVectorStore(
-        client=client,
-        collection_name=settings.chroma.collection_name,
-    )
-
-    embedding_provider = HuggingFaceEmbeddingAdapter(
-        model_name=settings.huggingface.embedding_model,
-        normalize_embeddings=settings.embedding.normalize,
-    )
-
-    try:
-        async with session_factory() as session:
-            service = IndexChunkVectorsService(
-                chunk_repository=SqlAlchemyChunkRepository(session),
-                embedding_provider=embedding_provider,
-                vector_store=vector_store,
-            )
-
-            result = await service.index_document_version(
-                document_version_id=document_version_id,
-            )
-
-            typer.echo(
-                "PASS indexed "
-                f"{result.indexed_count} chunks for document_version_id="
-                f"{result.document_version_id} using {result.embedding_fingerprint}"
-            )
-
-    finally:
-        await engine.dispose()
+@app.command("db-check")
+def db_check() -> None:
+    settings = load_config()
+    checks: list[tuple[str, str, str]] = []
+    failed = False
+    check_functions: list[tuple[str, Callable[[], str]]] = [
+        ("postgres", lambda: PostgresStore(settings).check()),
+        ("neo4j", lambda: Neo4jStore(settings).check()),
+        ("chroma", lambda: ChromaStore(settings).check()),
+    ]
+    for name, fn in check_functions:
+        try:
+            checks.append((name, "PASS", fn()))
+        except Exception as exc:
+            failed = True
+            checks.append((name, "FAIL", f"{exc.__class__.__name__}: {exc}"))
+    _render_checks("Database Check", checks)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @app.command("ingest")
-def ingest_command(
-    project: Annotated[
-        str,
-        typer.Option("--project", help="Project key, for example PROJECT_1."),
-    ],
-    document: Annotated[
-        Path,
-        typer.Option("--document", help="Path to the document to ingest."),
-    ],
-    version: Annotated[
-        str,
-        typer.Option("--version", help="Logical document version, for example 1.0."),
-    ],
-    logical_name: Annotated[
-        str | None,
-        typer.Option("--logical-name", help="Stable logical document name."),
-    ] = None,
-    reasoning_provider: Annotated[
-        ReasoningLLMProvider | None,
-        typer.Option("--reasoning-provider", help="Override reasoning provider."),
-    ] = None,
-    embedding_provider: Annotated[
-        EmbeddingProvider | None,
-        typer.Option("--embedding-provider", help="Override embedding provider."),
-    ] = None,
-    replace_version: Annotated[
-        bool,
-        typer.Option("--replace-version", help="Explicitly replace same document/version."),
-    ] = False,
-    dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--dry-run",
-            help="Run orchestration skeleton without real ingestion side effects.",
-        ),
-    ] = False,
-    resume_run: Annotated[
-        str | None,
-        typer.Option("--resume-run", help="Resume/checkpoint thread id."),
-    ] = None,
-    json_output: Annotated[
-        bool,
-        typer.Option("--json-output", help="Print final graph state as JSON."),
-    ] = False,
-    checkpoint: Annotated[
-        Literal["memory", "postgres"],
-        typer.Option("--checkpoint", help="Checkpoint backend for Phase 7 skeleton."),
-    ] = "memory",
-    setup_checkpointer: Annotated[
-        bool,
-        typer.Option(
-            "--setup-checkpointer",
-            help="Create LangGraph checkpoint tables. Use once for postgres mode.",
-        ),
-    ] = False,
+def ingest(
+    project: Annotated[str, typer.Option("--project")],
+    document: Annotated[Path, typer.Option("--document")],
+    version: Annotated[str, typer.Option("--version")],
+    logical_name: Annotated[str | None, typer.Option("--logical-name")] = None,
+    replace_version: Annotated[bool, typer.Option("--replace-version")] = False,
+    reasoning_provider: Annotated[str | None, typer.Option("--reasoning-provider")] = None,
+    embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
 ) -> None:
-    """Run the Phase 7 LangGraph ingestion skeleton."""
-
-    command = IngestDocumentCommand(
-        project_key=project,
-        document_path=document,
-        document_version=version,
-        logical_document_name=logical_name,
-        provider_overrides=ProviderOverrides(
-            reasoning_provider=reasoning_provider.value if reasoning_provider else None,
-            embedding_provider=embedding_provider.value if embedding_provider else None,
-        ),
-        replace_policy=(ReplacePolicy.REPLACE_VERSION if replace_version else ReplacePolicy.REJECT),
-        dry_run=dry_run,
+    request = IngestionRequest(
+        project=project,
+        document=document,
+        version=version,
+        logical_name=logical_name,
+        replace_version=replace_version,
+        reasoning_provider=reasoning_provider,
+        embedding_provider=embedding_provider,
     )
-
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-    final_state = asyncio.run(
-        run_ingestion_skeleton(
-            command=command,
-            resume_run=resume_run,
-            checkpoint_mode=checkpoint,
-            setup_checkpointer=setup_checkpointer,
-        )
-    )
-
+    result = IngestionDocumentAgent().run(request)
     if json_output:
-        console.print_json(json.dumps(final_state, indent=2, default=str))
+        console.print_json(json.dumps(result.model_dump(mode="json"), indent=2))
         return
-
     console.print(
-        "[green]PASS[/green] ingestion skeleton completed "
-        f"run_id={final_state.get('run_id')} "
-        f"current_step={final_state.get('current_step')}"
+        "[green]PASS[/green] ingest completed "
+        f"run_id={result.run_id} chunks={len(result.chunk_ids)} "
+        f"facts={len(result.fact_ids)} requirements={len(result.requirement_ids)}"
     )
+    console.print(f"manifest={result.manifest_path}")
+    console.print(f"artifact={result.artifact_path}")
+
+
+@run_app.command("status")
+def run_status(run_id: Annotated[str, typer.Argument()]) -> None:
+    settings = load_config()
+    log_path = settings.paths.runtime_logs_dir / f"{run_id}.jsonl"
+    if not log_path.exists():
+        raise typer.BadParameter(f"unknown run id: {run_id}")
+    lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    last_by_step: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        if "step" in line:
+            last_by_step[str(line["step"])] = line
+    checks = [
+        (step, str(payload.get("status", "unknown")).upper(), str(payload.get("error", "")))
+        for step, payload in last_by_step.items()
+    ]
+    _render_checks(f"Run {run_id}", checks)
+
+
+@run_app.command("resume")
+def run_resume(run_id: Annotated[str, typer.Argument()]) -> None:
+    settings = load_config()
+    log_path = settings.paths.runtime_logs_dir / f"{run_id}.jsonl"
+    if not log_path.exists():
+        raise typer.BadParameter(f"unknown run id: {run_id}")
+    console.print(
+        "Resume is intentionally conservative in this rebuild. "
+        "Use the original ingest command again; same checksum/version is idempotent."
+    )
+
+
+@artifact_app.command("verify")
+def artifact_verify(path: Annotated[Path, typer.Argument()]) -> None:
+    artifact = verify_requirement_artifact(path)
+    console.print(
+        "[green]PASS[/green] artifact verified "
+        f"requirements={len(artifact.requirements)} facts={len(artifact.facts)} "
+        f"document_version_id={artifact.document_version_id}"
+    )
+
+
+def _render_kv(title: str, rows: list[tuple[str, str]]) -> None:
+    table = Table(title=title)
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+    for key, value in rows:
+        table.add_row(key, value)
+    console.print(table)
+
+
+def _render_checks(title: str, rows: list[tuple[str, str, str]]) -> None:
+    table = Table(title=title)
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for check, status, detail in rows:
+        style = "green" if status == "PASS" or status == "COMPLETED" else "red"
+        if status in {"STARTED", "WARN"}:
+            style = "yellow"
+        table.add_row(check, f"[{style}]{status}[/{style}]", detail)
+    console.print(table)
 
 
 if __name__ == "__main__":

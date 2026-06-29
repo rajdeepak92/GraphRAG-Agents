@@ -6,36 +6,43 @@
   "paths": {
     "global_cache_dir": ".global_cache",
     "documents_inbox_dir": "documents/inbox",
-    "generated_artifacts_dir": "generated_artifacts",
+    "generated_requirements_dir": "generated/inbox",
     "chroma_persist_dir": "runtime/databases/chroma",
     "runtime_staging_dir": "runtime/staging",
     "runtime_logs_dir": "runtime/logs",
     "runtime_locks_dir": "runtime/locks"
   },
-  "providers": {
-    "vector_store_provider": "chroma_local",
-    "graph_store_provider": "neo4j_local"
+  "reasoning_model": {
+    "provider": "local_heuristic",
+    "model": "rules-v1"
   },
-  "embedding": {
-    "provider": "huggingface",
-    "normalize": true
+  "embedding_model": {
+    "provider": "local_hash",
+    "model": "hash-384"
   },
-  "requirement_discovery": {
-    "reasoning_provider": "azure_openai",
-    "max_correction_retries": 2,
-    "temperature": 0.0
+  "reranker_model": {
+    "provider": "none"
+  },
+  "postgres": {
+    "mode": "local_json",
+    "dsn": "postgresql://marag:marag@127.0.0.1:5432/marag",
+    "local_path": "runtime/staging/postgres_records.jsonl"
+  },
+  "neo4j": {
+    "mode": "local_json",
+    "uri": "bolt://127.0.0.1:7687",
+    "username": "neo4j",
+    "password": "",
+    "database": "neo4j",
+    "local_path": "runtime/staging/neo4j_projection.jsonl"
+  },
+  "chroma": {
+    "collection_name": "marag_chunks"
   },
   "chunking": {
     "chunk_size": 1200,
     "chunk_overlap": 150,
-    "minimum_chunk_size": 200,
-    "maximum_chunk_size": 2000,
-    "preserve_page_boundaries": true,
-    "preserve_heading_context": true
-  },
-  "observability": {
-    "structured_logging": true,
-    "log_full_prompts": false,
-    "log_full_documents": false
+    "minimum_chunk_size": 80,
+    "maximum_chunk_size": 2000
   }
 }

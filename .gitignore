@@ -47,10 +47,14 @@ Desktop.ini
 # Source-document inbox
 documents/inbox/*
 !documents/inbox/.gitkeep
+!documents/inbox/PROJECT_1/
+!documents/inbox/PROJECT_1/sample.txt
 
 # Generated artifacts
 generated_artifacts/*
 !generated_artifacts/.gitkeep
+generated/inbox/*/requirements/*
+!generated/inbox/*/requirements/.gitkeep
 
 # Chroma local database
 runtime/databases/chroma/*

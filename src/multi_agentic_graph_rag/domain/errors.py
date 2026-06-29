@@ -1,26 +1,25 @@
-"""Domain-level errors.
-
-This module must not import infrastructure packages.
-"""
-
-from __future__ import annotations
+"""Domain exceptions."""
 
 
-class DomainError(ValueError):
-    """Base class for deterministic domain validation errors."""
+class MaragError(Exception):
+    """Base application error."""
 
 
-class IdentifierError(DomainError):
-    """Raised when a public traceability identifier is invalid."""
+class ConfigurationError(MaragError):
+    """Configuration is invalid."""
 
 
-class VersionConflictError(DomainError):
-    """Raised when a document version conflicts with an existing checksum."""
+class IngestionError(MaragError):
+    """Ingestion failed."""
 
 
-class InvalidRunTransitionError(DomainError):
-    """Raised when an ingestion run attempts an invalid state transition."""
+class VersionConflictError(IngestionError):
+    """Same logical version has different source bytes."""
 
 
-class TraceabilityError(DomainError):
-    """Raised when a fact or requirement lacks valid source traceability."""
+class StoreUnavailableError(IngestionError):
+    """A required backing store is unavailable."""
+
+
+class TraceValidationError(IngestionError):
+    """LLM trace data does not match source text."""

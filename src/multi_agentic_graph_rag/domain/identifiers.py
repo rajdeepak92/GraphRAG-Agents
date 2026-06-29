@@ -1,75 +1,49 @@
-"""Public identifier and version normalization rules."""
+"""Identifier generation for externally visible ingestion records."""
 
 from __future__ import annotations
 
 import hashlib
 import re
-from uuid import UUID
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
-from multi_agentic_graph_rag.domain.errors import IdentifierError
-
-_PUBLIC_ID_PATTERN = re.compile(r"^[A-Z]+-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
-
-
-def validate_public_id(value: str, *, prefix: str) -> str:
-    """Validate a public traceability id such as REQ-000001."""
-
-    normalized = value.strip().upper()
-
-    if not normalized.startswith(f"{prefix}-"):
-        msg = f"Expected {prefix}- public id. Got: {value!r}"
-        raise IdentifierError(msg)
-
-    if not _PUBLIC_ID_PATTERN.fullmatch(normalized):
-        msg = f"Invalid public id format: {value!r}"
-        raise IdentifierError(msg)
-
-    return normalized
+_SAFE = re.compile(r"[^A-Za-z0-9]+")
 
 
-def validate_temporary_key(value: str, *, prefix: str) -> str:
-    """Validate LLM temporary keys such as F1 or R1."""
-
-    normalized = value.strip().upper()
-
-    if not re.fullmatch(rf"{re.escape(prefix)}[1-9][0-9]*", normalized):
-        msg = f"Invalid temporary {prefix} key: {value!r}"
-        raise IdentifierError(msg)
-
-    return normalized
+def stable_token(*parts: object, length: int = 16) -> str:
+    payload = "|".join(str(part) for part in parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:length].upper()
 
 
-def normalize_version(value: str) -> str:
-    """Normalize a supplied document version without forcing numeric parsing."""
-
-    normalized = " ".join(value.strip().split())
-
-    if not normalized:
-        msg = "document_version cannot be empty."
-        raise IdentifierError(msg)
-
-    return normalized.casefold()
+def safe_slug(value: str) -> str:
+    slug = _SAFE.sub("-", value.strip()).strip("-").upper()
+    return slug or "ITEM"
 
 
-def sha256_text(value: str) -> str:
-    """Return a deterministic SHA-256 hash for normalized text."""
+def run_id(project: str, document: Path, version: str) -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    token = stable_token(project, document.name, version, timestamp, uuid4().hex, length=8)
+    return f"RUN-{timestamp}-{token}"
 
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+def document_id(project: str, logical_name: str) -> str:
+    return f"DOC-{safe_slug(project)}-{stable_token(logical_name, length=10)}"
 
 
-def make_chunk_id(
-    *,
-    document_version_id: UUID,
-    ordinal: int,
-    content_hash: str,
-) -> str:
-    """Create a deterministic chunk id from document version, ordinal, and hash."""
+def document_version_id(document_identifier: str, version: str, checksum: str) -> str:
+    return f"DV-{stable_token(document_identifier, version, checksum, length=18)}"
 
-    if ordinal < 1:
-        msg = "Chunk ordinal must be >= 1."
-        raise IdentifierError(msg)
 
-    seed = f"{document_version_id}:{ordinal}:{content_hash}"
-    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20].upper()
+def chunk_id(document_version_identifier: str, ordinal: int, text: str) -> str:
+    return (
+        f"CHUNK-{ordinal:04d}-{stable_token(document_version_identifier, ordinal, text, length=12)}"
+    )
 
-    return f"CHUNK-{digest}"
+
+def fact_id(project: str, version: str, text: str, ordinal: int) -> str:
+    return f"FACT-{stable_token(project, version, text, ordinal, length=14)}"
+
+
+def requirement_id(project: str, version: str, text: str, ordinal: int) -> str:
+    return f"REQ-{stable_token(project, version, text, ordinal, length=14)}"
