@@ -1,5 +1,0 @@
-Customer onboarding shall capture the applicant name, contact details, and requested product before submission.
-
-The system shall validate that mandatory applicant fields are present before creating an onboarding case.
-
-Submitted onboarding cases must preserve a traceable source reference for audit review.

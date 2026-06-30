@@ -8,7 +8,6 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "alembic>=1.18.5",
     "asyncpg>=0.31.0",
     "charset-normalizer>=3.4.7",
     "chromadb>=1.5.9",
@@ -29,9 +28,6 @@ dependencies = [
     "typer>=0.26.8",
 ]
 
-
-[project.scripts]
-marag = "multi_agentic_graph_rag.cli:app"
 
 [project.optional-dependencies]
 azure = [

@@ -35,13 +35,13 @@ class ChunkingSettings(BaseModel):
 
 
 class PostgresSettings(BaseModel):
-    mode: str = "local_json"
+    mode: str = "postgres"
     dsn: str = "postgresql://marag:marag@127.0.0.1:5432/marag"
     local_path: Path
 
 
 class Neo4jSettings(BaseModel):
-    mode: str = "local_json"
+    mode: str = "neo4j"
     uri: str = "bolt://127.0.0.1:7687"
     username: str = "neo4j"
     password: str = ""
@@ -51,6 +51,11 @@ class Neo4jSettings(BaseModel):
 
 class ChromaSettings(BaseModel):
     collection_name: str = "marag_chunks"
+
+
+class DiscoverySettings(BaseModel):
+    batch_size: int = 1
+    log_llm_responses: bool = False
 
 
 class AzureOpenAISettings(BaseModel):
@@ -63,10 +68,13 @@ class AzureOpenAISettings(BaseModel):
 
 class HuggingFaceSettings(BaseModel):
     token: str = ""
-    reasoning_model: str = ""
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reasoning_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
+    embedding_model: str = "BAAI/bge-m3"
+    reranker_model: str = "BAAI/bge-reranker-base"
     offline: bool = False
+    max_new_tokens: int = 4096
+    discovery_batch_size: int = 1
+    log_llm_responses: bool = False
 
 
 class AppSettings(BaseModel):
@@ -76,18 +84,21 @@ class AppSettings(BaseModel):
     log_level: str = "INFO"
     paths: PathsSettings
     reasoning_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(provider="local_heuristic", model="rules")
+        default_factory=lambda: ModelSection(
+            provider="huggingface", model="Qwen/Qwen2.5-Coder-7B-Instruct"
+        )
     )
     embedding_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(provider="local_hash", model="hash-384")
+        default_factory=lambda: ModelSection(provider="huggingface", model="BAAI/bge-m3")
     )
     reranker_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(provider="none", model=None)
+        default_factory=lambda: ModelSection(provider="huggingface", model="BAAI/bge-reranker-base")
     )
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     postgres: PostgresSettings
     neo4j: Neo4jSettings
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
+    discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
     raw_config: dict[str, Any] = Field(default_factory=dict)

@@ -7,12 +7,132 @@ from datetime import UTC, datetime
 from typing import Any
 
 from multi_agentic_graph_rag.config.settings import AppSettings
-from multi_agentic_graph_rag.domain.errors import VersionConflictError
+from multi_agentic_graph_rag.domain.errors import SchemaMismatchError, VersionConflictError
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementArtifact,
     RequirementRevisionSnapshot,
 )
+
+_MANAGED_TABLES = (
+    "requirement_fact_links",
+    "requirement_evidence",
+    "requirement_delta_events",
+    "requirement_revisions",
+    "requirements",
+    "fact_occurrences",
+    "canonical_facts",
+    "requirement_artifacts",
+    "document_versions",
+    "ingestion_runs",
+)
+
+_TEXT_TYPES = {"text", "character varying"}
+_EXPECTED_COLUMNS = {
+    "document_versions": {
+        "document_version_id": _TEXT_TYPES,
+        "document_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "version": _TEXT_TYPES,
+        "checksum": _TEXT_TYPES,
+        "manifest": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "ingestion_runs": {
+        "run_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "status": _TEXT_TYPES,
+        "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "requirement_artifacts": {
+        "artifact_path": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "canonical_facts": {
+        "canonical_fact_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_id": _TEXT_TYPES,
+        "normalized_text": _TEXT_TYPES,
+        "representative_text": _TEXT_TYPES,
+        "created_at": {"timestamp with time zone"},
+    },
+    "fact_occurrences": {
+        "fact_id": _TEXT_TYPES,
+        "canonical_fact_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "chunk_id": _TEXT_TYPES,
+        "page": {"integer"},
+        "section": _TEXT_TYPES,
+        "quote": _TEXT_TYPES,
+        "start_char": {"integer"},
+        "end_char": {"integer"},
+        "source_path": _TEXT_TYPES,
+        "text": _TEXT_TYPES,
+        "created_at": {"timestamp with time zone"},
+    },
+    "requirements": {
+        "requirement_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_id": _TEXT_TYPES,
+        "requirement_key": _TEXT_TYPES,
+        "status": _TEXT_TYPES,
+        "first_seen_document_version_id": _TEXT_TYPES,
+        "active_revision_id": _TEXT_TYPES,
+        "created_at": {"timestamp with time zone"},
+        "updated_at": {"timestamp with time zone"},
+    },
+    "requirement_revisions": {
+        "revision_id": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "statement": _TEXT_TYPES,
+        "normalized_statement": _TEXT_TYPES,
+        "requirement_type": _TEXT_TYPES,
+        "priority": _TEXT_TYPES,
+        "status": _TEXT_TYPES,
+        "first_seen_document_version_id": _TEXT_TYPES,
+        "created_at": {"timestamp with time zone"},
+        "updated_at": {"timestamp with time zone"},
+    },
+    "requirement_evidence": {
+        "evidence_id": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "revision_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "chunk_id": _TEXT_TYPES,
+        "page": {"integer"},
+        "section": _TEXT_TYPES,
+        "quote": _TEXT_TYPES,
+        "start_char": {"integer"},
+        "end_char": {"integer"},
+        "source_path": _TEXT_TYPES,
+        "created_at": {"timestamp with time zone"},
+    },
+    "requirement_fact_links": {
+        "evidence_id": _TEXT_TYPES,
+        "fact_id": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "revision_id": _TEXT_TYPES,
+        "created_at": {"timestamp with time zone"},
+    },
+    "requirement_delta_events": {
+        "event_id": _TEXT_TYPES,
+        "event_type": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "revision_id": _TEXT_TYPES,
+        "previous_revision_id": _TEXT_TYPES,
+        "superseded_by_revision_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "evidence_ids": {"jsonb"},
+        "impacted_artifact_types": {"jsonb"},
+        "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+}
 
 
 class PostgresStore:
@@ -26,7 +146,8 @@ class PostgresStore:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("select 1")
             cursor.fetchone()
-        return "PASS postgres connectivity"
+        self.ensure_schema()
+        return "PASS postgres connectivity and schema"
 
     def ensure_schema(self) -> None:
         if self.settings.postgres.mode == "local_json":
@@ -149,7 +270,20 @@ class PostgresStore:
                       on fact_occurrences(chunk_id);
                     """
                 )
+                self._validate_schema(cursor)
             connection.commit()
+
+    def reset_schema(self) -> str:
+        if self.settings.postgres.mode == "local_json":
+            if self.settings.postgres.local_path.exists():
+                self.settings.postgres.local_path.unlink()
+            return f"RESET postgres local_json path={self.settings.postgres.local_path}"
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("drop table if exists " + ", ".join(_MANAGED_TABLES) + " cascade")
+            connection.commit()
+        self.ensure_schema()
+        return f"RESET postgres schema tables={len(_MANAGED_TABLES)}"
 
     def assert_version_allowed(self, manifest: DocumentManifest, replace_version: bool) -> None:
         if self.settings.postgres.mode == "local_json":
@@ -567,7 +701,52 @@ class PostgresStore:
     def _connect(self) -> Any:
         import psycopg
 
-        return psycopg.connect(self.settings.postgres.dsn)
+        dsn = self.settings.postgres.dsn
+        scheme, separator, remainder = dsn.partition("://")
+        if separator and "+" in scheme:
+            dsn = f"{scheme.split('+', 1)[0]}://{remainder}"
+        return psycopg.connect(dsn)
+
+    def _validate_schema(self, cursor: Any) -> None:
+        cursor.execute(
+            """
+            select table_name, column_name, data_type
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = any(%s)
+            """,
+            (list(_EXPECTED_COLUMNS),),
+        )
+        actual: dict[str, dict[str, str]] = {}
+        for table_name, column_name, data_type in cursor.fetchall():
+            actual.setdefault(str(table_name), {})[str(column_name)] = str(data_type)
+
+        problems: list[str] = []
+        for table_name, columns in _EXPECTED_COLUMNS.items():
+            actual_columns = actual.get(table_name)
+            if actual_columns is None:
+                problems.append(f"{table_name}: missing table")
+                continue
+            for column_name, expected_types in columns.items():
+                actual_type = actual_columns.get(column_name)
+                if actual_type is None:
+                    problems.append(f"{table_name}.{column_name}: missing column")
+                    continue
+                if actual_type not in expected_types:
+                    expected = "/".join(sorted(expected_types))
+                    problems.append(
+                        f"{table_name}.{column_name}: expected {expected}, found {actual_type}"
+                    )
+
+        if problems:
+            summary = "; ".join(problems[:8])
+            if len(problems) > 8:
+                summary += f"; ... {len(problems) - 8} more"
+            raise SchemaMismatchError(
+                "postgres schema does not match the current app contract. "
+                f"{summary}. Run `python -m multi_agentic_graph_rag postgres-reset --yes` "
+                "against a disposable/local database, then rerun db-check."
+            )
 
     def _append_local(self, payload: dict[str, Any]) -> None:
         self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)

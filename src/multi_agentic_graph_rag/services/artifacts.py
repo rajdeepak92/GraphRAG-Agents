@@ -13,10 +13,9 @@ from multi_agentic_graph_rag.observability.logging import RunLogger
 def write_requirement_artifact(
     artifact: RequirementArtifact,
     run_dir: Path,
-    stamp: str,
     logger: RunLogger | None = None,
 ) -> Path:
-    path = run_dir / f"req_{stamp}.json"
+    path = run_dir / "requirements.json"
     if logger is not None:
         logger.debug(
             "Writing requirement artifact for {document_version_id} to {path}",

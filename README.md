@@ -1,74 +1,124 @@
 # Multi-Agentic Graph RAG
 
-This rebuild is ingestion-first. The public package remains `multi_agentic_graph_rag`
-and the CLI command remains `marag`.
+This repository is ingestion-first. The public package is `multi_agentic_graph_rag`.
+On Windows with App Control enabled, use `uv run` rather than generated launchers.
 
 ## Setup
 
 ```powershell
-uv sync
 Copy-Item .env.example .env
-uv run marag version
-uv run marag config-check
-uv run marag doctor
-uv run marag db-check
+& C:\Users\rdmpr\AppData\Local\Programs\Python\Python312\python.exe -m venv .venv
+.\.venv\Scripts\Activate.ps1
+uv sync --dev --extra local-llm
 ```
 
-The default `config.json` uses local trace files for PostgreSQL and Neo4j plus a
-real local Chroma collection so smoke checks work without external services. To
-use real services, set `POSTGRES_MODE=postgres` and `NEO4J_MODE=neo4j` in `.env`
-with the matching credentials.
+The default profile uses Hugging Face Qwen for requirement discovery, Hugging
+Face BGE-M3 for embeddings, a Hugging Face BGE reranker, PostgreSQL, Neo4j,
+and Chroma. `HF_TOKEN=` may be blank for public models while online. Use
+`HUGGINGFACE_OFFLINE=true` only after the configured models are cached.
+
+## Baseline Checks
+
+```powershell
+uv run python -m multi_agentic_graph_rag version
+uv run python -m multi_agentic_graph_rag config-check
+uv run python -m multi_agentic_graph_rag hf-check --load-model
+uv run python -m multi_agentic_graph_rag db-check
+```
+
+For a lighter model check that does not load weights:
+
+```powershell
+uv run python -m multi_agentic_graph_rag hf-check
+```
 
 ## Ingest
 
 ```powershell
-uv run marag ingest --project PROJECT_1 --document .\documents\inbox\PROJECT_1\sample.txt --version 1.0
+uv run python -m multi_agentic_graph_rag ingest `
+  --project <PROJECT> `
+  --document <DOCUMENT_PATH> `
+  --version <VERSION> `
+  --json-output
 ```
 
-Generated requirement JSON is written under:
+Generated requirement artifacts and logs are written under:
 
 ```text
-.generated/<PROJECT>/run/
+generated/<PROJECT>/req/<RUN_ID>/
 ```
 
-Runtime manifests stay under `runtime/staging/`, while run logs and run
-metadata are written under `.generated/<PROJECT>/run/`.
+That directory is local-only and gitignored. It contains `requirements.json`,
+`run.log`, `run.jsonl`, `chunk_manifest.json`, and any saved
+`llm_response_*.txt` files.
 
-## Requirement Ledger
+When requirement discovery parsing or source-trace validation fails, the full
+raw model response is saved beside the run artifacts. Set
+`LOG_LLM_RESPONSES=true` to also capture raw successful responses for
+debugging.
 
-Ingestion now extracts a nested `chunks[] -> facts[] -> requirements[]` structure
-from the reasoning model. Python-owned artifact generation converts that into:
+## Database Requirements
 
-- `FACT-*` fact occurrence IDs tied to one chunk quote and source span.
-- Canonical fact groups for repeated fact text across chunks.
-- Stable `REQ-*` requirement lineage IDs derived from a hybrid requirement key.
-- `REQREV-*` revision IDs for exact requirement statement versions.
-- Evidence rows and delta events for `new`, `duplicate`, `changed`, and
-  `superseded` lifecycle outcomes.
+For a real ingest run, all three services must be configured and reachable:
 
-Storage ownership is intentionally split:
+- PostgreSQL for the generated requirement ledger
+- Neo4j for graph projection
+- ChromaDB for semantic retrieval
 
-- Neo4j owns chunk nodes and graph relationships for GraphRAG traversal.
-- ChromaDB owns semantic vector search over chunks by `chunk_id`.
-- PostgreSQL owns generated requirement ledger state, revisions, evidence
-  references, lifecycle status, delta events, and the JSON requirement artifact
-  snapshot. PostgreSQL stores chunk references, quotes, offsets, pages, sections,
-  and source paths; it is not the primary chunk-body store.
+Use a libpq/psycopg-style PostgreSQL URL, for example:
 
-## Providers
+```powershell
+POSTGRES_MODE=postgres
+POSTGRES_DSN=postgresql://marag:<password>@127.0.0.1:5432/marag
+```
 
-Provider choices are separate:
+The runtime profile is controlled by provider-specific settings:
 
-- `REASONING_MODEL_PROVIDER`: `local_heuristic`, `azure_openai`, or `huggingface`
-- `EMBEDDING_MODEL_PROVIDER`: `local_hash`, `azure_openai`, or `huggingface`
-- `RERANKER_MODEL_PROVIDER`: currently `none`
+- `REASONING_MODEL_PROVIDER`: `huggingface` or `azure_openai`
+- `EMBEDDING_MODEL_PROVIDER`: `huggingface` or `azure_openai`
+- `RERANKER_MODEL_PROVIDER`: `huggingface`
 
-Azure OpenAI and Hugging Face adapters sit behind the same model ports. OpenAI
-direct and Gemini are future adapters.
+Azure OpenAI uses `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`,
+`AZURE_OPENAI_API_VERSION`, and the reasoning and embedding deployment names.
+Hugging Face uses `HF_TOKEN`, `HUGGINGFACE_REASONING_MODEL`,
+`HUGGINGFACE_EMBEDDING_MODEL`, `HUGGINGFACE_RERANKER_MODEL`,
+`HUGGINGFACE_OFFLINE`, `HUGGINGFACE_MAX_NEW_TOKENS`, and
+`DISCOVERY_BATCH_SIZE`. `HUGGINGFACE_TOKEN` and `HUGGING_FACE_HUB_TOKEN`
+remain accepted as backward-compatible aliases.
 
-## Future User Stories
+## Static Checks
 
-User-story generation is intentionally not implemented yet. The future contract
-is: read authoritative requirement lifecycle state from PostgreSQL, retrieve
-semantic context from Chroma, expand graph context from Neo4j, rerank candidates,
-then call the reasoning model.
+```powershell
+uv run ruff check .
+uv run python -m unittest discover -s tests
+uv run python -m compileall -q src
+uv run mypy src/multi_agentic_graph_rag
+```
+
+## Database Reset
+
+Use this only against a disposable/local PostgreSQL app database:
+
+```powershell
+uv run python -m multi_agentic_graph_rag postgres-reset --yes
+uv run python -m multi_agentic_graph_rag db-check
+```
+
+For Neo4j and Chroma resets:
+
+```powershell
+cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <password> "MATCH (n) DETACH DELETE n;"
+Remove-Item -Recurse -Force runtime\databases\chroma -ErrorAction SilentlyContinue
+```
+
+## Inspect
+
+```powershell
+uv run python -m multi_agentic_graph_rag run status <RUN-ID>
+uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements.json
+Get-Content generated\<PROJECT>\req\<RUN-ID>\run.log -Tail 200
+Get-Content generated\<PROJECT>\req\<RUN-ID>\run.jsonl -Tail 200
+```
+
+`run status` still has a backward-compatible read path for old
+`.generated/<PROJECT>/run/` JSONL files.

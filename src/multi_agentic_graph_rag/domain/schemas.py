@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -11,6 +12,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+_SOURCE_REQUIREMENT_ID_RE = re.compile(
+    r"\b(?:BR|AC|FR|NFR)\s*-\s*[A-Z0-9]+(?:\s*-\s*[A-Z0-9]+)*\b",
+    re.I,
+)
+_PLACEHOLDER_REQUIREMENT_TEXT_RE = re.compile(
+    r"^(?:requirement|business requirement|acceptance criteria|functional "
+    r"requirement|non-functional requirement|placeholder|tbd|n/?a|none)$",
+    re.I,
+)
 
 
 class IngestionRequest(StrictModel):
@@ -92,13 +104,6 @@ class DocumentManifest(StrictModel):
     chunks: list[DocumentChunk]
 
 
-class LLMFactCandidate(StrictModel):
-    temp_id: str
-    text: str
-    source_trace: SourceTrace
-    requirements: list[LLMRequirementCandidate] = Field(default_factory=list)
-
-
 class LLMRequirementCandidate(StrictModel):
     temp_id: str
     statement: str
@@ -106,6 +111,71 @@ class LLMRequirementCandidate(StrictModel):
     priority: str = "medium"
     requirement_key: str | None = None
     source_trace: SourceTrace
+
+
+class LLMFactCandidate(StrictModel):
+    temp_id: str
+    text: str
+    source_trace: SourceTrace
+    requirements: list[LLMRequirementCandidate] = Field(default_factory=list)
+
+
+class LLMDiscoveredRequirement(StrictModel):
+    req_id: str
+    req_text: str
+    requirement_type: str = "functional"
+    priority: str = "medium"
+    requirement_key: str | None = None
+
+    @field_validator("req_id", "req_text", "requirement_type", "priority")
+    @classmethod
+    def non_empty_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+    @field_validator("req_text")
+    @classmethod
+    def meaningful_requirement_text(cls, value: str) -> str:
+        if _SOURCE_REQUIREMENT_ID_RE.search(value):
+            raise ValueError(
+                "req_text must be a meaningful requirement sentence, not a source identifier"
+            )
+        if _PLACEHOLDER_REQUIREMENT_TEXT_RE.fullmatch(value):
+            raise ValueError(
+                "req_text must be a meaningful requirement sentence, not a label or placeholder"
+            )
+        if len(value.split()) < 4:
+            raise ValueError("req_text must be a complete requirement sentence")
+        return value
+
+    @field_validator("requirement_key")
+    @classmethod
+    def normalize_requirement_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class LLMDiscoveredFact(StrictModel):
+    fact_id: str
+    fact_text: str
+    quote: str
+    requirements: list[LLMDiscoveredRequirement] = Field(default_factory=list)
+
+    @field_validator("fact_id", "fact_text", "quote")
+    @classmethod
+    def non_empty_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
+class RequirementDiscoveryChunkOutput(StrictModel):
+    facts: list[LLMDiscoveredFact] = Field(default_factory=list)
 
 
 class LLMChunkExtraction(StrictModel):

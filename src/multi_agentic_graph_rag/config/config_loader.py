@@ -7,11 +7,18 @@ import os
 from pathlib import Path
 from typing import Any
 
+from multi_agentic_graph_rag.config.huggingface_env import (
+    env_bool,
+    env_positive_int,
+    export_huggingface_environment,
+    first_huggingface_token,
+)
 from multi_agentic_graph_rag.config.settings import (
     AppSettings,
     AzureOpenAISettings,
     ChromaSettings,
     ChunkingSettings,
+    DiscoverySettings,
     HuggingFaceSettings,
     ModelSection,
     Neo4jSettings,
@@ -48,6 +55,16 @@ def _cfg_path(root: Path, data: dict[str, Any], key: str, default: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
+def _positive_int(value: Any, *, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, parsed)
+
+
 def load_config(
     config_path: Path | None = None,
     cli_overrides: dict[str, Any] | None = None,
@@ -60,6 +77,8 @@ def load_config(
 
     env_file_values = _read_dotenv(root / ".env")
     env = {**env_file_values, **os.environ}
+    huggingface_token = first_huggingface_token(env)
+    huggingface_offline = env_bool(env.get("HUGGINGFACE_OFFLINE"), default=False)
 
     if cli_overrides:
         config_data = _deep_update(config_data, cli_overrides)
@@ -81,7 +100,7 @@ def load_config(
         generated_requirements_dir=Path(
             env.get(
                 "GENERATED_REQUIREMENTS_DIR",
-                _cfg_path(root, config_data, "generated_requirements_dir", "generated/inbox"),
+                _cfg_path(root, config_data, "generated_requirements_dir", "generated"),
             )
         ),
         chroma_persist_dir=Path(
@@ -111,12 +130,26 @@ def load_config(
 
     for cache_var in ("HF_HOME", "TRANSFORMERS_CACHE", "TORCH_HOME", "UV_CACHE_DIR"):
         os.environ.setdefault(cache_var, str(paths.global_cache_dir / cache_var.lower()))
+    export_huggingface_environment(token=huggingface_token, offline=huggingface_offline)
 
     reasoning_cfg = config_data.get("reasoning_model", {})
     embedding_cfg = config_data.get("embedding_model", {})
     reranker_cfg = config_data.get("reranker_model", {})
     postgres_cfg = config_data.get("postgres", {})
     neo4j_cfg = config_data.get("neo4j", {})
+    discovery_cfg = config_data.get("discovery", {})
+    configured_discovery_batch_size = _positive_int(
+        discovery_cfg.get("batch_size"),
+        default=1,
+    )
+    discovery_batch_size = env_positive_int(
+        env.get("DISCOVERY_BATCH_SIZE") or env.get("HUGGINGFACE_DISCOVERY_BATCH_SIZE"),
+        default=configured_discovery_batch_size,
+    )
+    log_llm_responses = env_bool(
+        env.get("LOG_LLM_RESPONSES"),
+        default=bool(discovery_cfg.get("log_llm_responses", False)),
+    )
 
     settings = AppSettings(
         app_env=env.get(
@@ -127,9 +160,12 @@ def load_config(
         reasoning_model=ModelSection(
             provider=env.get(
                 "REASONING_MODEL_PROVIDER",
-                env.get("REASONING_LLM_PROVIDER", reasoning_cfg.get("provider", "local_heuristic")),
+                env.get("REASONING_LLM_PROVIDER", reasoning_cfg.get("provider", "huggingface")),
             ),
-            model=reasoning_cfg.get("model"),
+            model=env.get(
+                "HUGGINGFACE_REASONING_MODEL",
+                reasoning_cfg.get("model", "Qwen/Qwen2.5-Coder-7B-Instruct"),
+            ),
             deployment=env.get(
                 "AZURE_OPENAI_REASONING_DEPLOYMENT", reasoning_cfg.get("deployment")
             ),
@@ -137,20 +173,30 @@ def load_config(
         embedding_model=ModelSection(
             provider=env.get(
                 "EMBEDDING_MODEL_PROVIDER",
-                env.get("EMBEDDING_PROVIDER", embedding_cfg.get("provider", "local_hash")),
+                env.get("EMBEDDING_PROVIDER", embedding_cfg.get("provider", "huggingface")),
             ),
-            model=env.get("HUGGINGFACE_EMBEDDING_MODEL", embedding_cfg.get("model", "hash-384")),
+            model=env.get("HUGGINGFACE_EMBEDDING_MODEL", embedding_cfg.get("model", "BAAI/bge-m3")),
             deployment=env.get(
                 "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", embedding_cfg.get("deployment")
             ),
         ),
         reranker_model=ModelSection(
-            provider=env.get("RERANKER_MODEL_PROVIDER", reranker_cfg.get("provider", "none")),
-            model=env.get("HUGGINGFACE_RERANKER_MODEL", reranker_cfg.get("model")),
+            provider=env.get(
+                "RERANKER_MODEL_PROVIDER",
+                reranker_cfg.get("provider", "huggingface"),
+            ),
+            model=env.get(
+                "HUGGINGFACE_RERANKER_MODEL",
+                reranker_cfg.get("model", "BAAI/bge-reranker-base"),
+            ),
         ),
         chunking=ChunkingSettings(**config_data.get("chunking", {})),
+        discovery=DiscoverySettings(
+            batch_size=discovery_batch_size,
+            log_llm_responses=log_llm_responses,
+        ),
         postgres=PostgresSettings(
-            mode=env.get("POSTGRES_MODE", postgres_cfg.get("mode", "local_json")),
+            mode=env.get("POSTGRES_MODE", postgres_cfg.get("mode", "postgres")),
             dsn=env.get(
                 "POSTGRES_DSN",
                 postgres_cfg.get("dsn", "postgresql://marag:marag@127.0.0.1:5432/marag"),
@@ -160,7 +206,7 @@ def load_config(
             ),
         ),
         neo4j=Neo4jSettings(
-            mode=env.get("NEO4J_MODE", neo4j_cfg.get("mode", "local_json")),
+            mode=env.get("NEO4J_MODE", neo4j_cfg.get("mode", "neo4j")),
             uri=env.get("NEO4J_URI", neo4j_cfg.get("uri", "bolt://127.0.0.1:7687")),
             username=env.get("NEO4J_USERNAME", neo4j_cfg.get("username", "neo4j")),
             password=env.get("NEO4J_PASSWORD", neo4j_cfg.get("password", "")),
@@ -178,15 +224,16 @@ def load_config(
             embedding_deployment=env.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", ""),
         ),
         huggingface=HuggingFaceSettings(
-            token=env.get("HUGGINGFACE_TOKEN", ""),
-            reasoning_model=env.get("HUGGINGFACE_REASONING_MODEL", ""),
-            embedding_model=env.get(
-                "HUGGINGFACE_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+            token=huggingface_token,
+            reasoning_model=env.get(
+                "HUGGINGFACE_REASONING_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"
             ),
-            reranker_model=env.get(
-                "HUGGINGFACE_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            ),
-            offline=env.get("HUGGINGFACE_OFFLINE", "false").lower() == "true",
+            embedding_model=env.get("HUGGINGFACE_EMBEDDING_MODEL", "BAAI/bge-m3"),
+            reranker_model=env.get("HUGGINGFACE_RERANKER_MODEL", "BAAI/bge-reranker-base"),
+            offline=huggingface_offline,
+            max_new_tokens=env_positive_int(env.get("HUGGINGFACE_MAX_NEW_TOKENS"), default=4096),
+            discovery_batch_size=discovery_batch_size,
+            log_llm_responses=log_llm_responses,
         ),
         raw_config=config_data,
     )

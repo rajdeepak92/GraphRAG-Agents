@@ -6,30 +6,31 @@
   "paths": {
     "global_cache_dir": ".global_cache",
     "documents_inbox_dir": "documents/inbox",
-    "generated_requirements_dir": "generated/inbox",
+    "generated_requirements_dir": "generated",
     "chroma_persist_dir": "runtime/databases/chroma",
     "runtime_staging_dir": "runtime/staging",
     "runtime_logs_dir": "runtime/logs",
     "runtime_locks_dir": "runtime/locks"
   },
   "reasoning_model": {
-    "provider": "local_heuristic",
-    "model": "rules-v1"
+    "provider": "huggingface",
+    "model": "Qwen/Qwen2.5-Coder-7B-Instruct"
   },
   "embedding_model": {
-    "provider": "local_hash",
-    "model": "hash-384"
+    "provider": "huggingface",
+    "model": "BAAI/bge-m3"
   },
   "reranker_model": {
-    "provider": "none"
+    "provider": "huggingface",
+    "model": "BAAI/bge-reranker-base"
   },
   "postgres": {
-    "mode": "local_json",
+    "mode": "postgres",
     "dsn": "postgresql://marag:marag@127.0.0.1:5432/marag",
     "local_path": "runtime/staging/postgres_records.jsonl"
   },
   "neo4j": {
-    "mode": "local_json",
+    "mode": "neo4j",
     "uri": "bolt://127.0.0.1:7687",
     "username": "neo4j",
     "password": "",

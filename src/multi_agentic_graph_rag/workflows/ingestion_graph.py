@@ -9,14 +9,17 @@ from langgraph.graph import END, StateGraph
 
 from multi_agentic_graph_rag.agents.requirement_discovery_agent import RequirementDiscoveryAgent
 from multi_agentic_graph_rag.config.config_loader import load_config
+from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
+from multi_agentic_graph_rag.domain.errors import ConfigurationError
 from multi_agentic_graph_rag.domain.identifiers import run_id
 from multi_agentic_graph_rag.domain.schemas import IngestionRequest, IngestionResult
 from multi_agentic_graph_rag.llm_models.factory import (
     create_embedding_model,
     create_reasoning_model,
+    create_reranker_model,
 )
 from multi_agentic_graph_rag.observability.session import RunSession, command_session
 from multi_agentic_graph_rag.services.artifacts import write_requirement_artifact
@@ -98,8 +101,14 @@ def _run_pipeline(
     postgres = PostgresStore(settings)
     neo4j = Neo4jStore(settings)
     chroma = ChromaStore(settings)
+    run_dir = (
+        session.run_dir
+        if session is not None
+        else _ingest_run_dir(settings, project, state["run_id"])
+    )
 
     def pipeline() -> IngestionState:
+        _validate_required_ingest_stack(settings)
         if logger is not None:
             logger.info(
                 "Beginning ingestion pipeline for {project}:{version}",
@@ -116,6 +125,7 @@ def _run_pipeline(
                 version=version,
                 runtime_root=str(settings.paths.project_root),
                 staging_dir=str(settings.paths.runtime_staging_dir),
+                output_dir=str(run_dir),
             )
         if logger is not None:
             logger.debug(
@@ -173,6 +183,26 @@ def _run_pipeline(
                 version=version,
             )
         postgres.ensure_schema()
+        reasoning_model = create_reasoning_model(
+            settings,
+            logger=logger,
+            run_dir=run_dir,
+        )
+        embedding_model = create_embedding_model(settings)
+        reranker_model = create_reranker_model(settings)
+        _warmup_reasoning_model(reasoning_model)
+        if logger is not None:
+            logger.info(
+                "Model readiness checks completed",
+                step="check_models",
+                reasoning_provider=reasoning_model.provider_name,
+                embedding_provider=embedding_model.provider_name,
+                reranker_provider=reranker_model.provider_name,
+                huggingface_reasoning_model=settings.huggingface.reasoning_model,
+                huggingface_embedding_model=settings.huggingface.embedding_model,
+                huggingface_reranker_model=settings.huggingface.reranker_model,
+                status="PASS",
+            )
 
         source_bytes = request.document.read_bytes()
         checksum = checksum_bytes(source_bytes)
@@ -223,8 +253,7 @@ def _run_pipeline(
         postgres.assert_version_allowed(manifest, request.replace_version)
         manifest_path = write_manifest(
             manifest,
-            settings.paths.runtime_staging_dir,
-            state["run_id"],
+            run_dir,
             logger=logger,
         )
         if logger is not None:
@@ -234,18 +263,17 @@ def _run_pipeline(
                 document_version_id=manifest.document_version_id,
             )
         neo4j.project_manifest(manifest)
-        embedding_model = create_embedding_model(settings)
         if logger is not None:
-            logger.debug(
+            logger.info(
                 "Indexing {chunk_count} chunks into chroma",
                 step="index_chunks_chroma",
                 chunk_count=len(manifest.chunks),
                 collection=settings.chroma.collection_name,
             )
         chroma.index_chunks(manifest, embedding_model)
-        discovery_agent = RequirementDiscoveryAgent(create_reasoning_model(settings))
+        discovery_agent = RequirementDiscoveryAgent(reasoning_model, logger=logger)
         if logger is not None:
-            logger.debug(
+            logger.info(
                 "Discovering requirements from {document_version_id}",
                 step="discover_requirements",
                 document_version_id=manifest.document_version_id,
@@ -278,8 +306,7 @@ def _run_pipeline(
         else:
             artifact_path = write_requirement_artifact(
                 artifact,
-                settings.paths.runtime_staging_dir,
-                state["run_id"],
+                run_dir,
                 logger=logger,
             )
         if logger is not None:
@@ -325,6 +352,13 @@ def _run_pipeline(
     try:
         return pipeline()
     except Exception as exc:
+        if logger is not None:
+            logger.exception(
+                "Ingestion pipeline failed",
+                step="run_pipeline",
+                exc=exc,
+                status="failed",
+            )
         if session is not None:
             session.write_failure_envelope(error=exc)
         error_payload = {
@@ -332,7 +366,12 @@ def _run_pipeline(
             "document_version_id": state.get("document_version_id", ""),
             "error": str(exc),
         }
-        postgres.record_run(state["run_id"], "failed", error_payload)
+        _record_failed_run_safely(
+            postgres=postgres,
+            run_id=state["run_id"],
+            payload=error_payload,
+            logger=logger,
+        )
         raise
 
 
@@ -351,7 +390,9 @@ def run_ingestion(
             return run_ingestion(request, session=managed_session)
     session.request_payload = request.model_dump(mode="json")
     graph = build_ingestion_graph(session)
-    final_state = graph.invoke({"request": request.model_dump(mode="json")})
+    final_state = graph.invoke(
+        {"request": request.model_dump(mode="json"), "run_id": session.run_id}
+    )
     return IngestionResult(
         run_id=final_state["run_id"],
         status="completed",
@@ -368,3 +409,56 @@ def run_ingestion(
         warnings=final_state.get("warnings", []),
         errors=final_state.get("errors", []),
     )
+
+
+def _ingest_run_dir(settings: AppSettings, project: str, run_identifier: str) -> Path:
+    return settings.paths.generated_requirements_dir / project / "req" / run_identifier
+
+
+def _validate_required_ingest_stack(settings: AppSettings) -> None:
+    invalid_reasoning = {"local_heuristic"}
+    invalid_embedding = {"local_hash"}
+    invalid_reranker = {"none"}
+    if settings.reasoning_model.provider in invalid_reasoning:
+        raise ConfigurationError(
+            f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} is not valid for ingest"
+        )
+    if settings.embedding_model.provider in invalid_embedding:
+        raise ConfigurationError(
+            f"EMBEDDING_MODEL_PROVIDER={settings.embedding_model.provider} is not valid for ingest"
+        )
+    if settings.reranker_model.provider in invalid_reranker:
+        raise ConfigurationError(
+            f"RERANKER_MODEL_PROVIDER={settings.reranker_model.provider} is not valid for ingest"
+        )
+    if settings.postgres.mode != "postgres":
+        raise ConfigurationError("POSTGRES_MODE=postgres is required for ingest")
+    if settings.neo4j.mode != "neo4j":
+        raise ConfigurationError("NEO4J_MODE=neo4j is required for ingest")
+
+
+def _warmup_reasoning_model(reasoning_model: Any) -> None:
+    warmup = getattr(reasoning_model, "warmup", None)
+    if callable(warmup):
+        warmup()
+
+
+def _record_failed_run_safely(
+    *,
+    postgres: PostgresStore,
+    run_id: str,
+    payload: dict[str, Any],
+    logger: Any,
+) -> None:
+    try:
+        postgres.record_run(run_id, "failed", payload)
+    except Exception as record_error:
+        if logger is not None:
+            logger.warning(
+                "Could not record failed ingest state in PostgreSQL; preserving original error",
+                step="record_failed_run",
+                run_id=run_id,
+                error_type=record_error.__class__.__name__,
+                error=str(record_error),
+                status="warning",
+            )

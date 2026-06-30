@@ -219,6 +219,19 @@ class RunLogger:
         context = {**context, "traceback": trace, "exception_type": error.__class__.__name__}
         self._emit("EXCEPTION", message, **context)
 
+    def raw_block(self, *, title: str, body: str, also_stderr: bool = False) -> None:
+        timestamp = _format_timestamp()
+        header = (
+            f"{timestamp} INFO run_id={self._sink.run_id} project={self._sink.project} "
+            f"version={self._sink.version} {title}"
+        )
+        block = f"{header}\nRAW_RESPONSE_BEGIN\n{body}\nRAW_RESPONSE_END\n"
+        self._sink.log_handle.write(block)
+        _atomic_flush(self._sink.log_handle)
+        if also_stderr:
+            sys.stderr.write(block)
+            sys.stderr.flush()
+
     def close(self) -> None:
         self._sink.close()
 

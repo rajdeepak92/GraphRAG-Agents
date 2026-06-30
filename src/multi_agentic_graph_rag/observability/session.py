@@ -73,11 +73,17 @@ class RunSession:
         project_name = project if project == "_system" else session_slug(project)
         version_name = session_slug(version)
         stamp = f"{_utc_stamp()}_{project_name}_{version_name}_{run_id}"
-        run_dir = root / ".generated" / project_name / "run"
+        if command == "ingest":
+            run_dir = root / "generated" / project_name / "req" / run_id
+            log_path = run_dir / "run.log"
+            jsonl_path = run_dir / "run.jsonl"
+            req_path = run_dir / "requirements.json"
+        else:
+            run_dir = root / ".generated" / project_name / "run"
+            log_path = run_dir / f"run_{stamp}.log"
+            jsonl_path = run_dir / f"run_{stamp}.jsonl"
+            req_path = run_dir / f"req_{stamp}.json"
         run_dir.mkdir(parents=True, exist_ok=True)
-        log_path = run_dir / f"run_{stamp}.log"
-        jsonl_path = run_dir / f"run_{stamp}.jsonl"
-        req_path = run_dir / f"req_{stamp}.json"
         log_path.touch(exist_ok=True)
         jsonl_path.touch(exist_ok=True)
         logger = RunLogger(
@@ -246,9 +252,14 @@ def command_run_id(command: str) -> str:
 
 
 def find_run_jsonl(project_root: Path, run_id: str) -> Path | None:
-    generated_root = project_root / ".generated"
+    generated_root = project_root / "generated"
     if generated_root.exists():
-        matches = sorted(generated_root.glob(f"*/run/run_*{run_id}*.jsonl"))
+        matches = sorted(generated_root.glob(f"*/req/{run_id}/run.jsonl"))
+        if matches:
+            return matches[-1]
+    legacy_generated_root = project_root / ".generated"
+    if legacy_generated_root.exists():
+        matches = sorted(legacy_generated_root.glob(f"*/run/run_*{run_id}*.jsonl"))
         if matches:
             return matches[-1]
     legacy = project_root / "runtime" / "logs" / f"{run_id}.jsonl"

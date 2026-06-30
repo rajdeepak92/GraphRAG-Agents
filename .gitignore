@@ -43,18 +43,18 @@ Desktop.ini
 # Disposable application caches
 .global_cache/*
 !.global_cache/.gitkeep
+.global_cache/hf_home/*
 
 # Source-document inbox
 documents/inbox/*
 !documents/inbox/.gitkeep
-!documents/inbox/PROJECT_1/
-!documents/inbox/PROJECT_1/sample.txt
 
 # Generated artifacts
-generated_artifacts/*
-!generated_artifacts/.gitkeep
-generated/inbox/*/requirements/*
-!generated/inbox/*/requirements/.gitkeep
+generated/*
+!generated/.gitkeep
+.generated/*
+!.generated/.gitkeep
+generated_artifacts/
 
 # Chroma local database
 runtime/databases/chroma/*
@@ -74,3 +74,6 @@ runtime/logs/*
 
 # Generic logs
 *.log
+
+# tests
+tests

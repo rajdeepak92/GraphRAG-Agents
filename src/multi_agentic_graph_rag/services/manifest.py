@@ -49,11 +49,10 @@ def build_manifest(
 
 def write_manifest(
     manifest: DocumentManifest,
-    staging_dir: Path,
-    run_id: str,
+    run_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
-    path = staging_dir / run_id / "chunk_manifest.json"
+    path = run_dir / "chunk_manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if logger is not None:
         logger.debug(

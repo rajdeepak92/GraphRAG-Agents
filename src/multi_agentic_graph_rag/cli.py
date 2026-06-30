@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -14,11 +17,21 @@ from rich.table import Table
 from multi_agentic_graph_rag import __version__
 from multi_agentic_graph_rag.agents.ingestion_document_agent import IngestionDocumentAgent
 from multi_agentic_graph_rag.config.config_loader import load_config
+from multi_agentic_graph_rag.config.huggingface_env import (
+    HF_OFFLINE_FLAGS,
+    token_alias_status,
+)
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
+from multi_agentic_graph_rag.domain.errors import MaragError, SchemaMismatchError
 from multi_agentic_graph_rag.domain.identifiers import run_id
 from multi_agentic_graph_rag.domain.schemas import IngestionRequest
+from multi_agentic_graph_rag.llm_models.huggingface import (
+    HuggingFaceEmbeddingModel,
+    HuggingFaceReasoningModel,
+    HuggingFaceRerankerModel,
+)
 from multi_agentic_graph_rag.observability.session import (
     command_run_id,
     command_session,
@@ -83,8 +96,116 @@ def config_check(
             ("neo4j.mode", settings.neo4j.mode),
             ("chroma.collection", settings.chroma.collection_name),
             ("global_cache_dir", str(settings.paths.global_cache_dir)),
+            ("huggingface.token", "set" if settings.huggingface.token else "not set"),
+            ("huggingface.token_aliases", token_alias_status(os.environ)),
+            ("huggingface.offline", str(settings.huggingface.offline)),
+            ("huggingface.offline_flags", _hf_offline_flag_status()),
+            (
+                "huggingface.reasoning_model",
+                settings.huggingface.reasoning_model or "<not configured>",
+            ),
+            ("huggingface.embedding_model", settings.huggingface.embedding_model),
+            ("huggingface.reranker_model", settings.huggingface.reranker_model),
+            ("huggingface.max_new_tokens", str(settings.huggingface.max_new_tokens)),
+            ("discovery.batch_size", str(settings.discovery.batch_size)),
+            ("discovery.log_llm_responses", str(settings.discovery.log_llm_responses)),
         ]
         _render_kv("Configuration", rows)
+
+
+@app.command("hf-check")
+def hf_check(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    load_model: Annotated[
+        bool,
+        typer.Option(
+            "--load-model",
+            help="Attempt actual Hugging Face reasoning and embedding model construction.",
+        ),
+    ] = False,
+) -> None:
+    with command_session(
+        project="_system",
+        version=__version__,
+        command="hf-check",
+        run_id=command_run_id("hf-check"),
+    ) as session:
+        settings = load_config(config_path=config)
+        session.set_log_level(settings.log_level)
+        requires_transformers = settings.reasoning_model.provider == "huggingface"
+        requires_sentence_transformers = (
+            settings.embedding_model.provider == "huggingface"
+            or settings.reranker_model.provider == "huggingface"
+        )
+        checks: list[tuple[str, str, str]] = [
+            (
+                "token",
+                "PASS" if settings.huggingface.token else "WARN",
+                token_alias_status(os.environ),
+            ),
+            ("offline", "PASS", str(settings.huggingface.offline)),
+            ("offline_flags", "PASS", _hf_offline_flag_status()),
+            ("cache.HF_HOME", "PASS", os.environ.get("HF_HOME", "<not set>")),
+            (
+                "cache.TRANSFORMERS_CACHE",
+                "PASS",
+                os.environ.get("TRANSFORMERS_CACHE", "<not set>"),
+            ),
+            (
+                "reasoning_model",
+                "PASS"
+                if settings.huggingface.reasoning_model
+                else ("FAIL" if requires_transformers else "WARN"),
+                settings.huggingface.reasoning_model or "<not configured>",
+            ),
+            (
+                "embedding_model",
+                "PASS"
+                if settings.huggingface.embedding_model
+                else ("FAIL" if settings.embedding_model.provider == "huggingface" else "WARN"),
+                settings.huggingface.embedding_model or "<not configured>",
+            ),
+            (
+                "reranker_model",
+                "PASS"
+                if settings.huggingface.reranker_model
+                else ("FAIL" if settings.reranker_model.provider == "huggingface" else "WARN"),
+                settings.huggingface.reranker_model or "<not configured>",
+            ),
+            (
+                "transformers",
+                _dependency_status("transformers", required=requires_transformers),
+                "installed" if find_spec("transformers") is not None else "not installed",
+            ),
+            (
+                "sentence_transformers",
+                _dependency_status(
+                    "sentence_transformers",
+                    required=requires_sentence_transformers,
+                ),
+                "installed" if find_spec("sentence_transformers") is not None else "not installed",
+            ),
+            (
+                "generation",
+                "PASS",
+                f"max_new_tokens={settings.huggingface.max_new_tokens} "
+                f"discovery_batch_size={settings.discovery.batch_size} "
+                f"log_llm_responses={settings.discovery.log_llm_responses}",
+            ),
+        ]
+        if load_model:
+            checks.extend(_hf_load_checks(settings.huggingface.reasoning_model, settings))
+        else:
+            checks.append(("model_load", "WARN", "skipped; pass --load-model to verify"))
+        failed = any(status == "FAIL" for _, status, _ in checks)
+        session.logger.info(
+            "Hugging Face checks completed",
+            step="hf-check",
+            status="FAIL" if failed else "completed",
+        )
+        _render_checks("Hugging Face Check", checks)
+        if failed:
+            raise typer.Exit(code=1)
 
 
 @app.command("doctor")
@@ -151,6 +272,43 @@ def db_check() -> None:
             raise typer.Exit(code=1)
 
 
+@app.command("postgres-reset")
+def postgres_reset(
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm PostgreSQL schema reset.")] = False,
+    allow_nonlocal: Annotated[
+        bool,
+        typer.Option(
+            "--allow-nonlocal",
+            help="Allow reset when POSTGRES_DSN does not point to localhost.",
+        ),
+    ] = False,
+) -> None:
+    with command_session(
+        project="_system",
+        version=__version__,
+        command="postgres-reset",
+        run_id=command_run_id("postgres-reset"),
+    ) as session:
+        settings = load_config()
+        session.set_log_level(settings.log_level)
+        if not yes:
+            raise typer.BadParameter("pass --yes to reset PostgreSQL managed tables")
+        if settings.postgres.mode == "postgres" and not allow_nonlocal:
+            host = _postgres_dsn_host(settings.postgres.dsn)
+            if host not in {"", "localhost", "127.0.0.1", "::1"}:
+                raise typer.BadParameter(
+                    "POSTGRES_DSN is not local; pass --allow-nonlocal only if you intend that"
+                )
+        detail = PostgresStore(settings).reset_schema()
+        session.logger.warning(
+            "PostgreSQL schema reset completed",
+            step="postgres-reset",
+            detail=detail,
+            status="completed",
+        )
+        console.print(f"[yellow]{detail}[/yellow]")
+
+
 @app.command("ingest")
 def ingest(
     project: Annotated[str, typer.Option("--project")],
@@ -194,7 +352,18 @@ def ingest(
             reasoning_provider=reasoning_provider,
             embedding_provider=embedding_provider,
         )
-        result = IngestionDocumentAgent().run(request, session=session)
+        try:
+            result = IngestionDocumentAgent().run(request, session=session)
+        except SchemaMismatchError:
+            console.print(
+                "[red]FAIL[/red] PostgreSQL schema mismatch. "
+                "Reset disposable local app tables with: "
+                "python -m multi_agentic_graph_rag postgres-reset --yes"
+            )
+            raise typer.Exit(code=1) from None
+        except MaragError as exc:
+            console.print(f"[red]FAIL[/red] {exc}")
+            raise typer.Exit(code=1) from None
         if json_output:
             console.print_json(json.dumps(result.model_dump(mode="json"), indent=2))
             return
@@ -323,6 +492,48 @@ def _render_checks(title: str, rows: list[tuple[str, str, str]]) -> None:
             style = "yellow"
         table.add_row(check, f"[{style}]{status}[/{style}]", detail)
     console.print(table)
+
+
+def _hf_offline_flag_status() -> str:
+    return ", ".join(f"{key}={os.environ.get(key, '<not set>')}" for key in HF_OFFLINE_FLAGS)
+
+
+def _dependency_status(module: str, *, required: bool) -> str:
+    installed = find_spec(module) is not None
+    if installed:
+        return "PASS"
+    return "FAIL" if required else "WARN"
+
+
+def _hf_load_checks(reasoning_model: str, settings: Any) -> list[tuple[str, str, str]]:
+    checks: list[tuple[str, str, str]] = []
+    if reasoning_model:
+        try:
+            HuggingFaceReasoningModel(settings.huggingface).warmup()
+            checks.append(("reasoning_load", "PASS", reasoning_model))
+        except Exception as exc:
+            checks.append(("reasoning_load", "FAIL", f"{exc.__class__.__name__}: {exc}"))
+    else:
+        checks.append(("reasoning_load", "WARN", "skipped; HUGGINGFACE_REASONING_MODEL empty"))
+    try:
+        HuggingFaceEmbeddingModel(settings.huggingface)
+        checks.append(("embedding_load", "PASS", settings.huggingface.embedding_model))
+    except Exception as exc:
+        checks.append(("embedding_load", "FAIL", f"{exc.__class__.__name__}: {exc}"))
+    try:
+        HuggingFaceRerankerModel(settings.huggingface)
+        checks.append(("reranker_load", "PASS", settings.huggingface.reranker_model))
+    except Exception as exc:
+        checks.append(("reranker_load", "FAIL", f"{exc.__class__.__name__}: {exc}"))
+    return checks
+
+
+def _postgres_dsn_host(dsn: str) -> str:
+    normalized_dsn = dsn
+    scheme, separator, remainder = normalized_dsn.partition("://")
+    if separator and "+" in scheme:
+        normalized_dsn = f"{scheme.split('+', 1)[0]}://{remainder}"
+    return urlparse(normalized_dsn).hostname or ""
 
 
 if __name__ == "__main__":
