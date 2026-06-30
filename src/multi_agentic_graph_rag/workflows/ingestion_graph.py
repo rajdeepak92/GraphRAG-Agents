@@ -257,18 +257,23 @@ def _run_pipeline(
             logger=logger,
         )
         if logger is not None:
-            logger.debug(
-                "Projecting manifest to neo4j for {document_version_id}",
+            logger.info(
+                "Projecting document/chunk graph to Neo4j; "
+                "generated requirements stay out of Neo4j",
                 step="project_chunks_neo4j",
                 document_version_id=manifest.document_version_id,
+                chunk_count=len(manifest.chunks),
+                store_responsibility="document_chunk_graph_only",
             )
         neo4j.project_manifest(manifest)
         if logger is not None:
             logger.info(
-                "Indexing {chunk_count} chunks into chroma",
+                "Indexing {chunk_count} chunk embeddings into Chroma; "
+                "requirement data stays out of Chroma",
                 step="index_chunks_chroma",
                 chunk_count=len(manifest.chunks),
                 collection=settings.chroma.collection_name,
+                store_responsibility="chunk_embeddings_only",
             )
         chroma.index_chunks(manifest, embedding_model)
         discovery_agent = RequirementDiscoveryAgent(reasoning_model, logger=logger)
@@ -318,8 +323,18 @@ def _run_pipeline(
                 status="completed",
             )
         postgres.persist_manifest(manifest)
+        if logger is not None:
+            logger.info(
+                "Persisting generated requirements.json payload and "
+                "requirement ledger to PostgreSQL",
+                step="persist_requirements_postgres",
+                document_version_id=artifact.document_version_id,
+                artifact_path=str(artifact_path),
+                fact_count=len(artifact.facts),
+                requirement_count=len(artifact.requirements),
+                store_responsibility="requirement_artifact_and_ledger_only",
+            )
         postgres.persist_artifact(artifact, str(artifact_path), state["run_id"])
-        neo4j.project_artifact(artifact)
         result_payload: IngestionState = {
             "run_id": state["run_id"],
             "checksum": checksum,

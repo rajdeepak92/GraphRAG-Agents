@@ -403,6 +403,46 @@ class PostgresStore:
                 self._persist_requirement_ledger_postgres(cursor, artifact)
             connection.commit()
 
+    def load_requirement_artifact_payload(
+        self,
+        artifact_path: str | None = None,
+        document_version_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if artifact_path is None and document_version_id is None:
+            raise ValueError("artifact_path or document_version_id is required")
+        if self.settings.postgres.mode == "local_json":
+            return self._local_requirement_artifact_payload(
+                artifact_path=artifact_path,
+                document_version_id=document_version_id,
+            )
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            if artifact_path is not None:
+                cursor.execute(
+                    """
+                    select payload from requirement_artifacts
+                    where artifact_path = %s
+                    """,
+                    (artifact_path,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return _artifact_payload_from_row(row[0])
+            if document_version_id is not None:
+                cursor.execute(
+                    """
+                    select payload from requirement_artifacts
+                    where document_version_id = %s
+                    order by created_at desc
+                    limit 1
+                    """,
+                    (document_version_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return _artifact_payload_from_row(row[0])
+        return None
+
     def record_run(self, run_id: str, status: str, payload: dict[str, Any]) -> None:
         if self.settings.postgres.mode == "local_json":
             self._upsert_local(
@@ -807,6 +847,25 @@ class PostgresStore:
                 ]
         return versions
 
+    def _local_requirement_artifact_payload(
+        self,
+        *,
+        artifact_path: str | None,
+        document_version_id: str | None,
+    ) -> dict[str, Any] | None:
+        rows = [row for row in self._read_local_rows() if row.get("kind") == "requirement_artifact"]
+        if artifact_path is not None:
+            for row in reversed(rows):
+                if row.get("artifact_path") == artifact_path:
+                    artifact = row.get("artifact")
+                    return dict(artifact) if isinstance(artifact, dict) else None
+        if document_version_id is not None:
+            for row in reversed(rows):
+                if row.get("_local_key") == document_version_id:
+                    artifact = row.get("artifact")
+                    return dict(artifact) if isinstance(artifact, dict) else None
+        return None
+
     def _local_requirement_revision_snapshot(
         self,
         project: str,
@@ -853,3 +912,11 @@ def _manifest_reference_payload(manifest: DocumentManifest) -> dict[str, Any]:
         for chunk in payload["chunks"]
     ]
     return payload
+
+
+def _artifact_payload_from_row(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    if isinstance(value, dict):
+        return value
+    return dict(value)

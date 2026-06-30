@@ -67,6 +67,14 @@ uv run python -m multi_agentic_graph_rag db-check
 
 This checks PostgreSQL, Neo4j, and Chroma in that order.
 
+Storage responsibilities:
+
+- Neo4j is the document/chunk graph knowledge base for multi-hop reasoning.
+- ChromaDB stores chunk embeddings, chunk text, and chunk/document metadata for
+  semantic search.
+- PostgreSQL stores generated `requirements.json` payloads, the requirement
+  ledger tables, and fallback copies of generated requirement artifacts.
+
 ## 6. Cleanup Local Databases
 
 PostgreSQL app-managed schema only:

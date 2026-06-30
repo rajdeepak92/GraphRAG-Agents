@@ -74,6 +74,3 @@ runtime/logs/*
 
 # Generic logs
 *.log
-
-# tests
-tests
