@@ -16,6 +16,7 @@ from rich.table import Table
 
 from multi_agentic_graph_rag import __version__
 from multi_agentic_graph_rag.agents.ingestion_document_agent import IngestionDocumentAgent
+from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGeneratorAgent
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.huggingface_env import (
     HF_OFFLINE_FLAGS,
@@ -26,7 +27,7 @@ from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import MaragError, SchemaMismatchError
 from multi_agentic_graph_rag.domain.identifiers import run_id
-from multi_agentic_graph_rag.domain.schemas import IngestionRequest
+from multi_agentic_graph_rag.domain.schemas import IngestionRequest, UserStoryRequest
 from multi_agentic_graph_rag.llm_models.huggingface import (
     HuggingFaceEmbeddingModel,
     HuggingFaceReasoningModel,
@@ -37,7 +38,11 @@ from multi_agentic_graph_rag.observability.session import (
     command_session,
     find_run_jsonl,
 )
-from multi_agentic_graph_rag.services.artifacts import verify_requirement_artifact
+from multi_agentic_graph_rag.services.artifacts import (
+    verify_requirement_artifact,
+    verify_user_story_artifact,
+)
+from multi_agentic_graph_rag.workflows.user_story_graph import resolve_user_story_identity
 
 app = typer.Typer(
     name="marag",
@@ -376,6 +381,69 @@ def ingest(
         console.print(f"artifact={result.artifact_path}")
 
 
+@app.command("generate-user-stories")
+def generate_user_stories(
+    requirements: Annotated[Path | None, typer.Option("--requirements")] = None,
+    project: Annotated[str | None, typer.Option("--project")] = None,
+    document_version_id: Annotated[str | None, typer.Option("--document-version-id")] = None,
+    reasoning_provider: Annotated[str | None, typer.Option("--reasoning-provider")] = None,
+    embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
+    reranker_provider: Annotated[str | None, typer.Option("--reranker-provider")] = None,
+    top_k: Annotated[int | None, typer.Option("--top-k")] = None,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
+) -> None:
+    request = UserStoryRequest(
+        requirements_path=requirements,
+        project=project,
+        document_version_id=document_version_id,
+        reasoning_provider=reasoning_provider,
+        embedding_provider=embedding_provider,
+        reranker_provider=reranker_provider,
+        top_k=top_k,
+    )
+    try:
+        resolved_project, resolved_version = resolve_user_story_identity(request)
+    except MaragError as exc:
+        console.print(f"[red]FAIL[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    with command_session(
+        project=resolved_project,
+        version=resolved_version,
+        command="user-stories",
+        run_id=command_run_id("user-stories"),
+    ) as session:
+        session.request_payload = request.model_dump(mode="json")
+        session.logger.info(
+            "Starting generate-user-stories command",
+            step="user-stories",
+            requirements=str(requirements) if requirements else None,
+            project=resolved_project,
+            document_version_id=document_version_id,
+            status="started",
+        )
+        try:
+            result = UserStoryGeneratorAgent().run(request, session=session)
+        except SchemaMismatchError:
+            console.print(
+                "[red]FAIL[/red] PostgreSQL schema mismatch. "
+                "Reset disposable local app tables with: "
+                "python -m multi_agentic_graph_rag postgres-reset --yes"
+            )
+            raise typer.Exit(code=1) from None
+        except MaragError as exc:
+            console.print(f"[red]FAIL[/red] {exc}")
+            raise typer.Exit(code=1) from None
+        if json_output:
+            console.print_json(json.dumps(result.model_dump(mode="json"), indent=2))
+            return
+        console.print(
+            "[green]PASS[/green] user-story generation completed "
+            f"run_id={result.run_id} requirements={result.requirement_count} "
+            f"stories={len(result.story_ids)} covered={len(result.coverage)}"
+        )
+        console.print(f"artifact={result.artifact_path}")
+
+
 @run_app.command("status")
 def run_status(run_id_value: Annotated[str, typer.Argument()]) -> None:
     with command_session(
@@ -468,6 +536,30 @@ def artifact_verify(path: Annotated[Path, typer.Argument()]) -> None:
         console.print(
             "[green]PASS[/green] artifact verified "
             f"requirements={len(artifact.requirements)} facts={len(artifact.facts)} "
+            f"document_version_id={artifact.document_version_id}"
+        )
+
+
+@artifact_app.command("verify-user-stories")
+def artifact_verify_user_stories(path: Annotated[Path, typer.Argument()]) -> None:
+    with command_session(
+        project="_system",
+        version=__version__,
+        command="artifact-verify-user-stories",
+        run_id=command_run_id("artifact-verify-user-stories"),
+    ) as session:
+        artifact = verify_user_story_artifact(path)
+        session.logger.info(
+            "Verified user-story artifact {path}",
+            step="artifact-verify-user-stories",
+            path=str(path),
+            story_count=len(artifact.stories),
+            requirement_count=len(artifact.coverage),
+            status="completed",
+        )
+        console.print(
+            "[green]PASS[/green] user-story artifact verified "
+            f"stories={len(artifact.stories)} covered={len(artifact.coverage)} "
             f"document_version_id={artifact.document_version_id}"
         )
 

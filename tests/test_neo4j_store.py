@@ -16,9 +16,13 @@ from multi_agentic_graph_rag.config.settings import (
 )
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore, _project_manifest_tx
 from multi_agentic_graph_rag.domain.schemas import (
+    AcceptanceCriterion,
     DocumentChunk,
     DocumentManifest,
     RequirementArtifact,
+    UserStoryArtifact,
+    UserStoryRecord,
+    UserStoryStatement,
 )
 
 
@@ -53,6 +57,32 @@ class Neo4jStoreTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
+
+    def test_user_story_coverage_projection_local_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = Neo4jStore(_settings(root))
+            store.project_manifest(_manifest())
+            store.project_artifact(_artifact())
+            store.project_user_story_coverage(
+                _user_story_artifact(),
+                {"REQ-1": ["CHUNK-1"]},
+            )
+
+            rows = [
+                json.loads(line)
+                for line in (root / "runtime" / "neo4j.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        kinds = [row["kind"] for row in rows]
+        self.assertEqual(kinds, ["manifest_projection", "user_story_projection"])
+        projection = rows[1]
+        self.assertEqual(projection["story_id"], "US-STORY-1")
+        self.assertEqual(projection["requirement_id"], "REQ-1")
+        self.assertTrue(projection["covered"])
+        self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
 
     def test_manifest_projection_keeps_document_chunk_metadata(self) -> None:
         tx = _FakeTx()
@@ -158,6 +188,44 @@ def _artifact() -> RequirementArtifact:
         generated_at=datetime(2026, 1, 1, tzinfo=UTC),
         facts=[],
         requirements=[],
+    )
+
+
+def _user_story_artifact() -> UserStoryArtifact:
+    record = UserStoryRecord(
+        story_id="US-STORY-1",
+        requirement_id="REQ-1",
+        project="PROJECT",
+        document_id="DOC",
+        document_version_id="DOC-v1",
+        doc_version="1.0",
+        title="Import files reliably",
+        epic="Ingestion",
+        priority="Medium",
+        persona="Data Engineer",
+        user_story=UserStoryStatement(
+            as_a="data engineer",
+            i_want="to import files",
+            so_that="downstream reporting stays current",
+        ),
+        business_value="Keeps operational reporting current",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id="AC-001",
+                title="valid file imports",
+                given="a valid source file",
+                when="the import runs",
+                then="records are available",
+            )
+        ],
+    )
+    return UserStoryArtifact(
+        project="PROJECT",
+        document_id="DOC",
+        document_version_id="DOC-v1",
+        doc_version="1.0",
+        stories={record.story_id: record},
+        coverage={"REQ-1": [record.story_id]},
     )
 
 

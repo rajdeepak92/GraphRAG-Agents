@@ -12,9 +12,12 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementArtifact,
     RequirementRevisionSnapshot,
+    UserStoryArtifact,
 )
 
 _MANAGED_TABLES = (
+    "user_stories",
+    "user_story_artifacts",
     "requirement_fact_links",
     "requirement_evidence",
     "requirement_delta_events",
@@ -48,6 +51,25 @@ _EXPECTED_COLUMNS = {
     "requirement_artifacts": {
         "artifact_path": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
+        "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "user_story_artifacts": {
+        "artifact_path": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "user_stories": {
+        "story_id": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "doc_version": _TEXT_TYPES,
+        "title": _TEXT_TYPES,
+        "priority": _TEXT_TYPES,
+        "status": _TEXT_TYPES,
         "payload": {"jsonb"},
         "created_at": {"timestamp with time zone"},
     },
@@ -179,6 +201,25 @@ class PostgresStore:
                       payload jsonb not null,
                       created_at timestamptz not null default now()
                     );
+                    create table if not exists user_story_artifacts (
+                      artifact_path text primary key,
+                      document_version_id text not null,
+                      payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists user_stories (
+                      story_id text primary key,
+                      requirement_id text not null,
+                      project text not null,
+                      document_id text not null,
+                      document_version_id text not null,
+                      doc_version text not null,
+                      title text not null,
+                      priority text not null,
+                      status text not null,
+                      payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
                     create table if not exists canonical_facts (
                       canonical_fact_id text primary key,
                       project text not null,
@@ -268,6 +309,10 @@ class PostgresStore:
                       on requirement_evidence(revision_id);
                     create index if not exists fact_occurrences_chunk_idx
                       on fact_occurrences(chunk_id);
+                    create index if not exists user_stories_requirement_idx
+                      on user_stories(requirement_id);
+                    create index if not exists user_stories_document_version_idx
+                      on user_stories(document_version_id);
                     """
                 )
                 self._validate_schema(cursor)
@@ -441,6 +486,142 @@ class PostgresStore:
                 row = cursor.fetchone()
                 if row:
                     return _artifact_payload_from_row(row[0])
+        return None
+
+    def persist_user_story_artifact(
+        self,
+        artifact: UserStoryArtifact,
+        artifact_path: str,
+        run_id: str,
+    ) -> None:
+        payload = artifact.model_dump(mode="json")
+        if self.settings.postgres.mode == "local_json":
+            self._upsert_local(
+                "user_story_artifact",
+                artifact.document_version_id,
+                {
+                    "kind": "user_story_artifact",
+                    "run_id": run_id,
+                    "artifact_path": artifact_path,
+                    "artifact": payload,
+                },
+            )
+            self._persist_user_stories_local(artifact)
+            return
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into user_story_artifacts
+                      (artifact_path, document_version_id, payload)
+                    values (%s, %s, %s)
+                    on conflict (artifact_path) do update set payload=excluded.payload
+                    """,
+                    (artifact_path, artifact.document_version_id, json.dumps(payload)),
+                )
+                self._persist_user_stories_postgres(cursor, artifact)
+            connection.commit()
+
+    def load_user_story_artifact_payload(
+        self,
+        artifact_path: str | None = None,
+        document_version_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if artifact_path is None and document_version_id is None:
+            raise ValueError("artifact_path or document_version_id is required")
+        if self.settings.postgres.mode == "local_json":
+            return self._local_user_story_artifact_payload(
+                artifact_path=artifact_path,
+                document_version_id=document_version_id,
+            )
+        with self._connect() as connection, connection.cursor() as cursor:
+            if artifact_path is not None:
+                cursor.execute(
+                    "select payload from user_story_artifacts where artifact_path = %s",
+                    (artifact_path,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return _artifact_payload_from_row(row[0])
+            if document_version_id is not None:
+                cursor.execute(
+                    """
+                    select payload from user_story_artifacts
+                    where document_version_id = %s
+                    order by created_at desc
+                    limit 1
+                    """,
+                    (document_version_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return _artifact_payload_from_row(row[0])
+        return None
+
+    def _persist_user_stories_postgres(self, cursor: Any, artifact: UserStoryArtifact) -> None:
+        for story_id, record in artifact.stories.items():
+            cursor.execute(
+                """
+                insert into user_stories
+                  (story_id, requirement_id, project, document_id, document_version_id,
+                   doc_version, title, priority, status, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                on conflict (story_id) do update
+                set title = excluded.title,
+                    priority = excluded.priority,
+                    status = excluded.status,
+                    payload = excluded.payload
+                """,
+                (
+                    story_id,
+                    record.requirement_id,
+                    record.project,
+                    record.document_id,
+                    record.document_version_id,
+                    record.doc_version,
+                    record.title,
+                    record.priority,
+                    json.dumps(record.model_dump(mode="json")),
+                ),
+            )
+
+    def _persist_user_stories_local(self, artifact: UserStoryArtifact) -> None:
+        for story_id, record in artifact.stories.items():
+            self._upsert_local(
+                "user_story",
+                story_id,
+                {
+                    "kind": "user_story",
+                    "story_id": story_id,
+                    "requirement_id": record.requirement_id,
+                    "project": record.project,
+                    "document_id": record.document_id,
+                    "document_version_id": record.document_version_id,
+                    "doc_version": record.doc_version,
+                    "title": record.title,
+                    "priority": record.priority,
+                    "status": "active",
+                    "user_story": record.model_dump(mode="json"),
+                },
+            )
+
+    def _local_user_story_artifact_payload(
+        self,
+        *,
+        artifact_path: str | None,
+        document_version_id: str | None,
+    ) -> dict[str, Any] | None:
+        rows = [row for row in self._read_local_rows() if row.get("kind") == "user_story_artifact"]
+        if artifact_path is not None:
+            for row in reversed(rows):
+                if row.get("artifact_path") == artifact_path:
+                    artifact = row.get("artifact")
+                    return dict(artifact) if isinstance(artifact, dict) else None
+        if document_version_id is not None:
+            for row in reversed(rows):
+                if row.get("_local_key") == document_version_id:
+                    artifact = row.get("artifact")
+                    return dict(artifact) if isinstance(artifact, dict) else None
         return None
 
     def record_run(self, run_id: str, status: str, payload: dict[str, Any]) -> None:

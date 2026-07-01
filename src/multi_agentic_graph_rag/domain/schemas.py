@@ -23,6 +23,26 @@ _PLACEHOLDER_REQUIREMENT_TEXT_RE = re.compile(
     r"requirement|non-functional requirement|placeholder|tbd|n/?a|none)$",
     re.I,
 )
+_PLACEHOLDER_USER_STORY_TEXT_RE = re.compile(
+    r"^(?:user story|story|title|persona|role|user|actor|business value|value|"
+    r"epic|feature|tbd|todo|placeholder|n/?a|na|none|null|unknown)$",
+    re.I,
+)
+
+
+def normalize_priority_label(value: object) -> Literal["High", "Medium", "Low"]:
+    """Normalize an arbitrary priority string to High/Medium/Low."""
+    if value is None:
+        return "Medium"
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
+        return "Medium"
+    normalized = text.lower()
+    if normalized in {"high", "critical", "mandatory", "must", "required"}:
+        return "High"
+    if normalized in {"low", "optional", "future", "nice-to-have", "nice to have"}:
+        return "Low"
+    return "Medium"
 
 
 class IngestionRequest(StrictModel):
@@ -299,6 +319,184 @@ class CompactRequirementArtifact(StrictModel):
     doc_version: str
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     requirements: dict[str, list[CompactRequirementOccurrence]]
+
+
+class RequirementInput(StrictModel):
+    """Normalized requirement fed into user-story generation (stage 3 input)."""
+
+    requirement_id: str
+    requirement_text: str
+    requirement_type: str = "Functional Requirement"
+    priority: Literal["High", "Medium", "Low"] = "Medium"
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value: object) -> str:
+        return normalize_priority_label(value)
+
+    @field_validator("requirement_id", "requirement_text")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
+class UserStoryStatement(StrictModel):
+    as_a: str
+    i_want: str
+    so_that: str
+
+    @field_validator("as_a", "i_want", "so_that")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
+class UserStoryScope(StrictModel):
+    in_scope: list[str] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
+
+
+class AcceptanceCriterion(StrictModel):
+    id: str = ""
+    title: str
+    given: str
+    when: str
+    then: str
+
+    @field_validator("title", "given", "when", "then")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
+class BusinessRule(StrictModel):
+    id: str = ""
+    rule: str
+
+    @field_validator("rule")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
+class TestScenario(StrictModel):
+    id: str = ""
+    scenario: str
+
+    @field_validator("scenario")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
+class _UserStoryContent(StrictModel):
+    title: str
+    epic: str
+    priority: Literal["High", "Medium", "Low"] = "Medium"
+    persona: str
+    user_story: UserStoryStatement
+    business_value: str
+    scope: UserStoryScope = Field(default_factory=UserStoryScope)
+    acceptance_criteria: list[AcceptanceCriterion] = Field(min_length=1)
+    business_rules: list[BusinessRule] = Field(default_factory=list)
+    test_scenarios: list[TestScenario] = Field(default_factory=list)
+    definition_of_done: list[str] = Field(default_factory=list)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value: object) -> str:
+        return normalize_priority_label(value)
+
+    @field_validator("title", "persona", "business_value")
+    @classmethod
+    def meaningful_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        if _PLACEHOLDER_USER_STORY_TEXT_RE.match(value):
+            raise ValueError(f"value must not be a placeholder: {value!r}")
+        return value
+
+    @field_validator("epic")
+    @classmethod
+    def non_empty_epic(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("epic must not be empty")
+        return value
+
+
+class UserStoryModel(_UserStoryContent):
+    """A single user story exactly as returned by the reasoning model (temp ids)."""
+
+    story_id: str = ""
+
+
+class UserStoryGenerationOutput(StrictModel):
+    user_stories: list[UserStoryModel] = Field(min_length=1)
+
+
+class UserStoryRecord(_UserStoryContent):
+    """A persisted user story with permanent id and provenance."""
+
+    story_id: str
+    requirement_id: str
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+
+
+class UserStoryArtifact(StrictModel):
+    artifact_schema_version: Literal["1.0-user-stories"] = "1.0-user-stories"
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    stories: dict[str, UserStoryRecord]
+    coverage: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class UserStoryRequest(StrictModel):
+    requirements_path: Path | None = None
+    project: str | None = None
+    document_version_id: str | None = None
+    reasoning_provider: str | None = None
+    embedding_provider: str | None = None
+    reranker_provider: str | None = None
+    top_k: int | None = None
+
+
+class UserStoryResult(StrictModel):
+    run_id: str
+    status: str
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    artifact_path: Path
+    requirement_count: int
+    story_ids: list[str]
+    coverage: dict[str, list[str]] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class IngestionResult(StrictModel):

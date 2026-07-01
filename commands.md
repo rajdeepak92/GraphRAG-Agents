@@ -130,7 +130,7 @@ Run this against the app database:
 
 ```powershell
 psql "postgresql://marag:<password>@127.0.0.1:5432/marag" `
-  -c "TRUNCATE TABLE requirement_fact_links, requirement_evidence, requirement_delta_events, requirement_revisions, requirements, fact_occurrences, canonical_facts, requirement_artifacts, document_versions, ingestion_runs RESTART IDENTITY CASCADE;"
+  -c "TRUNCATE TABLE user_stories, user_story_artifacts, requirement_fact_links, requirement_evidence, requirement_delta_events, requirement_revisions, requirements, fact_occurrences, canonical_facts, requirement_artifacts, document_versions, ingestion_runs RESTART IDENTITY CASCADE;"
 ```
 
 ### Real Neo4j cleanup
@@ -252,7 +252,40 @@ uv run marag ingest --project PROJECT_1 --document .\documents\inbox\PROJECT_1\s
 uv run marag ingest --project PROJECT_1 --document .\documents\inbox\PROJECT_1\sample.txt --version 1.0 --replace-version
 ```
 
-## 8. Observability
+## 8. Generate User Stories
+
+Stage 3 consumes the requirement artifact and generates user stories per
+requirement with hybrid retrieval (Chroma dense + Neo4j BM25 + Neo4j multi-hop)
+fused by the reranker. It requires the real stack
+(`POSTGRES_MODE=postgres`, `NEO4J_MODE=neo4j`, real reasoning/embedding/reranker
+providers) and adds two managed tables, so run `postgres-reset --yes` once
+before the first run.
+
+```powershell
+uv run marag postgres-reset --yes
+
+# From the local requirement artifact written by ingest:
+uv run marag generate-user-stories `
+  --requirements generated\PROJECT_1\req\<RUN_ID>\requirements.json `
+  --project PROJECT_1 `
+  --json-output
+
+# From PostgreSQL (local artifact absent), selected by document version:
+uv run marag generate-user-stories --document-version-id <DV-ID> --project PROJECT_1 --json-output
+```
+
+Useful variations:
+
+```powershell
+uv run marag generate-user-stories --requirements .\path\to\requirements.json --project PROJECT_1 --top-k 4
+uv run marag generate-user-stories --requirements .\path\to\requirements.json --project PROJECT_1 --reasoning-provider azure_openai --embedding-provider azure_openai --reranker-provider huggingface
+uv run marag artifact verify-user-stories generated\PROJECT_1\req\<RUN_ID>\user_stories.json
+```
+
+`user_stories.json` is written beside the input requirements file (or under
+`generated/<PROJECT>/user_stories/<RUN_ID>/` when loaded from PostgreSQL).
+
+## 9. Observability
 
 ### Run files
 
@@ -332,4 +365,5 @@ cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <password> "MATCH (n) RETURN c
 6. Start or clean databases as needed
 7. `uv run marag db-check`
 8. Run `uv run marag ingest ...`
-9. Inspect `.generated/<PROJECT>/run/` and `runtime/staging/`
+9. Run `uv run marag generate-user-stories --requirements ... --project ...`
+10. Inspect `.generated/<PROJECT>/run/` and `runtime/staging/`

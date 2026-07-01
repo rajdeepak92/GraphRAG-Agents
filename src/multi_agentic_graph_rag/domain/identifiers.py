@@ -111,6 +111,22 @@ def requirement_evidence_id(
     return f"REQEVID-{token}"
 
 
+def user_story_id(
+    project: str,
+    requirement_identifier: str,
+    normalized_title: str,
+    ordinal: int,
+) -> str:
+    token = stable_token(
+        project,
+        requirement_identifier,
+        normalized_title,
+        ordinal,
+        length=14,
+    )
+    return f"US-{token}"
+
+
 def requirement_delta_event_id(
     *,
     event_type: str,

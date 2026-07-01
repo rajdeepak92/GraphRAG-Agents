@@ -69,7 +69,9 @@ This checks PostgreSQL, Neo4j, and Chroma in that order.
 
 Storage responsibilities:
 
-- Neo4j is the document/chunk graph knowledge base for multi-hop reasoning.
+- Neo4j is the document/chunk graph knowledge base for multi-hop reasoning, and
+  also holds validated user-story coverage claim-nodes (UserStory / Requirement)
+  linked back to their evidence chunks once `generate-user-stories` has run.
 - ChromaDB stores chunk embeddings, chunk text, and chunk/document metadata for
   semantic search.
 - PostgreSQL stores full generated `requirements_full.json` payloads, the
@@ -138,7 +140,82 @@ That folder contains compact `requirements.json`, full audit
 `requirements_full.json`, `run.log`, `run.jsonl`, `chunk_manifest.json`, and
 any saved `llm_response_*.txt` files.
 
-## 8. Observability
+## 8. Generate User Stories
+
+User-story generation is a standalone stage (`generate-user-stories`) that
+consumes the requirement artifact and produces enterprise-grade user stories per
+requirement. For each requirement it runs hybrid retrieval — Chroma dense +
+Neo4j BM25 full-text + Neo4j multi-hop over the chunk graph — fused by the
+cross-encoder reranker, then generates stories under a strict schema.
+
+> One-time reset: this stage adds new PostgreSQL managed tables
+> (`user_stories`, `user_story_artifacts`). The schema self-validates, so run a
+> reset once against your disposable/local database before the first run:
+>
+> ```powershell
+> uv run python -m multi_agentic_graph_rag postgres-reset --yes
+> uv run python -m multi_agentic_graph_rag db-check
+> ```
+
+Required stack (enforced): real reasoning + embedding + reranker providers,
+`POSTGRES_MODE=postgres`, and `NEO4J_MODE=neo4j`. Retrieval degrades gracefully
+per requirement (falls back to the requirement's own evidence chunks, then to
+the requirement text), so a run is never blocked by an empty retrieval — but for
+grounded stories the document's chunks must already be in Neo4j/Chroma, so
+re-ingest the source first if they are missing.
+
+From a local requirement artifact (the file written by ingest):
+
+```powershell
+uv run marag generate-user-stories `
+  --requirements generated\<PROJECT>\req\<RUN_ID>\requirements.json `
+  --project <PROJECT> `
+  --json-output
+```
+
+From PostgreSQL when the local artifact is absent, select by document version:
+
+```powershell
+uv run marag generate-user-stories `
+  --document-version-id <DV-ID> `
+  --project <PROJECT> `
+  --json-output
+```
+
+Optional flags:
+
+```powershell
+--reasoning-provider azure_openai
+--embedding-provider azure_openai
+--reranker-provider huggingface
+--top-k 4
+```
+
+Output: `user_stories.json` is written **beside the input requirements file**
+(or under `generated/<PROJECT>/user_stories/<RUN_ID>/` when loaded from
+PostgreSQL). Each story is keyed by a permanent `US-*` id and carries its
+`requirement_id`, full content, `doc_version`, and `project`; a `coverage` map
+links each requirement to its story ids.
+
+Persistence:
+
+- PostgreSQL: the full artifact in `user_story_artifacts`, plus one index row
+  per story in `user_stories`.
+- Neo4j: validated coverage claim-nodes —
+  `(:UserStory)-[:COVERS_REQUIREMENT]->(:Requirement)`,
+  `(:Requirement)-[:EVIDENCED_BY_CHUNK]->(:Chunk)`, and
+  `(:DocumentVersion)-[:HAS_USER_STORY]->(:UserStory)` — and each covered
+  requirement is marked `covered=true`.
+
+Verify and inspect:
+
+```powershell
+uv run marag artifact verify-user-stories generated\<PROJECT>\req\<RUN_ID>\user_stories.json
+psql "postgresql://marag:<password>@127.0.0.1:5432/marag" -c "select count(*) from user_stories;"
+cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <password> "MATCH (s:UserStory)-[:COVERS_REQUIREMENT]->(r:Requirement) RETURN count(s), count(r);"
+```
+
+## 9. Observability
 
 Inspect the latest run:
 
@@ -158,7 +235,10 @@ What to expect:
   when parsing fails, and successful responses are also captured when
   `LOG_LLM_RESPONSES=true`.
 
-## 9. Notes
+## 10. Notes
 
 - `run status` still supports the legacy `.generated/<PROJECT>/run/` path.
 - The repo keeps generated outputs and runtime data out of version control.
+- `generate-user-stories` writes its session log under
+  `.generated/<PROJECT>/run/`; the `user_stories.json` artifact lands beside the
+  input requirements file.

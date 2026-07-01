@@ -24,6 +24,7 @@ from multi_agentic_graph_rag.config.settings import (
     Neo4jSettings,
     PathsSettings,
     PostgresSettings,
+    UserStorySettings,
 )
 
 
@@ -63,6 +64,16 @@ def _positive_int(value: Any, *, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, parsed)
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def load_config(
@@ -151,6 +162,25 @@ def load_config(
         default=bool(discovery_cfg.get("log_llm_responses", False)),
     )
 
+    user_story_cfg = config_data.get("user_story", {})
+    user_story_max_new_tokens = _optional_positive_int(
+        env.get("USER_STORY_MAX_NEW_TOKENS", user_story_cfg.get("max_new_tokens"))
+    )
+    user_story = UserStorySettings(
+        top_k=_positive_int(env.get("USER_STORY_TOP_K", user_story_cfg.get("top_k")), default=4),
+        dense_k=_positive_int(
+            env.get("USER_STORY_DENSE_K", user_story_cfg.get("dense_k")), default=8
+        ),
+        sparse_k=_positive_int(
+            env.get("USER_STORY_SPARSE_K", user_story_cfg.get("sparse_k")), default=8
+        ),
+        neighbor_window=_positive_int(
+            env.get("USER_STORY_NEIGHBOR_WINDOW", user_story_cfg.get("neighbor_window")),
+            default=1,
+        ),
+        max_new_tokens=user_story_max_new_tokens,
+    )
+
     settings = AppSettings(
         app_env=env.get(
             "APP_ENV", config_data.get("application", {}).get("app_env", "development")
@@ -216,6 +246,7 @@ def load_config(
             ),
         ),
         chroma=ChromaSettings(**config_data.get("chroma", {})),
+        user_story=user_story,
         azure_openai=AzureOpenAISettings(
             endpoint=env.get("AZURE_OPENAI_ENDPOINT", ""),
             api_key=env.get("AZURE_OPENAI_API_KEY", ""),

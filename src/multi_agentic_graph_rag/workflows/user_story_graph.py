@@ -1,0 +1,484 @@
+"""LangGraph orchestration for standalone user-story generation (stage 3)."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TypedDict
+
+from langgraph.graph import END, StateGraph
+
+from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGenerationAgent
+from multi_agentic_graph_rag.config.config_loader import load_config
+from multi_agentic_graph_rag.config.settings import AppSettings
+from multi_agentic_graph_rag.db.chroma_store import ChromaStore
+from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
+from multi_agentic_graph_rag.db.postgres import PostgresStore
+from multi_agentic_graph_rag.domain.errors import ConfigurationError
+from multi_agentic_graph_rag.domain.schemas import (
+    CompactRequirementArtifact,
+    RequirementArtifact,
+    RequirementInput,
+    UserStoryModel,
+    UserStoryRequest,
+    UserStoryResult,
+    normalize_priority_label,
+)
+from multi_agentic_graph_rag.llm_models.factory import (
+    create_embedding_model,
+    create_reasoning_model,
+    create_reranker_model,
+)
+from multi_agentic_graph_rag.observability.session import (
+    RunSession,
+    command_run_id,
+    command_session,
+)
+from multi_agentic_graph_rag.services.artifacts import write_user_story_artifact
+from multi_agentic_graph_rag.services.retrieval import RetrievalService
+from multi_agentic_graph_rag.services.user_story_builder import build_user_story_artifact
+
+
+class UserStoryState(TypedDict, total=False):
+    request: dict[str, Any]
+    run_id: str
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    artifact_path: str
+    requirement_count: int
+    story_ids: list[str]
+    coverage: dict[str, list[str]]
+    warnings: list[str]
+    errors: list[str]
+
+
+@dataclass(frozen=True)
+class _RequirementSource:
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    requirements: list[RequirementInput]
+
+
+def build_user_story_graph(session: RunSession | None = None) -> Any:
+    graph = StateGraph(UserStoryState)
+    graph.add_node("validate_request", lambda state: _validate_request(state, session=session))
+    graph.add_node("run_pipeline", lambda state: _run_pipeline(state, session=session))
+    graph.set_entry_point("validate_request")
+    graph.add_edge("validate_request", "run_pipeline")
+    graph.add_edge("run_pipeline", END)
+    return graph.compile()
+
+
+def _validate_request(
+    state: UserStoryState,
+    *,
+    session: RunSession | None = None,
+) -> UserStoryState:
+    request = UserStoryRequest.model_validate(state["request"])
+    logger = session.logger if session is not None else None
+    if request.requirements_path is None and request.document_version_id is None:
+        raise ConfigurationError(
+            "provide --requirements <path> or --document-version-id <id> to load requirements"
+        )
+    if request.requirements_path is not None and not request.requirements_path.exists():
+        raise FileNotFoundError(request.requirements_path)
+    rid = state.get("run_id") or command_run_id("user-stories")
+    if logger is not None:
+        logger.debug(
+            "Validated user-story request",
+            step="validate_request",
+            requirements_path=str(request.requirements_path) if request.requirements_path else None,
+            document_version_id=request.document_version_id,
+            run_id=rid,
+        )
+    return {"request": request.model_dump(mode="json"), "run_id": rid, "warnings": [], "errors": []}
+
+
+def _run_pipeline(
+    state: UserStoryState,
+    *,
+    session: RunSession | None = None,
+) -> UserStoryState:
+    request = UserStoryRequest.model_validate(state["request"])
+    settings = load_config()
+    if session is not None:
+        session.set_log_level(settings.log_level)
+    _apply_overrides(settings, request)
+    logger = session.logger if session is not None else None
+    postgres = PostgresStore(settings)
+    neo4j = Neo4jStore(settings)
+    chroma = ChromaStore(settings)
+    run_dir = session.run_dir if session is not None else None
+
+    def pipeline() -> UserStoryState:
+        _validate_required_user_story_stack(settings)
+        if logger is not None:
+            logger.info(
+                "Beginning user-story generation pipeline",
+                step="run_pipeline",
+                run_id=state["run_id"],
+                status="started",
+            )
+        _check_store(logger, "check_postgres", postgres.check)
+        _check_store(logger, "check_neo4j", neo4j.check)
+        _check_store(logger, "check_chroma", chroma.check)
+        postgres.ensure_schema()
+
+        reasoning_model = create_reasoning_model(settings, logger=logger, run_dir=run_dir)
+        embedding_model = create_embedding_model(settings)
+        reranker_model = create_reranker_model(settings)
+        _warmup_reasoning_model(reasoning_model)
+        neo4j.ensure_search_index()
+        if logger is not None:
+            logger.info(
+                "Model readiness checks completed",
+                step="check_models",
+                reasoning_provider=reasoning_model.provider_name,
+                embedding_provider=embedding_model.provider_name,
+                reranker_provider=reranker_model.provider_name,
+                status="PASS",
+            )
+
+        source = _load_requirement_source(request, postgres, logger)
+        if logger is not None:
+            logger.info(
+                "Loaded {requirement_count} requirements for user-story generation",
+                step="load_requirements",
+                requirement_count=len(source.requirements),
+                document_version_id=source.document_version_id,
+                project=source.project,
+            )
+
+        retrieval = RetrievalService(
+            chroma=chroma,
+            neo4j=neo4j,
+            embedding_model=embedding_model,
+            reranker_model=reranker_model,
+            settings=settings.user_story,
+            logger=logger,
+        )
+        agent = UserStoryGenerationAgent(reasoning_model, logger=logger)
+        generated: list[tuple[RequirementInput, UserStoryModel]] = []
+        evidence_by_requirement: dict[str, list[str]] = {}
+        for index, requirement in enumerate(source.requirements, start=1):
+            evidence_by_requirement[requirement.requirement_id] = list(
+                requirement.evidence_chunk_ids
+            )
+            context = retrieval.retrieve_context(
+                requirement_text=requirement.requirement_text,
+                document_version_id=source.document_version_id,
+                evidence_chunk_ids=requirement.evidence_chunk_ids,
+            )
+            output = agent.generate(requirement, context, requirement_index=index)
+            for story in output.user_stories:
+                generated.append((requirement, story))
+
+        artifact = build_user_story_artifact(
+            project=source.project,
+            document_id=source.document_id,
+            document_version_id=source.document_version_id,
+            doc_version=source.doc_version,
+            generated=generated,
+        )
+        out_dir = _output_dir(request, settings, source, state["run_id"])
+        artifact_path = write_user_story_artifact(artifact, out_dir, logger=logger)
+        if session is not None:
+            session.artifact_payload = artifact.model_dump(mode="json")
+        if logger is not None:
+            logger.info(
+                "User-story artifact written to {path}",
+                step="write_user_story_artifact",
+                path=str(artifact_path),
+                story_count=len(artifact.stories),
+                requirement_count=len(artifact.coverage),
+                status="completed",
+            )
+        postgres.persist_user_story_artifact(artifact, str(artifact_path), state["run_id"])
+        if logger is not None:
+            logger.info(
+                "Projecting user-story coverage into Neo4j and marking requirements covered",
+                step="project_user_story_coverage",
+                document_version_id=source.document_version_id,
+                story_count=len(artifact.stories),
+                store_responsibility="user_story_traceability_nodes",
+            )
+        neo4j.project_user_story_coverage(artifact, evidence_by_requirement)
+
+        result_payload: UserStoryState = {
+            "run_id": state["run_id"],
+            "project": source.project,
+            "document_id": source.document_id,
+            "document_version_id": source.document_version_id,
+            "doc_version": source.doc_version,
+            "artifact_path": str(artifact_path),
+            "requirement_count": len(source.requirements),
+            "story_ids": list(artifact.stories),
+            "coverage": artifact.coverage,
+            "warnings": [],
+            "errors": [],
+        }
+        if session is not None:
+            session.metadata.update(result_payload)
+        postgres.record_run(state["run_id"], "completed", dict(result_payload))
+        if logger is not None:
+            logger.info(
+                "User-story generation pipeline completed",
+                step="run_pipeline",
+                run_id=state["run_id"],
+                story_count=len(artifact.stories),
+                requirement_count=len(source.requirements),
+                status="completed",
+            )
+        return result_payload
+
+    try:
+        return pipeline()
+    except Exception as exc:
+        if logger is not None:
+            logger.exception(
+                "User-story generation pipeline failed",
+                step="run_pipeline",
+                exc=exc,
+                status="failed",
+            )
+        if session is not None:
+            session.write_failure_envelope(error=exc)
+        _record_failed_run_safely(
+            postgres=postgres,
+            run_id=state["run_id"],
+            payload={"run_id": state["run_id"], "error": str(exc)},
+            logger=logger,
+        )
+        raise
+
+
+def run_user_story_generation(
+    request: UserStoryRequest,
+    session: RunSession | None = None,
+) -> UserStoryResult:
+    if session is None:
+        project, version = resolve_user_story_identity(request)
+        with command_session(
+            project=project,
+            version=version,
+            command="user-stories",
+            run_id=command_run_id("user-stories"),
+        ) as managed_session:
+            return run_user_story_generation(request, session=managed_session)
+    session.request_payload = request.model_dump(mode="json")
+    graph = build_user_story_graph(session)
+    final_state = graph.invoke(
+        {"request": request.model_dump(mode="json"), "run_id": session.run_id}
+    )
+    return UserStoryResult(
+        run_id=final_state["run_id"],
+        status="completed",
+        project=final_state["project"],
+        document_id=final_state["document_id"],
+        document_version_id=final_state["document_version_id"],
+        doc_version=final_state["doc_version"],
+        artifact_path=Path(final_state["artifact_path"]),
+        requirement_count=final_state["requirement_count"],
+        story_ids=final_state["story_ids"],
+        coverage=final_state.get("coverage", {}),
+        warnings=final_state.get("warnings", []),
+        errors=final_state.get("errors", []),
+    )
+
+
+def resolve_user_story_identity(request: UserStoryRequest) -> tuple[str, str]:
+    """Resolve (project, version) for the command session before the graph runs."""
+    project = request.project
+    version = "generated"
+    if request.requirements_path is not None and request.requirements_path.exists():
+        data = json.loads(request.requirements_path.read_text(encoding="utf-8"))
+        if not project and data.get("project"):
+            project = str(data["project"])
+        version = str(data.get("doc_version") or data.get("version") or version)
+    if not project:
+        raise ConfigurationError(
+            "--project is required when --requirements is absent or has no project field"
+        )
+    return project, version
+
+
+def _apply_overrides(settings: AppSettings, request: UserStoryRequest) -> None:
+    if request.reasoning_provider:
+        settings.reasoning_model.provider = request.reasoning_provider
+    if request.embedding_provider:
+        settings.embedding_model.provider = request.embedding_provider
+    if request.reranker_provider:
+        settings.reranker_model.provider = request.reranker_provider
+    if request.top_k is not None and request.top_k > 0:
+        settings.user_story.top_k = request.top_k
+    if settings.user_story.max_new_tokens:
+        settings.huggingface.max_new_tokens = settings.user_story.max_new_tokens
+
+
+def _load_requirement_source(
+    request: UserStoryRequest,
+    postgres: PostgresStore,
+    logger: Any | None,
+) -> _RequirementSource:
+    if request.requirements_path is not None:
+        if logger is not None:
+            logger.info(
+                "Loading requirements from local artifact {path}",
+                step="load_requirements",
+                path=str(request.requirements_path),
+                source="local_json",
+            )
+        return _load_requirement_source_local(request.requirements_path)
+
+    if not request.document_version_id:
+        raise ConfigurationError("provide --requirements or --document-version-id")
+    payload = postgres.load_requirement_artifact_payload(
+        document_version_id=request.document_version_id
+    )
+    if payload is None:
+        raise ConfigurationError(
+            "no requirement artifact found in postgres for "
+            f"document_version_id={request.document_version_id}"
+        )
+    if logger is not None:
+        logger.info(
+            "Loading requirements from postgres fallback",
+            step="load_requirements",
+            document_version_id=request.document_version_id,
+            source="postgres",
+        )
+    return _load_requirement_source_from_full_payload(payload)
+
+
+def _load_requirement_source_local(path: Path) -> _RequirementSource:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    compact = CompactRequirementArtifact.model_validate(data)
+    requirements: list[RequirementInput] = []
+    for requirement_id, occurrences in compact.requirements.items():
+        if not occurrences:
+            continue
+        head = occurrences[0]
+        requirements.append(
+            RequirementInput(
+                requirement_id=requirement_id,
+                requirement_text=head.requirement_text,
+                requirement_type=head.requirement_type,
+                priority=head.priority,
+                evidence_chunk_ids=_unique(occurrence.chunk_id for occurrence in occurrences),
+            )
+        )
+    return _RequirementSource(
+        project=compact.project,
+        document_id=compact.document_id,
+        document_version_id=compact.document_version_id,
+        doc_version=compact.doc_version,
+        requirements=requirements,
+    )
+
+
+def _load_requirement_source_from_full_payload(payload: dict[str, Any]) -> _RequirementSource:
+    artifact = RequirementArtifact.model_validate(payload)
+    requirements: list[RequirementInput] = []
+    for requirement in artifact.requirements:
+        chunk_ids = [requirement.source_trace.chunk_id]
+        chunk_ids.extend(evidence.source_trace.chunk_id for evidence in requirement.evidence)
+        requirements.append(
+            RequirementInput(
+                requirement_id=requirement.requirement_id,
+                requirement_text=requirement.statement,
+                requirement_type=requirement.requirement_type,
+                priority=normalize_priority_label(requirement.priority),
+                evidence_chunk_ids=_unique(chunk_ids),
+            )
+        )
+    return _RequirementSource(
+        project=artifact.project,
+        document_id=artifact.document_id,
+        document_version_id=artifact.document_version_id,
+        doc_version=artifact.version,
+        requirements=requirements,
+    )
+
+
+def _output_dir(
+    request: UserStoryRequest,
+    settings: AppSettings,
+    source: _RequirementSource,
+    run_identifier: str,
+) -> Path:
+    if request.requirements_path is not None:
+        return request.requirements_path.parent
+    return (
+        settings.paths.generated_requirements_dir / source.project / "user_stories" / run_identifier
+    )
+
+
+def _validate_required_user_story_stack(settings: AppSettings) -> None:
+    if settings.reasoning_model.provider in {"local_heuristic"}:
+        raise ConfigurationError(
+            f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} "
+            "is not valid for user-story generation"
+        )
+    if settings.embedding_model.provider in {"local_hash"}:
+        raise ConfigurationError(
+            f"EMBEDDING_MODEL_PROVIDER={settings.embedding_model.provider} "
+            "is not valid for user-story generation"
+        )
+    if settings.reranker_model.provider in {"none"}:
+        raise ConfigurationError(
+            f"RERANKER_MODEL_PROVIDER={settings.reranker_model.provider} "
+            "is not valid for user-story generation"
+        )
+    if settings.postgres.mode != "postgres":
+        raise ConfigurationError("POSTGRES_MODE=postgres is required for user-story generation")
+    if settings.neo4j.mode != "neo4j":
+        raise ConfigurationError("NEO4J_MODE=neo4j is required for user-story generation")
+
+
+def _check_store(logger: Any | None, step: str, check: Any) -> None:
+    detail = check()
+    if logger is not None:
+        logger.info(detail, step=step, status="PASS", detail=detail)
+
+
+def _warmup_reasoning_model(reasoning_model: Any) -> None:
+    warmup = getattr(reasoning_model, "warmup", None)
+    if callable(warmup):
+        warmup()
+
+
+def _record_failed_run_safely(
+    *,
+    postgres: PostgresStore,
+    run_id: str,
+    payload: dict[str, Any],
+    logger: Any,
+) -> None:
+    try:
+        postgres.record_run(run_id, "failed", payload)
+    except Exception as record_error:
+        if logger is not None:
+            logger.warning(
+                "Could not record failed user-story run in PostgreSQL; preserving original error",
+                step="record_failed_run",
+                run_id=run_id,
+                error_type=record_error.__class__.__name__,
+                error=str(record_error),
+                status="warning",
+            )
+
+
+def _unique(values: Any) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        text = str(value)
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+    return ordered

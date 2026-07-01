@@ -58,6 +58,14 @@ class DiscoverySettings(BaseModel):
     log_llm_responses: bool = False
 
 
+class UserStorySettings(BaseModel):
+    top_k: int = 4
+    dense_k: int = 8
+    sparse_k: int = 8
+    neighbor_window: int = 1
+    max_new_tokens: int | None = None
+
+
 class AzureOpenAISettings(BaseModel):
     endpoint: str = ""
     api_key: str = ""
@@ -99,6 +107,7 @@ class AppSettings(BaseModel):
     neo4j: Neo4jSettings
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
+    user_story: UserStorySettings = Field(default_factory=UserStorySettings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
     raw_config: dict[str, Any] = Field(default_factory=dict)

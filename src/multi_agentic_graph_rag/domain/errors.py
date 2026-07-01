@@ -31,3 +31,7 @@ class SchemaMismatchError(StoreUnavailableError):
 
 class TraceValidationError(IngestionError):
     """LLM trace data does not match source text."""
+
+
+class UserStoryValidationError(MaragError):
+    """Generated user-story content failed meaningfulness validation."""

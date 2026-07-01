@@ -45,6 +45,40 @@ class ChromaStore:
             metadatas=metadatas,
         )
 
+    def query_chunks(
+        self,
+        query_embedding: list[float],
+        document_version_id: str,
+        n_results: int,
+    ) -> list[tuple[str, str, float]]:
+        """Return (chunk_id, document_text, distance) for the nearest chunks.
+
+        Scoped to a single document version via metadata filtering.
+        """
+        if n_results <= 0:
+            return []
+        collection = self._client().get_or_create_collection(self.collection_name)
+        result = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=n_results,
+            where={"document_version_id": document_version_id},
+        )
+        ids = _first_row(result.get("ids"))
+        documents = _first_row(result.get("documents"))
+        distances = _first_row(result.get("distances"))
+        matches: list[tuple[str, str, float]] = []
+        for index, chunk_id in enumerate(ids):
+            document = documents[index] if index < len(documents) else ""
+            distance = distances[index] if index < len(distances) else 0.0
+            matches.append(
+                (
+                    str(chunk_id),
+                    str(document) if document is not None else "",
+                    float(distance) if distance is not None else 0.0,
+                )
+            )
+        return matches
+
     def count_ids(self, ids: list[str]) -> int:
         collection = self._client().get_or_create_collection(self.collection_name)
         result = collection.get(ids=ids)
@@ -54,3 +88,10 @@ class ChromaStore:
         import chromadb
 
         return chromadb.PersistentClient(path=str(self.settings.paths.chroma_persist_dir))
+
+
+def _first_row(value: Any) -> list[Any]:
+    if not value:
+        return []
+    first = value[0]
+    return list(first) if first is not None else []

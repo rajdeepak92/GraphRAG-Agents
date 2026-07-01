@@ -9,6 +9,7 @@ from pathlib import Path
 from multi_agentic_graph_rag.domain.schemas import (
     CompactRequirementArtifact,
     RequirementArtifact,
+    UserStoryArtifact,
 )
 from multi_agentic_graph_rag.observability.logging import RunLogger
 
@@ -54,9 +55,33 @@ def write_compact_requirement_artifact(
     return path
 
 
+def write_user_story_artifact(
+    artifact: UserStoryArtifact,
+    out_dir: Path,
+    logger: RunLogger | None = None,
+) -> Path:
+    path = out_dir / "user_stories.json"
+    if logger is not None:
+        logger.debug(
+            "Writing user-story artifact for {document_version_id} to {path}",
+            step="write_user_story_artifact",
+            document_version_id=artifact.document_version_id,
+            path=str(path),
+            story_count=len(artifact.stories),
+            requirement_count=len(artifact.coverage),
+        )
+    _atomic_write_json(path, artifact.model_dump(mode="json"))
+    return path
+
+
 def verify_requirement_artifact(path: Path) -> RequirementArtifact:
     data = json.loads(path.read_text(encoding="utf-8"))
     return RequirementArtifact.model_validate(data)
+
+
+def verify_user_story_artifact(path: Path) -> UserStoryArtifact:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return UserStoryArtifact.model_validate(data)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
