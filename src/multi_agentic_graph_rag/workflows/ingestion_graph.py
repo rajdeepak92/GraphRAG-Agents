@@ -22,11 +22,17 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reranker_model,
 )
 from multi_agentic_graph_rag.observability.session import RunSession, command_session
-from multi_agentic_graph_rag.services.artifacts import write_requirement_artifact
+from multi_agentic_graph_rag.services.artifacts import (
+    write_compact_requirement_artifact,
+    write_requirement_artifact,
+)
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
 from multi_agentic_graph_rag.services.parsing import checksum_bytes, parse_document
-from multi_agentic_graph_rag.services.requirement_builder import build_requirement_artifact
+from multi_agentic_graph_rag.services.requirement_builder import (
+    build_compact_requirement_artifact,
+    build_requirement_artifact,
+)
 
 
 class IngestionState(TypedDict, total=False):
@@ -37,6 +43,7 @@ class IngestionState(TypedDict, total=False):
     document_version_id: str
     manifest_path: str
     artifact_path: str
+    full_artifact_path: str
     chunk_ids: list[str]
     fact_ids: list[str]
     requirement_ids: list[str]
@@ -305,36 +312,41 @@ def _run_pipeline(
             prior_revisions=prior_revisions,
             logger=logger,
         )
+        full_artifact_path = write_requirement_artifact(
+            artifact,
+            run_dir,
+            logger=logger,
+        )
+        compact_artifact = build_compact_requirement_artifact(artifact)
+        artifact_path = write_compact_requirement_artifact(
+            compact_artifact,
+            run_dir,
+            logger=logger,
+        )
         if session is not None:
-            session.artifact_payload = artifact.model_dump(mode="json")
-            artifact_path = session.write_artifact(session.artifact_payload)
-        else:
-            artifact_path = write_requirement_artifact(
-                artifact,
-                run_dir,
-                logger=logger,
-            )
+            session.artifact_payload = compact_artifact.model_dump(mode="json")
         if logger is not None:
             logger.info(
-                "Requirement artifact written to {path}",
+                "Requirement artifacts written to {path} and {full_path}",
                 step="write_requirement_artifact",
                 path=str(artifact_path),
+                full_path=str(full_artifact_path),
                 document_version_id=artifact.document_version_id,
                 status="completed",
             )
         postgres.persist_manifest(manifest)
         if logger is not None:
             logger.info(
-                "Persisting generated requirements.json payload and "
+                "Persisting generated requirements_full.json payload and "
                 "requirement ledger to PostgreSQL",
                 step="persist_requirements_postgres",
                 document_version_id=artifact.document_version_id,
-                artifact_path=str(artifact_path),
+                artifact_path=str(full_artifact_path),
                 fact_count=len(artifact.facts),
                 requirement_count=len(artifact.requirements),
                 store_responsibility="requirement_artifact_and_ledger_only",
             )
-        postgres.persist_artifact(artifact, str(artifact_path), state["run_id"])
+        postgres.persist_artifact(artifact, str(full_artifact_path), state["run_id"])
         result_payload: IngestionState = {
             "run_id": state["run_id"],
             "checksum": checksum,
@@ -342,6 +354,7 @@ def _run_pipeline(
             "document_version_id": manifest.document_version_id,
             "manifest_path": str(manifest_path),
             "artifact_path": str(artifact_path),
+            "full_artifact_path": str(full_artifact_path),
             "chunk_ids": [chunk.chunk_id for chunk in manifest.chunks],
             "fact_ids": [fact.fact_id for fact in artifact.facts],
             "requirement_ids": [req.requirement_id for req in artifact.requirements],
@@ -418,6 +431,7 @@ def run_ingestion(
         checksum=final_state["checksum"],
         manifest_path=Path(final_state["manifest_path"]),
         artifact_path=Path(final_state["artifact_path"]),
+        full_artifact_path=Path(final_state["full_artifact_path"]),
         chunk_ids=final_state["chunk_ids"],
         fact_ids=final_state["fact_ids"],
         requirement_ids=final_state["requirement_ids"],

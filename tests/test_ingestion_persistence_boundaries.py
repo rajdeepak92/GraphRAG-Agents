@@ -112,7 +112,9 @@ class IngestionPersistenceBoundaryTests(unittest.TestCase):
         self.assertLess(events.index("chroma.index_chunks"), events.index("requirements.discover"))
         self.assertIs(postgres.persisted_artifact, artifact)
         self.assertEqual(postgres.persisted_run_id, "RUN-1")
-        self.assertTrue(str(postgres.persisted_artifact_path).endswith("requirements.json"))
+        self.assertTrue(str(postgres.persisted_artifact_path).endswith("requirements_full.json"))
+        self.assertTrue(str(result["artifact_path"]).endswith("requirements.json"))
+        self.assertTrue(str(result["full_artifact_path"]).endswith("requirements_full.json"))
         self.assertEqual(result["requirement_ids"], ["REQ-1"])
 
 

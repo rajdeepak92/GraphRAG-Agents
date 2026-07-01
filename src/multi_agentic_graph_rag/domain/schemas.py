@@ -254,6 +254,26 @@ class RequirementArtifact(StrictModel):
     delta_events: list[RequirementDeltaEvent] = Field(default_factory=list)
 
 
+class CompactRequirementOccurrence(StrictModel):
+    chunk_id: str
+    fact_id: str
+    requirement_text: str
+    requirement_type: str
+    priority: Literal["High", "Medium", "Low"]
+    status: Literal["Active", "Superseded"]
+    doc_version: str
+
+
+class CompactRequirementArtifact(StrictModel):
+    artifact_schema_version: Literal["3.0-compact"] = "3.0-compact"
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    requirements: dict[str, list[CompactRequirementOccurrence]]
+
+
 class IngestionResult(StrictModel):
     run_id: str
     status: str
@@ -264,6 +284,7 @@ class IngestionResult(StrictModel):
     checksum: str
     manifest_path: Path
     artifact_path: Path
+    full_artifact_path: Path | None = None
     chunk_ids: list[str]
     fact_ids: list[str]
     requirement_ids: list[str]

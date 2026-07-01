@@ -48,9 +48,9 @@ Generated requirement artifacts and logs are written under:
 generated/<PROJECT>/req/<RUN_ID>/
 ```
 
-That directory is local-only and gitignored. It contains `requirements.json`,
-`run.log`, `run.jsonl`, `chunk_manifest.json`, and any saved
-`llm_response_*.txt` files.
+That directory is local-only and gitignored. It contains compact
+`requirements.json`, full audit `requirements_full.json`, `run.log`,
+`run.jsonl`, `chunk_manifest.json`, and any saved `llm_response_*.txt` files.
 
 When requirement discovery parsing or source-trace validation fails, the full
 raw model response is saved beside the run artifacts. Set
@@ -66,8 +66,9 @@ For a real ingest run, all three services must be configured and reachable:
   relationships only.
 - ChromaDB for chunk text embeddings and chunk/document metadata used in
   semantic vector search only.
-- PostgreSQL for the generated `requirements.json` payload, requirement ledger
-  tables, and fallback retrieval of generated requirement artifacts.
+- PostgreSQL for the full generated `requirements_full.json` payload,
+  requirement ledger tables, and fallback retrieval of generated requirement
+  artifacts.
 
 Use a libpq/psycopg-style PostgreSQL URL, for example:
 
@@ -119,7 +120,7 @@ Remove-Item -Recurse -Force runtime\databases\chroma -ErrorAction SilentlyContin
 
 ```powershell
 uv run python -m multi_agentic_graph_rag run status <RUN-ID>
-uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements.json
+uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements_full.json
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.log -Tail 200
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.jsonl -Tail 200
 ```

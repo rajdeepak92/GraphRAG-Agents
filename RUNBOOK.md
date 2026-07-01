@@ -72,8 +72,9 @@ Storage responsibilities:
 - Neo4j is the document/chunk graph knowledge base for multi-hop reasoning.
 - ChromaDB stores chunk embeddings, chunk text, and chunk/document metadata for
   semantic search.
-- PostgreSQL stores generated `requirements.json` payloads, the requirement
-  ledger tables, and fallback copies of generated requirement artifacts.
+- PostgreSQL stores full generated `requirements_full.json` payloads, the
+  requirement ledger tables, and fallback copies of generated requirement
+  artifacts.
 
 ## 6. Cleanup Local Databases
 
@@ -133,8 +134,9 @@ Generated output is local-only under:
 generated/<PROJECT>/req/<RUN_ID>/
 ```
 
-That folder contains `requirements.json`, `run.log`, `run.jsonl`,
-`chunk_manifest.json`, and any saved `llm_response_*.txt` files.
+That folder contains compact `requirements.json`, full audit
+`requirements_full.json`, `run.log`, `run.jsonl`, `chunk_manifest.json`, and
+any saved `llm_response_*.txt` files.
 
 ## 8. Observability
 
@@ -142,7 +144,7 @@ Inspect the latest run:
 
 ```powershell
 uv run python -m multi_agentic_graph_rag run status <RUN-ID>
-uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements.json
+uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements_full.json
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.log -Tail 200
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.jsonl -Tail 200
 ```

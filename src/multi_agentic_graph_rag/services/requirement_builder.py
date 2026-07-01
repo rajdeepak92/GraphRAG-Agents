@@ -17,6 +17,8 @@ from multi_agentic_graph_rag.domain.identifiers import (
 )
 from multi_agentic_graph_rag.domain.schemas import (
     CanonicalFact,
+    CompactRequirementArtifact,
+    CompactRequirementOccurrence,
     RequirementArtifact,
     RequirementDeltaEvent,
     RequirementDiscoveryOutput,
@@ -35,6 +37,8 @@ _NUMBER = re.compile(r"\b\d+(?:\.\d+)?\b")
 _NON_KEY_CHARS = re.compile(r"[^a-z0-9{}]+")
 _DOWNSTREAM_ARTIFACT_TYPES = ["user_story", "scenario", "test_case"]
 _DeltaEventType = Literal["new", "duplicate", "changed", "superseded"]
+_CompactPriority = Literal["High", "Medium", "Low"]
+_CompactStatus = Literal["Active", "Superseded"]
 
 
 @dataclass
@@ -182,6 +186,52 @@ def build_requirement_artifact(
             requirement_count=len(artifact.requirements),
         )
     return artifact
+
+
+def build_compact_requirement_artifact(
+    artifact: RequirementArtifact,
+) -> CompactRequirementArtifact:
+    superseded_revision_ids = {
+        event.revision_id
+        for event in artifact.delta_events
+        if event.event_type == "superseded" and event.revision_id
+    }
+    requirements: dict[str, list[CompactRequirementOccurrence]] = {}
+    for requirement in artifact.requirements:
+        status: _CompactStatus = (
+            "Superseded" if requirement.revision_id in superseded_revision_ids else "Active"
+        )
+        requirements[requirement.requirement_id] = [
+            CompactRequirementOccurrence(
+                chunk_id=requirement.source_trace.chunk_id,
+                fact_id=fact_id,
+                requirement_text=requirement.statement,
+                requirement_type=requirement.requirement_type,
+                priority=_compact_priority(requirement.priority),
+                status=status,
+                doc_version=artifact.version,
+            )
+            for fact_id in requirement.fact_ids
+        ]
+    return CompactRequirementArtifact(
+        project=artifact.project,
+        document_id=artifact.document_id,
+        document_version_id=artifact.document_version_id,
+        doc_version=artifact.version,
+        generated_at=artifact.generated_at,
+        requirements=requirements,
+    )
+
+
+def _compact_priority(priority: str) -> _CompactPriority:
+    normalized = priority.strip().lower()
+    if normalized == "high":
+        return "High"
+    if normalized == "medium":
+        return "Medium"
+    if normalized == "low":
+        return "Low"
+    raise ValueError(f"Unsupported compact requirement priority: {priority!r}")
 
 
 def normalize_fact_text(text: str) -> str:
