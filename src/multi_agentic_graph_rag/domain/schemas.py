@@ -123,40 +123,67 @@ class LLMFactCandidate(StrictModel):
 class LLMDiscoveredRequirement(StrictModel):
     req_id: str
     req_text: str
-    requirement_type: str = "functional"
-    priority: str = "medium"
+    requirement_type: str = "Functional Requirement"
+    priority: str = "Medium"
     requirement_key: str | None = None
 
-    @field_validator("req_id", "req_text", "requirement_type", "priority")
+    @field_validator("priority", mode="before")
     @classmethod
-    def non_empty_text(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-    @field_validator("req_text")
-    @classmethod
-    def meaningful_requirement_text(cls, value: str) -> str:
-        if _SOURCE_REQUIREMENT_ID_RE.search(value):
-            raise ValueError(
-                "req_text must be a meaningful requirement sentence, not a source identifier"
-            )
-        if _PLACEHOLDER_REQUIREMENT_TEXT_RE.fullmatch(value):
-            raise ValueError(
-                "req_text must be a meaningful requirement sentence, not a label or placeholder"
-            )
-        if len(value.split()) < 4:
-            raise ValueError("req_text must be a complete requirement sentence")
-        return value
-
-    @field_validator("requirement_key")
-    @classmethod
-    def normalize_requirement_key(cls, value: str | None) -> str | None:
+    def normalize_priority(cls, value: object) -> str:
         if value is None:
-            return None
-        value = value.strip()
-        return value or None
+            return "Medium"
+
+        text = str(value).strip()
+        if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
+            return "Medium"
+
+        normalized = text.lower()
+        if normalized in {"high", "critical", "mandatory", "must", "required"}:
+            return "High"
+        if normalized in {"medium", "med", "normal", "default"}:
+            return "Medium"
+        if normalized in {"low", "optional", "future", "nice-to-have", "nice to have"}:
+            return "Low"
+
+        return "Medium"
+
+    @field_validator("requirement_type", mode="before")
+    @classmethod
+    def normalize_requirement_type(cls, value: object) -> str:
+        if value is None:
+            return "Functional Requirement"
+
+        text = str(value).strip()
+        if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
+            return "Functional Requirement"
+
+        normalized = text.lower()
+        if normalized in {"functional", "fr", "functional requirement"}:
+            return "Functional Requirement"
+        if normalized in {"business", "br", "business requirement"}:
+            return "Business Requirement"
+        if normalized in {"acceptance", "ac", "acceptance criteria", "acceptance criterion"}:
+            return "Acceptance Criteria"
+        if normalized in {"non-functional", "non functional", "nfr", "non-functional requirement"}:
+            return "Non-Functional Requirement"
+        if normalized in {"security", "security requirement"}:
+            return "Security Requirement"
+        if normalized in {"configuration", "configuration requirement"}:
+            return "Configuration Requirement"
+        if normalized in {"validation", "validation requirement"}:
+            return "Validation Requirement"
+        if normalized in {"alerting", "alerting requirement"}:
+            return "Alerting Requirement"
+        if normalized in {"health", "health requirement"}:
+            return "Health Requirement"
+        if normalized in {"data quality", "data quality requirement"}:
+            return "Data Quality Requirement"
+        if normalized in {"application", "application requirement"}:
+            return "Application Requirement"
+        if normalized in {"offline", "offline requirement"}:
+            return "Offline Requirement"
+
+        return text
 
 
 class LLMDiscoveredFact(StrictModel):
