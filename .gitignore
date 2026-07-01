@@ -74,3 +74,5 @@ runtime/logs/*
 
 # Generic logs
 *.log
+
+CLAUDE.md
