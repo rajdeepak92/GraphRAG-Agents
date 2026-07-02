@@ -76,7 +76,7 @@ runtime/logs/*
 *.log
 
 # Local analysis docs
-flow.md
+# flow.md
 CLAUDE.md
 
 # Local test workspace
