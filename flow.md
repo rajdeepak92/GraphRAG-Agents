@@ -22,7 +22,7 @@ Interpretation:
 1. **CLI entry**: multi_agentic_graph_rag.__main__ imports cli.app, so `python -m multi_agentic_graph_rag` and the package console entry reach Typer.
 2. **Command session**: Every command opens a RunSession, creates run directories, binds a RunLogger, and writes JSONL plus text logs.
 3. **Configuration**: load_config merges config.json, .env, OS environment, and CLI/provider overrides into AppSettings.
-4. **Store checks**: Postgres, Neo4j, and Chroma are checked before real ingestion or user-story generation proceeds.
+4. **Store checks**: Postgres, Neo4j, and Chroma are checked before real ingestion, user-story generation, or test-scenario generation proceeds.
 5. **Model factory**: create_reasoning_model, create_embedding_model, and create_reranker_model select Azure OpenAI or Hugging Face adapters and fail early if required extras or credentials are absent.
 6. **Document read**: Ingestion reads source bytes, hashes them, and parses text, Markdown, DOCX, or PDF into ParsedBlock records.
 7. **Chunking**: chunk_blocks combines parsed blocks, delegates splitting to RecursiveCharacterTextSplitter, and emits DocumentChunk records with source spans.
@@ -39,13 +39,17 @@ Interpretation:
 18. **User-story generation**: UserStoryGenerationAgent prompts per requirement, validates meaningfulness, retries once, and returns strict UserStoryGenerationOutput.
 19. **User-story artifact**: build_user_story_artifact assigns permanent user story IDs, renumbers AC/BR/TS records, and writes coverage by requirement.
 20. **Coverage projection**: Neo4jStore.project_user_story_coverage adds UserStory and Requirement coverage relationships back to the graph.
-21. **Run result**: Both major workflows record completed or failed ingestion_run payloads and return typed result models.
+21. **Test-scenario input**: generate-test-scenarios loads user_stories.json locally or the user-story artifact from PostgreSQL by document_version_id.
+22. **Test-scenario generation**: TestScenarioGenerationAgent prompts per user story, validates meaningfulness, retries once, and returns strict TestScenarioGenerationOutput.
+23. **Test-scenario artifact**: build_test_scenario_artifact assigns permanent SC-* IDs and writes coverage by story and requirement.
+24. **Test-scenario projection**: Neo4jStore.project_test_scenario_coverage creates TestScenario claim-nodes, links them to UserStory and Requirement nodes, and attaches evidence chunks.
+25. **Run result**: Major workflows record completed or failed ingestion_run payloads and return typed result models.
 
 ## Storage Boundaries
 
-- Neo4j is the graph knowledge base for Project, Document, DocumentVersion, Chunk, and user-story coverage relationships.
+- Neo4j is the graph knowledge base for Project, Document, DocumentVersion, Chunk, user-story coverage relationships, and test-scenario validation relationships.
 - Chroma is the semantic vector index for chunk text retrieval scoped by document_version_id.
-- PostgreSQL stores generated requirement artifacts, requirement ledger rows, user-story artifacts, user-story rows, document-version manifests, and run records.
+- PostgreSQL stores generated requirement artifacts, requirement ledger rows, user-story artifacts, user-story rows, test-scenario artifacts, test-scenario rows, document-version manifests, and run records.
 - The compact `requirements.json` is for downstream agents; the full `requirements_full.json` remains the audit artifact and PostgreSQL payload.
 
 ## Ingestion Flow Deep Dive

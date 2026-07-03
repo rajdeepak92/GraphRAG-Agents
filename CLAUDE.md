@@ -4,11 +4,11 @@ End-to-end product-quality test-cycle platform for embedded/monitoring-protocol
 devices. Each major stage is a **standalone agent** consuming the previous
 stage's output schema plus the knowledge stores. Pipeline target:
 
-`BRD/SRS ingest → discover requirements → user stories → scenarios → test cases → execute → report`
+`BRD/SRS ingest → discover requirements → user stories → test scenarios → test cases → execute → report`
 
-**Implemented today:** ingestion → requirement discovery. Everything after
-requirement discovery (user stories, scenarios, test cases, execution, report,
-and the re-discover-with-feedback command) is **planned, not built**.
+**Implemented today:** ingestion → requirement discovery → user stories → test
+scenarios. Test cases, execution, report, and the re-discover-with-feedback
+command are **planned, not built**.
 
 ## Environment & Commands
 
@@ -16,16 +16,34 @@ and the re-discover-with-feedback command) is **planned, not built**.
 - Install: `uv sync --dev --extra local-llm` (HF) or add `--extra azure` (Azure OpenAI).
 - CLI (`typer`, name `marag`, entry `python -m multi_agentic_graph_rag`):
   `version`, `config-check`, `hf-check [--load-model]`, `doctor`, `db-check`,
-  `postgres-reset --yes`, `ingest`, `run status|resume <RUN-ID>`, `artifact verify <path>`.
+  `postgres-reset --yes`, `ingest`, `generate-user-stories`,
+  `generate-test-scenarios`, `run status|resume <RUN-ID>`,
+  `artifact verify <path>`.
 - Ingest: `... ingest --project P --document PATH --version V [--logical-name N] [--replace-version] [--reasoning-provider ...] [--embedding-provider ...] --json-output`
 - Checks before commit: `uv run ruff check .`; `uv run python -m unittest discover -s tests`; `uv run mypy src/multi_agentic_graph_rag` (mypy **strict**); `uv run python -m compileall -q src`.
 - See `README.md` / `RUNBOOK.md` for setup; `commands.md` for command reference.
 
 ## Storage Responsibilities (do not blur these)
 
-- **Neo4j** — graph knowledge base. **Today:** document/chunk graph only. Nodes: `Project`, `Document`, `DocumentVersion`, `Chunk`; rels: `OWNS_DOCUMENT`, `HAS_VERSION`, `HAS_CHUNK`. `Neo4jStore.project_artifact` is currently a no-op. **Planned (decided):** also project **validated generated traceability claim-nodes** (requirements, then user stories/scenarios) linked back to their evidence chunks — for graph-context retrieval during content-quality validation. Neo4j is **not** the primary generated-artifact store (that's psql). See "Design Decisions" below.
+- **Neo4j** — graph knowledge base. **Today:** document/chunk graph plus
+  validated user-story and test-scenario traceability claim-nodes linked back to
+  their evidence chunks. Nodes include `Project`, `Document`, `DocumentVersion`,
+  `Chunk`, `Requirement`, `UserStory`, and `TestScenario`; rels include
+  `OWNS_DOCUMENT`, `HAS_VERSION`, `HAS_CHUNK`, `COVERS_REQUIREMENT`,
+  `VALIDATES_STORY`, `HAS_USER_STORY`, `HAS_TEST_SCENARIO`, and
+  `EVIDENCED_BY_CHUNK`. `Neo4jStore.project_artifact` remains a no-op because
+  PostgreSQL is the generated-artifact ledger.
 - **ChromaDB** — chunk **embeddings + chunk text + chunk/doc metadata only**, for semantic search. Collection `marag_chunks`, persisted at `runtime/databases/chroma`.
-- **PostgreSQL** — all **generated AI content + ledger**: `requirements_full.json` payload, requirement ledger tables, and fallback retrieval when local JSON is absent. Managed tables in `db/postgres.py::_MANAGED_TABLES` (canonical_facts, fact_occurrences, requirements, requirement_revisions, requirement_evidence, requirement_fact_links, requirement_delta_events, requirement_artifacts, document_versions, ingestion_runs). Schema self-validates against `_EXPECTED_COLUMNS`; mismatch → `postgres-reset`.
+- **PostgreSQL** — all **generated AI content + ledger**:
+  `requirements_full.json` payload, requirement ledger tables, user-story
+  artifacts/rows, test-scenario artifacts/rows, and fallback retrieval when
+  local JSON is absent. Managed tables in `db/postgres.py::_MANAGED_TABLES`
+  include `test_scenarios`, `test_scenario_artifacts`, `user_stories`,
+  `user_story_artifacts`, `canonical_facts`, `fact_occurrences`,
+  `requirements`, `requirement_revisions`, `requirement_evidence`,
+  `requirement_fact_links`, `requirement_delta_events`,
+  `requirement_artifacts`, `document_versions`, and `ingestion_runs`. Schema
+  self-validates against `_EXPECTED_COLUMNS`; mismatch → `postgres-reset`.
 - Each store has a `local_json` fallback mode (`runtime/staging/*.jsonl`) for dry runs; real ingest requires `postgres`/`neo4j` modes (enforced in `_validate_required_ingest_stack`).
 
 ## Orchestration & Ingestion Pipeline
@@ -38,7 +56,10 @@ and the re-discover-with-feedback command) is **planned, not built**.
 
 - Ports: `llm_models/ports.py` — `ReasoningModel.generate_structured(prompt, schema)`, `EmbeddingModel.embed_documents`, `RerankerModel.rerank`. Built in `llm_models/factory.py`.
 - Providers: reasoning + embedding = `huggingface` **or** `azure_openai`; reranker = `huggingface` only. Defaults: Qwen2.5-Coder-7B-Instruct, BGE-M3, bge-reranker-base.
-- LLM calls happen at: **embeddings** (Chroma index) and **requirement discovery** (reasoning). Reranker is constructed/health-checked but **not yet wired into any retrieval path** (reserved for the future user-story/scenario retrieval stage).
+- LLM calls happen at: **embeddings** (Chroma index), **requirement discovery**
+  (reasoning), **user-story generation** (reasoning), and **test-scenario
+  generation** (reasoning). The reranker is wired into the shared hybrid
+  retrieval path used by user-story and test-scenario generation.
 - Config precedence: `config.json` → `.env` → defaults, loaded via `config/config_loader.py` into `config/settings.py::AppSettings` (`extra="forbid"`). Provider switches: `REASONING_MODEL_PROVIDER`, `EMBEDDING_MODEL_PROVIDER`, `RERANKER_MODEL_PROVIDER`.
 
 ## Requirement Discovery (reference agent to copy)
@@ -64,24 +85,32 @@ and the re-discover-with-feedback command) is **planned, not built**.
   - `CompactRequirementArtifact` (schema `3.0-compact`) → `requirements.json`: `requirements: {requirement_id: [CompactRequirementOccurrence{chunk_id, fact_id, requirement_text, requirement_type, priority(High/Medium/Low), status(Active/Superseded), doc_version}]}`. Scoped to **requirement-text retrieval/traceback**; the compact feed the **UserStory agent** reads.
   - **Planned `run.json`** — exact duplicate of the psql ledger rows (statuses/revisions/delta/evidence). Downstream reads `run.json` first, psql as trust anchor. Keep ledger status **out of** `requirements.json`.
 
-## Adding the Next Agent (user-story / scenario / testcase / …)
+## Adding the Next Agent (testcase / execution / report / ...)
 
 1. Define strict input/output Pydantic schemas in `domain/schemas.py` (e.g. `UserStory`, `UserStoryArtifact`). Input = the prior stage's artifact schema.
 2. Add deterministic IDs to `domain/identifiers.py`; add pg tables + `_EXPECTED_COLUMNS` entries if persisting.
 3. Implement the agent under `agents/`, provider-neutral via `llm_models` ports. Read input from local JSON first, fall back to psql query (performance-first local preference).
 4. Add a LangGraph workflow under `workflows/` (mirror `ingestion_graph.py`) and a CLI command in `cli.py` wrapped in `command_session`.
 5. Write outputs to `generated/<PROJECT>/<stage>/<RUN_ID>/` + persist to psql for traceability. Add tests under `tests/`.
-6. Retrieval for user-story/scenario stages: Chroma semantic search + Neo4j multi-hop over chunks + reranker fusion — the reranker port already exists and is unused, wire it here.
+6. Reuse `RetrievalService` for downstream context: Chroma semantic search +
+   Neo4j full-text + Neo4j multi-hop over chunks + reranker fusion.
 
 ## Design Decisions (resolved) & Open Items
 
 **Data-layer model (decided):**
 - Chunks = **immutable source truth**. Requirements = **validated generated claims**. User stories = **downstream generated claims**. Graph relationships connect claims back to source evidence.
-- **Neo4j is NOT only a source-document graph.** It should also hold **validated generated traceability nodes** (requirements, and later user stories/scenarios) linked back to their evidence chunks, so a stage can retrieve graph context for **content-quality validation**. Neo4j is **not** the primary generated-artifact store.
+- **Neo4j is NOT only a source-document graph.** It also holds **validated
+  generated traceability nodes** for user stories and test scenarios linked back
+  to their evidence chunks, so a stage can retrieve graph context for
+  **content-quality validation**. Neo4j is **not** the primary generated-artifact
+  store.
 - **PostgreSQL remains the generated-artifact ledger** (source of truth for content + status).
 - **"User stories validated by Neo4j"** means: at generation time, retrieve the relevant Neo4j context for content-quality validation — nothing more. **Coverage/dedup** ("is this requirement already covered by a previous run?") is answered from `requirements.json` / psql (**local `.json` first**, psql fallback), not Neo4j.
 
-> **OPEN ITEM for the UserStory agent:** the requirement/user-story projection into Neo4j (traceability claim-nodes → evidence chunks) is **not built yet** — `Neo4jStore.project_artifact` is still a no-op. Implement this projection before/with the UserStory agent so graph context retrieval works.
+> **OPEN ITEM:** test-case generation, execution, reporting, and
+> re-discover-with-feedback are still future stages. `Neo4jStore.project_artifact`
+> remains a no-op by design; downstream claim-node projections are handled by
+> their stage-specific methods.
 
 **Artifact split (decided):** keep `requirements.json` scoped to **requirement-text retrieval/traceback** only. Add a separate **`run.json`** that is an **exact duplicate of the psql ledger rows** (statuses, revisions, delta events, evidence). Reading order for downstream agents: **`run.json` first** (local, exact mirror), psql as the trust anchor / fallback. Do not overload `requirements.json` with ledger status.
 

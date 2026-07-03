@@ -18,6 +18,10 @@ from multi_agentic_graph_rag.llm_models.json_output import (
 
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_DEFAULT_SYSTEM_MESSAGE = (
+    "You are a requirement discovery engine. Return only valid JSON "
+    "for the requested chunk-local schema."
+)
 
 
 class AzureOpenAIReasoningModel:
@@ -42,6 +46,10 @@ class AzureOpenAIReasoningModel:
         self._last_prompt: str | None = None
         self._last_parse_attempt = 0
         self._response_context: dict[str, Any] = {}
+        self._system_message = _DEFAULT_SYSTEM_MESSAGE
+
+    def set_system_message(self, text: str) -> None:
+        self._system_message = text
 
     def set_response_context(
         self,
@@ -147,10 +155,7 @@ class AzureOpenAIReasoningModel:
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a requirement discovery engine. Return only valid JSON "
-                        "for the requested chunk-local schema."
-                    ),
+                    "content": self._system_message,
                 },
                 {"role": "user", "content": prompt},
             ],

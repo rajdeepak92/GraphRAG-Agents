@@ -12,6 +12,7 @@ from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementArtifact,
+    TestScenarioArtifact,
     UserStoryArtifact,
 )
 
@@ -192,6 +193,43 @@ class Neo4jStore:
                 evidence,
             )
 
+    def project_test_scenario_coverage(
+        self,
+        artifact: TestScenarioArtifact,
+        evidence_chunk_ids: Mapping[str, list[str]],
+    ) -> None:
+        """Project validated test-scenario claim-nodes back into the graph."""
+        evidence = {key: list(value) for key, value in evidence_chunk_ids.items()}
+        if self.settings.neo4j.mode == "local_json":
+            for scenario_id, record in artifact.scenarios.items():
+                self._upsert_local(
+                    "test_scenario_projection",
+                    scenario_id,
+                    {
+                        "kind": "test_scenario_projection",
+                        "scenario_id": scenario_id,
+                        "story_id": record.story_id,
+                        "requirement_id": record.requirement_id,
+                        "project": record.project,
+                        "document_version_id": record.document_version_id,
+                        "title": record.title,
+                        "scenario_type": record.scenario_type,
+                        "priority": record.priority,
+                        "confidence": record.confidence,
+                        "evidence_chunk_ids": evidence.get(record.requirement_id, []),
+                    },
+                )
+            return
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            session.execute_write(
+                _project_test_scenario_coverage_tx,
+                artifact.model_dump(mode="json"),
+                evidence,
+            )
+
     def _driver(self) -> Any:
         from neo4j import GraphDatabase
 
@@ -357,6 +395,60 @@ def _project_user_story_coverage_tx(
             MERGE (v)-[:HAS_USER_STORY]->(s)
             """,
             story_id=story_id,
+            document_version_id=record["document_version_id"],
+        )
+        for chunk_id in evidence_chunk_ids.get(requirement_id, []):
+            tx.run(
+                """
+                MATCH (r:Requirement {requirement_id: $requirement_id})
+                MATCH (c:Chunk {chunk_id: $chunk_id})
+                MERGE (r)-[:EVIDENCED_BY_CHUNK]->(c)
+                """,
+                requirement_id=requirement_id,
+                chunk_id=chunk_id,
+            )
+
+
+def _project_test_scenario_coverage_tx(
+    tx: Any,
+    artifact: dict[str, Any],
+    evidence_chunk_ids: Mapping[str, list[str]],
+) -> None:
+    for scenario_id, record in artifact["scenarios"].items():
+        requirement_id = record["requirement_id"]
+        tx.run(
+            """
+            MERGE (t:TestScenario {scenario_id: $scenario_id})
+            SET t.title = $title,
+                t.scenario_type = $scenario_type,
+                t.priority = $priority,
+                t.confidence = $confidence,
+                t.story_id = $story_id,
+                t.requirement_id = $requirement_id,
+                t.project = $project,
+                t.document_version_id = $document_version_id
+            MERGE (s:UserStory {story_id: $story_id})
+            MERGE (t)-[:VALIDATES_STORY]->(s)
+            MERGE (r:Requirement {requirement_id: $requirement_id})
+            MERGE (t)-[:COVERS_REQUIREMENT]->(r)
+            """,
+            scenario_id=scenario_id,
+            story_id=record["story_id"],
+            requirement_id=requirement_id,
+            project=record["project"],
+            document_version_id=record["document_version_id"],
+            title=record["title"],
+            scenario_type=record["scenario_type"],
+            priority=record["priority"],
+            confidence=record["confidence"],
+        )
+        tx.run(
+            """
+            MATCH (t:TestScenario {scenario_id: $scenario_id})
+            MATCH (v:DocumentVersion {document_version_id: $document_version_id})
+            MERGE (v)-[:HAS_TEST_SCENARIO]->(t)
+            """,
+            scenario_id=scenario_id,
             document_version_id=record["document_version_id"],
         )
         for chunk_id in evidence_chunk_ids.get(requirement_id, []):

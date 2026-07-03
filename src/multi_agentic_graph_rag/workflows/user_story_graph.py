@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -17,13 +16,10 @@ from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import ConfigurationError
 from multi_agentic_graph_rag.domain.schemas import (
-    CompactRequirementArtifact,
-    RequirementArtifact,
     RequirementInput,
     UserStoryModel,
     UserStoryRequest,
     UserStoryResult,
-    normalize_priority_label,
 )
 from multi_agentic_graph_rag.llm_models.factory import (
     create_embedding_model,
@@ -36,6 +32,11 @@ from multi_agentic_graph_rag.observability.session import (
     command_session,
 )
 from multi_agentic_graph_rag.services.artifacts import write_user_story_artifact
+from multi_agentic_graph_rag.services.requirement_source import (
+    RequirementSource,
+    load_requirement_source_from_full_payload,
+    load_requirement_source_local,
+)
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
 from multi_agentic_graph_rag.services.user_story_builder import build_user_story_artifact
 
@@ -53,15 +54,6 @@ class UserStoryState(TypedDict, total=False):
     coverage: dict[str, list[str]]
     warnings: list[str]
     errors: list[str]
-
-
-@dataclass(frozen=True)
-class _RequirementSource:
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    requirements: list[RequirementInput]
 
 
 def build_user_story_graph(session: RunSession | None = None) -> Any:
@@ -324,7 +316,7 @@ def _load_requirement_source(
     request: UserStoryRequest,
     postgres: PostgresStore,
     logger: Any | None,
-) -> _RequirementSource:
+) -> RequirementSource:
     if request.requirements_path is not None:
         if logger is not None:
             logger.info(
@@ -333,7 +325,7 @@ def _load_requirement_source(
                 path=str(request.requirements_path),
                 source="local_json",
             )
-        return _load_requirement_source_local(request.requirements_path)
+        return load_requirement_source_local(request.requirements_path)
 
     if not request.document_version_id:
         raise ConfigurationError("provide --requirements or --document-version-id")
@@ -352,63 +344,13 @@ def _load_requirement_source(
             document_version_id=request.document_version_id,
             source="postgres",
         )
-    return _load_requirement_source_from_full_payload(payload)
-
-
-def _load_requirement_source_local(path: Path) -> _RequirementSource:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    compact = CompactRequirementArtifact.model_validate(data)
-    requirements: list[RequirementInput] = []
-    for requirement_id, occurrences in compact.requirements.items():
-        if not occurrences:
-            continue
-        head = occurrences[0]
-        requirements.append(
-            RequirementInput(
-                requirement_id=requirement_id,
-                requirement_text=head.requirement_text,
-                requirement_type=head.requirement_type,
-                priority=head.priority,
-                evidence_chunk_ids=_unique(occurrence.chunk_id for occurrence in occurrences),
-            )
-        )
-    return _RequirementSource(
-        project=compact.project,
-        document_id=compact.document_id,
-        document_version_id=compact.document_version_id,
-        doc_version=compact.doc_version,
-        requirements=requirements,
-    )
-
-
-def _load_requirement_source_from_full_payload(payload: dict[str, Any]) -> _RequirementSource:
-    artifact = RequirementArtifact.model_validate(payload)
-    requirements: list[RequirementInput] = []
-    for requirement in artifact.requirements:
-        chunk_ids = [requirement.source_trace.chunk_id]
-        chunk_ids.extend(evidence.source_trace.chunk_id for evidence in requirement.evidence)
-        requirements.append(
-            RequirementInput(
-                requirement_id=requirement.requirement_id,
-                requirement_text=requirement.statement,
-                requirement_type=requirement.requirement_type,
-                priority=normalize_priority_label(requirement.priority),
-                evidence_chunk_ids=_unique(chunk_ids),
-            )
-        )
-    return _RequirementSource(
-        project=artifact.project,
-        document_id=artifact.document_id,
-        document_version_id=artifact.document_version_id,
-        doc_version=artifact.version,
-        requirements=requirements,
-    )
+    return load_requirement_source_from_full_payload(payload)
 
 
 def _output_dir(
     request: UserStoryRequest,
     settings: AppSettings,
-    source: _RequirementSource,
+    source: RequirementSource,
     run_identifier: str,
 ) -> Path:
     if request.requirements_path is not None:
@@ -471,14 +413,3 @@ def _record_failed_run_safely(
                 error=str(record_error),
                 status="warning",
             )
-
-
-def _unique(values: Any) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for value in values:
-        text = str(value)
-        if text and text not in seen:
-            seen.add(text)
-            ordered.append(text)
-    return ordered

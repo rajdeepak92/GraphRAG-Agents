@@ -56,6 +56,25 @@ class HuggingFaceConfigTests(unittest.TestCase):
         self.assertTrue(settings.discovery.log_llm_responses)
         self.assertTrue(settings.huggingface.log_llm_responses)
 
+    def test_test_scenario_settings_are_loaded_from_env(self) -> None:
+        settings, _ = self._load(
+            "\n".join(
+                [
+                    "TEST_SCENARIO_TOP_K=5",
+                    "TEST_SCENARIO_DENSE_K=9",
+                    "TEST_SCENARIO_SPARSE_K=7",
+                    "TEST_SCENARIO_NEIGHBOR_WINDOW=2",
+                    "TEST_SCENARIO_MAX_NEW_TOKENS=1024",
+                ]
+            )
+        )
+
+        self.assertEqual(settings.test_scenario.top_k, 5)
+        self.assertEqual(settings.test_scenario.dense_k, 9)
+        self.assertEqual(settings.test_scenario.sparse_k, 7)
+        self.assertEqual(settings.test_scenario.neighbor_window, 2)
+        self.assertEqual(settings.test_scenario.max_new_tokens, 1024)
+
     def test_legacy_huggingface_token_alias_is_recognized(self) -> None:
         settings, env = self._load("HUGGINGFACE_TOKEN=legacy-token")
 

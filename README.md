@@ -61,14 +61,13 @@ debugging.
 
 For a real ingest run, all three services must be configured and reachable:
 
-- Neo4j for the document/chunk graph knowledge base used in multi-hop reasoning.
-  It stores Project, Document, DocumentVersion, Chunk, and their document/chunk
-  relationships only.
+- Neo4j for the document/chunk graph knowledge base used in multi-hop reasoning
+  and validated downstream claim-node projections for user stories and test
+  scenarios.
 - ChromaDB for chunk text embeddings and chunk/document metadata used in
   semantic vector search only.
-- PostgreSQL for the full generated `requirements_full.json` payload,
-  requirement ledger tables, and fallback retrieval of generated requirement
-  artifacts.
+- PostgreSQL for generated artifacts and ledger rows: requirements, user
+  stories, test scenarios, document-version manifests, and run records.
 
 Use a libpq/psycopg-style PostgreSQL URL, for example:
 

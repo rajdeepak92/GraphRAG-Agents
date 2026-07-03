@@ -70,8 +70,8 @@ This checks PostgreSQL, Neo4j, and Chroma in that order.
 Storage responsibilities:
 
 - Neo4j is the document/chunk graph knowledge base for multi-hop reasoning, and
-  also holds validated user-story coverage claim-nodes (UserStory / Requirement)
-  linked back to their evidence chunks once `generate-user-stories` has run.
+  also holds validated user-story and test-scenario coverage claim-nodes linked
+  back to their evidence chunks once downstream stages have run.
 - ChromaDB stores chunk embeddings, chunk text, and chunk/document metadata for
   semantic search.
 - PostgreSQL stores full generated `requirements_full.json` payloads, the
@@ -215,7 +215,70 @@ psql "postgresql://marag:<password>@127.0.0.1:5432/marag" -c "select count(*) fr
 cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <password> "MATCH (s:UserStory)-[:COVERS_REQUIREMENT]->(r:Requirement) RETURN count(s), count(r);"
 ```
 
-## 9. Observability
+## 9. Generate Test Scenarios
+
+Test-scenario generation is a standalone stage (`generate-test-scenarios`) that
+consumes `user_stories.json` and produces `test_scenarios.json`. For each user
+story it retrieves hybrid context with Chroma dense search, Neo4j BM25
+full-text, Neo4j chunk neighbors, and the reranker, then makes one strict
+reasoning-LLM call with one fed-back retry on validation failure.
+
+Required stack (enforced): real reasoning + embedding + reranker providers,
+`POSTGRES_MODE=postgres`, and `NEO4J_MODE=neo4j`.
+
+Optional tuning:
+
+```powershell
+TEST_SCENARIO_TOP_K=4
+TEST_SCENARIO_DENSE_K=8
+TEST_SCENARIO_SPARSE_K=8
+TEST_SCENARIO_NEIGHBOR_WINDOW=1
+TEST_SCENARIO_MAX_NEW_TOKENS=
+```
+
+From a local user-story artifact:
+
+```powershell
+uv run marag generate-test-scenarios `
+  --user-stories generated\<PROJECT>\req\<RUN_ID>\user_stories.json `
+  --project <PROJECT> `
+  --json-output
+```
+
+From PostgreSQL when the local artifact is absent:
+
+```powershell
+uv run marag generate-test-scenarios `
+  --document-version-id <DV-ID> `
+  --project <PROJECT> `
+  --json-output
+```
+
+Requirement evidence loading is lenient unless `--requirements` is supplied.
+The stage tries sibling `requirements.json`, sibling `requirements_full.json`,
+then PostgreSQL by document version. If none are usable, it warns and continues
+with dense+sparse retrieval only. Do not run `postgres-reset` between
+user-story generation and test-scenario generation when that fallback is needed.
+
+Persistence:
+
+- PostgreSQL: the full artifact in `test_scenario_artifacts`, plus one index
+  row per scenario in `test_scenarios`.
+- Neo4j: validated coverage claim-nodes —
+  `(:TestScenario)-[:VALIDATES_STORY]->(:UserStory)`,
+  `(:TestScenario)-[:COVERS_REQUIREMENT]->(:Requirement)`,
+  `(:Requirement)-[:EVIDENCED_BY_CHUNK]->(:Chunk)`, and
+  `(:DocumentVersion)-[:HAS_TEST_SCENARIO]->(:TestScenario)`.
+
+Verify and inspect:
+
+```powershell
+uv run marag artifact verify-test-scenarios generated\<PROJECT>\req\<RUN_ID>\test_scenarios.json
+psql "postgresql://marag:<password>@127.0.0.1:5432/marag" -c "select count(*) from test_scenarios;"
+cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <password> "MATCH (t:TestScenario)-[:VALIDATES_STORY]->(:UserStory) RETURN count(t);"
+```
+
+## 10. Observability
 
 Inspect the latest run:
 
@@ -235,10 +298,13 @@ What to expect:
   when parsing fails, and successful responses are also captured when
   `LOG_LLM_RESPONSES=true`.
 
-## 10. Notes
+## 11. Notes
 
 - `run status` still supports the legacy `.generated/<PROJECT>/run/` path.
 - The repo keeps generated outputs and runtime data out of version control.
 - `generate-user-stories` writes its session log under
   `.generated/<PROJECT>/run/`; the `user_stories.json` artifact lands beside the
   input requirements file.
+- `generate-test-scenarios` writes its session log under
+  `.generated/<PROJECT>/run/`; the `test_scenarios.json` artifact lands beside
+  the input user-story file.

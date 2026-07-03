@@ -130,7 +130,7 @@ Run this against the app database:
 
 ```powershell
 psql "postgresql://marag:<password>@127.0.0.1:5432/marag" `
-  -c "TRUNCATE TABLE user_stories, user_story_artifacts, requirement_fact_links, requirement_evidence, requirement_delta_events, requirement_revisions, requirements, fact_occurrences, canonical_facts, requirement_artifacts, document_versions, ingestion_runs RESTART IDENTITY CASCADE;"
+  -c "TRUNCATE TABLE test_scenarios, test_scenario_artifacts, user_stories, user_story_artifacts, requirement_fact_links, requirement_evidence, requirement_delta_events, requirement_revisions, requirements, fact_occurrences, canonical_facts, requirement_artifacts, document_versions, ingestion_runs RESTART IDENTITY CASCADE;"
 ```
 
 ### Real Neo4j cleanup
@@ -285,7 +285,55 @@ uv run marag artifact verify-user-stories generated\PROJECT_1\req\<RUN_ID>\user_
 `user_stories.json` is written beside the input requirements file (or under
 `generated/<PROJECT>/user_stories/<RUN_ID>/` when loaded from PostgreSQL).
 
-## 9. Observability
+## 9. Generate Test Scenarios
+
+Stage 4 consumes `user_stories.json` and generates implementation-ready test
+scenarios per user story. It uses the same hybrid retrieval stack as stage 3:
+Chroma dense search, Neo4j full-text search, Neo4j neighbor expansion, and the
+reranker. It writes `test_scenarios.json`, persists rows to PostgreSQL, and
+projects `TestScenario` claim-nodes into Neo4j.
+
+The stage can load requirement evidence from an explicit `--requirements` file,
+from sibling `requirements.json` / `requirements_full.json`, or from PostgreSQL
+by document version. If the sibling requirement files are stale or unusable, the
+run warns and continues with the next source. Do not run `postgres-reset`
+between user-story generation and test-scenario generation when relying on the
+PostgreSQL fallback.
+
+```powershell
+uv run marag generate-test-scenarios `
+  --user-stories generated\SIIMCS\req\<RUN_ID>\user_stories.json `
+  --project SIIMCS `
+  --json-output
+
+uv run marag generate-test-scenarios `
+  --document-version-id <DV-ID> `
+  --project SIIMCS `
+  --json-output
+```
+
+Useful variations:
+
+```powershell
+uv run marag generate-test-scenarios --user-stories .\path\to\user_stories.json --requirements .\path\to\requirements.json --project PROJECT_1 --top-k 4
+uv run marag generate-test-scenarios --user-stories .\path\to\user_stories.json --project PROJECT_1 --reasoning-provider azure_openai --embedding-provider azure_openai --reranker-provider huggingface
+uv run marag artifact verify-test-scenarios generated\SIIMCS\req\<RUN_ID>\test_scenarios.json
+```
+
+Optional `.env` tuning:
+
+```powershell
+TEST_SCENARIO_TOP_K=4
+TEST_SCENARIO_DENSE_K=8
+TEST_SCENARIO_SPARSE_K=8
+TEST_SCENARIO_NEIGHBOR_WINDOW=1
+TEST_SCENARIO_MAX_NEW_TOKENS=
+```
+
+`test_scenarios.json` is written beside the input user-story file (or under
+`generated/<PROJECT>/test_scenarios/<RUN_ID>/` when loaded from PostgreSQL).
+
+## 10. Observability
 
 ### Run files
 
@@ -366,4 +414,5 @@ cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <password> "MATCH (n) RETURN c
 7. `uv run marag db-check`
 8. Run `uv run marag ingest ...`
 9. Run `uv run marag generate-user-stories --requirements ... --project ...`
-10. Inspect `.generated/<PROJECT>/run/` and `runtime/staging/`
+10. Run `uv run marag generate-test-scenarios --user-stories ... --project ...`
+11. Inspect `.generated/<PROJECT>/run/` and `runtime/staging/`

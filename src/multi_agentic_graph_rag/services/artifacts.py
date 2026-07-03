@@ -9,6 +9,7 @@ from pathlib import Path
 from multi_agentic_graph_rag.domain.schemas import (
     CompactRequirementArtifact,
     RequirementArtifact,
+    TestScenarioArtifact,
     UserStoryArtifact,
 )
 from multi_agentic_graph_rag.observability.logging import RunLogger
@@ -74,6 +75,26 @@ def write_user_story_artifact(
     return path
 
 
+def write_test_scenario_artifact(
+    artifact: TestScenarioArtifact,
+    out_dir: Path,
+    logger: RunLogger | None = None,
+) -> Path:
+    path = out_dir / "test_scenarios.json"
+    if logger is not None:
+        logger.debug(
+            "Writing test-scenario artifact for {document_version_id} to {path}",
+            step="write_test_scenario_artifact",
+            document_version_id=artifact.document_version_id,
+            path=str(path),
+            scenario_count=len(artifact.scenarios),
+            story_count=len(artifact.coverage),
+            requirement_count=len(artifact.requirement_coverage),
+        )
+    _atomic_write_json(path, artifact.model_dump(mode="json"))
+    return path
+
+
 def verify_requirement_artifact(path: Path) -> RequirementArtifact:
     data = json.loads(path.read_text(encoding="utf-8"))
     return RequirementArtifact.model_validate(data)
@@ -82,6 +103,11 @@ def verify_requirement_artifact(path: Path) -> RequirementArtifact:
 def verify_user_story_artifact(path: Path) -> UserStoryArtifact:
     data = json.loads(path.read_text(encoding="utf-8"))
     return UserStoryArtifact.model_validate(data)
+
+
+def verify_test_scenario_artifact(path: Path) -> TestScenarioArtifact:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return TestScenarioArtifact.model_validate(data)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:

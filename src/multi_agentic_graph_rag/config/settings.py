@@ -66,6 +66,10 @@ class UserStorySettings(BaseModel):
     max_new_tokens: int | None = None
 
 
+class TestScenarioSettings(UserStorySettings):
+    """Stage-4 retrieval/generation settings, type-compatible with RetrievalService."""
+
+
 class AzureOpenAISettings(BaseModel):
     endpoint: str = ""
     api_key: str = ""
@@ -108,6 +112,7 @@ class AppSettings(BaseModel):
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
     user_story: UserStorySettings = Field(default_factory=UserStorySettings)
+    test_scenario: TestScenarioSettings = Field(default_factory=TestScenarioSettings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
     raw_config: dict[str, Any] = Field(default_factory=dict)

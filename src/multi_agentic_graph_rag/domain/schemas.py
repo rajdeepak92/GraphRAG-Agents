@@ -205,6 +205,18 @@ class LLMDiscoveredRequirement(StrictModel):
 
         return text
 
+    @field_validator("req_text")
+    @classmethod
+    def meaningful_requirement_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("req_text must not be empty")
+        if _PLACEHOLDER_REQUIREMENT_TEXT_RE.match(value):
+            raise ValueError(f"req_text must not be a placeholder: {value!r}")
+        if _SOURCE_REQUIREMENT_ID_RE.search(value):
+            raise ValueError(f"req_text must not contain source identifiers: {value!r}")
+        return value
+
 
 class LLMDiscoveredFact(StrictModel):
     fact_id: str
@@ -495,6 +507,151 @@ class UserStoryResult(StrictModel):
     requirement_count: int
     story_ids: list[str]
     coverage: dict[str, list[str]] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+ScenarioTypeLabel = Literal[
+    "Positive",
+    "Negative",
+    "Boundary",
+    "Alternative",
+    "Exception",
+    "Performance",
+    "Security",
+    "Usability",
+]
+
+_SCENARIO_TYPE_SYNONYMS: dict[str, ScenarioTypeLabel] = {
+    "positive": "Positive",
+    "happy path": "Positive",
+    "functional": "Positive",
+    "smoke": "Positive",
+    "negative": "Negative",
+    "error": "Negative",
+    "invalid": "Negative",
+    "boundary": "Boundary",
+    "edge": "Boundary",
+    "edge case": "Boundary",
+    "limit": "Boundary",
+    "alternative": "Alternative",
+    "alt": "Alternative",
+    "alt flow": "Alternative",
+    "exception": "Exception",
+    "recovery": "Exception",
+    "failover": "Exception",
+    "error handling": "Exception",
+    "performance": "Performance",
+    "load": "Performance",
+    "stress": "Performance",
+    "latency": "Performance",
+    "security": "Security",
+    "authn": "Security",
+    "authz": "Security",
+    "usability": "Usability",
+    "ux": "Usability",
+    "accessibility": "Usability",
+}
+
+
+def normalize_scenario_type_label(value: object) -> ScenarioTypeLabel:
+    """Normalize arbitrary scenario-type labels to the curated stage-4 vocabulary."""
+    if value is None:
+        return "Positive"
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
+        return "Positive"
+    normalized = " ".join(text.lower().replace("-", " ").replace("_", " ").split())
+    return _SCENARIO_TYPE_SYNONYMS.get(normalized, "Positive")
+
+
+class _TestScenarioContent(StrictModel):
+    title: str
+    description: str
+    scenario_type: ScenarioTypeLabel = "Positive"
+    preconditions: list[str] = Field(default_factory=list)
+    expected_result: str
+    priority: Literal["High", "Medium", "Low"] = "Medium"
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value: object) -> str:
+        return normalize_priority_label(value)
+
+    @field_validator("scenario_type", mode="before")
+    @classmethod
+    def normalize_scenario_type(cls, value: object) -> str:
+        return normalize_scenario_type_label(value)
+
+    @field_validator("title", "description", "expected_result")
+    @classmethod
+    def meaningful_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        if _PLACEHOLDER_USER_STORY_TEXT_RE.match(value):
+            raise ValueError(f"value must not be a placeholder: {value!r}")
+        return value
+
+
+class TestScenarioModel(_TestScenarioContent):
+    """A single test scenario exactly as returned by the reasoning model (temp ids)."""
+
+    scenario_id: str = ""
+
+
+class TestScenarioGenerationOutput(StrictModel):
+    test_scenarios: list[TestScenarioModel] = Field(min_length=1)
+
+
+class TestScenarioRecord(_TestScenarioContent):
+    """A persisted test scenario with permanent id and full backward provenance."""
+
+    scenario_id: str
+    story_id: str
+    requirement_id: str
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+
+
+class TestScenarioArtifact(StrictModel):
+    artifact_schema_version: Literal["1.0-test-scenarios"] = "1.0-test-scenarios"
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    scenarios: dict[str, TestScenarioRecord]
+    coverage: dict[str, list[str]] = Field(default_factory=dict)
+    requirement_coverage: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class TestScenarioRequest(StrictModel):
+    user_stories_path: Path | None = None
+    requirements_path: Path | None = None
+    project: str | None = None
+    document_version_id: str | None = None
+    reasoning_provider: str | None = None
+    embedding_provider: str | None = None
+    reranker_provider: str | None = None
+    top_k: int | None = None
+
+
+class TestScenarioResult(StrictModel):
+    run_id: str
+    status: str
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    artifact_path: Path
+    story_count: int
+    scenario_ids: list[str]
+    coverage: dict[str, list[str]] = Field(default_factory=dict)
+    requirement_coverage: dict[str, list[str]] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 

@@ -19,6 +19,8 @@ from multi_agentic_graph_rag.domain.schemas import (
     RequirementDeltaEvent,
     RequirementEvidence,
     SourceTrace,
+    TestScenarioArtifact,
+    TestScenarioRecord,
     UserStoryArtifact,
     UserStoryRecord,
     UserStoryStatement,
@@ -157,6 +159,39 @@ class PostgresArtifactTests(unittest.TestCase):
         self.assertIn("user_stories", _MANAGED_TABLES)
         self.assertIn("user_story_artifacts", _MANAGED_TABLES)
 
+    def test_test_scenario_artifact_round_trips_and_indexes_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact = _test_scenario_artifact()
+            artifact_path = str(root / "run" / "test_scenarios.json")
+
+            store = PostgresStore(_settings(root))
+            store.persist_test_scenario_artifact(artifact, artifact_path, "RUN-1")
+
+            by_path = store.load_test_scenario_artifact_payload(artifact_path=artifact_path)
+            by_version = store.load_test_scenario_artifact_payload(
+                document_version_id=artifact.document_version_id
+            )
+            rows = [
+                json.loads(line)
+                for line in (root / "runtime" / "postgres.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(by_path, artifact.model_dump(mode="json"))
+        self.assertEqual(by_version, artifact.model_dump(mode="json"))
+        scenario_rows = [row for row in rows if row.get("kind") == "test_scenario"]
+        self.assertEqual(len(scenario_rows), 1)
+        self.assertEqual(scenario_rows[0]["scenario_id"], "SC-SCENARIO-1")
+        self.assertEqual(scenario_rows[0]["story_id"], "US-STORY-1")
+        self.assertEqual(scenario_rows[0]["requirement_id"], "REQ-1")
+        self.assertEqual(scenario_rows[0]["status"], "active")
+
+    def test_test_scenario_tables_are_managed(self) -> None:
+        self.assertIn("test_scenarios", _MANAGED_TABLES)
+        self.assertIn("test_scenario_artifacts", _MANAGED_TABLES)
+
     def test_missing_artifact_payload_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = PostgresStore(_settings(Path(temp_dir)))
@@ -279,6 +314,34 @@ def _user_story_artifact() -> UserStoryArtifact:
         doc_version="1.0",
         stories={record.story_id: record},
         coverage={"REQ-1": [record.story_id]},
+    )
+
+
+def _test_scenario_artifact() -> TestScenarioArtifact:
+    record = TestScenarioRecord(
+        scenario_id="SC-SCENARIO-1",
+        story_id="US-STORY-1",
+        requirement_id="REQ-1",
+        project="PROJECT",
+        document_id="DOC",
+        document_version_id="DOC-v1",
+        doc_version="1.0",
+        title="Import valid file succeeds",
+        description="Verify a valid source file is imported into the system",
+        scenario_type="Positive",
+        preconditions=["a valid source file is available"],
+        expected_result="The file records are available for downstream reporting",
+        priority="Medium",
+        confidence=0.9,
+    )
+    return TestScenarioArtifact(
+        project="PROJECT",
+        document_id="DOC",
+        document_version_id="DOC-v1",
+        doc_version="1.0",
+        scenarios={record.scenario_id: record},
+        coverage={"US-STORY-1": [record.scenario_id]},
+        requirement_coverage={"REQ-1": [record.scenario_id]},
     )
 
 

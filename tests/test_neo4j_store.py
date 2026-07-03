@@ -20,6 +20,8 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentChunk,
     DocumentManifest,
     RequirementArtifact,
+    TestScenarioArtifact,
+    TestScenarioRecord,
     UserStoryArtifact,
     UserStoryRecord,
     UserStoryStatement,
@@ -82,6 +84,32 @@ class Neo4jStoreTests(unittest.TestCase):
         self.assertEqual(projection["story_id"], "US-STORY-1")
         self.assertEqual(projection["requirement_id"], "REQ-1")
         self.assertTrue(projection["covered"])
+        self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
+
+    def test_test_scenario_coverage_projection_local_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = Neo4jStore(_settings(root))
+            store.project_manifest(_manifest())
+            store.project_test_scenario_coverage(
+                _test_scenario_artifact(),
+                {"REQ-1": ["CHUNK-1"]},
+            )
+
+            rows = [
+                json.loads(line)
+                for line in (root / "runtime" / "neo4j.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        kinds = [row["kind"] for row in rows]
+        self.assertEqual(kinds, ["manifest_projection", "test_scenario_projection"])
+        projection = rows[1]
+        self.assertEqual(projection["scenario_id"], "SC-SCENARIO-1")
+        self.assertEqual(projection["story_id"], "US-STORY-1")
+        self.assertEqual(projection["requirement_id"], "REQ-1")
+        self.assertEqual(projection["scenario_type"], "Positive")
         self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
 
     def test_manifest_projection_keeps_document_chunk_metadata(self) -> None:
@@ -226,6 +254,34 @@ def _user_story_artifact() -> UserStoryArtifact:
         doc_version="1.0",
         stories={record.story_id: record},
         coverage={"REQ-1": [record.story_id]},
+    )
+
+
+def _test_scenario_artifact() -> TestScenarioArtifact:
+    record = TestScenarioRecord(
+        scenario_id="SC-SCENARIO-1",
+        story_id="US-STORY-1",
+        requirement_id="REQ-1",
+        project="PROJECT",
+        document_id="DOC",
+        document_version_id="DOC-v1",
+        doc_version="1.0",
+        title="Import valid file succeeds",
+        description="Verify a valid source file is imported into the system",
+        scenario_type="Positive",
+        preconditions=["a valid source file is available"],
+        expected_result="The file records are available for downstream reporting",
+        priority="Medium",
+        confidence=0.9,
+    )
+    return TestScenarioArtifact(
+        project="PROJECT",
+        document_id="DOC",
+        document_version_id="DOC-v1",
+        doc_version="1.0",
+        scenarios={record.scenario_id: record},
+        coverage={"US-STORY-1": [record.scenario_id]},
+        requirement_coverage={"REQ-1": [record.scenario_id]},
     )
 
 

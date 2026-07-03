@@ -18,6 +18,11 @@ from multi_agentic_graph_rag.llm_models.json_output import (
 
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_DEFAULT_SYSTEM_MESSAGE = (
+    "You are a requirement discovery engine. Output exactly one JSON object matching "
+    "RequirementDiscoveryChunkOutput and nothing else. Do not include markdown, code "
+    "fences, XML tags, chain-of-thought, or explanatory text."
+)
 
 
 class HuggingFaceReasoningModel:
@@ -39,11 +44,15 @@ class HuggingFaceReasoningModel:
         self._last_prompt: str | None = None
         self._last_parse_attempt = 0
         self._response_context: dict[str, Any] = {}
+        self._system_message = _DEFAULT_SYSTEM_MESSAGE
         self._tokenizer: Any | None = None
         self._model: Any | None = None
 
     def warmup(self) -> None:
         self._load_components()
+
+    def set_system_message(self, text: str) -> None:
+        self._system_message = text
 
     def set_response_context(
         self,
@@ -129,7 +138,7 @@ class HuggingFaceReasoningModel:
 
     def _generate_completion(self, prompt: str) -> str:
         tokenizer, model = self._load_components()
-        rendered_prompt = _build_chat_prompt(tokenizer, prompt)
+        rendered_prompt = _build_chat_prompt(tokenizer, prompt, self._system_message)
         inputs = tokenizer(rendered_prompt, return_tensors="pt")
         inputs = _move_inputs_to_model(inputs, model)
         generate_kwargs: dict[str, Any] = {
@@ -269,12 +278,7 @@ class HuggingFaceRerankerModel:
         )
 
 
-def _build_chat_prompt(tokenizer: Any, prompt: str) -> str:
-    system_message = (
-        "You are a requirement discovery engine. Output exactly one JSON object matching "
-        "RequirementDiscoveryChunkOutput and nothing else. Do not include markdown, code "
-        "fences, XML tags, chain-of-thought, or explanatory text."
-    )
+def _build_chat_prompt(tokenizer: Any, prompt: str, system_message: str) -> str:
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user", "content": prompt},

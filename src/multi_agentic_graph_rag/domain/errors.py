@@ -35,3 +35,7 @@ class TraceValidationError(IngestionError):
 
 class UserStoryValidationError(MaragError):
     """Generated user-story content failed meaningfulness validation."""
+
+
+class TestScenarioValidationError(MaragError):
+    """Generated test-scenario content failed meaningfulness validation."""

@@ -12,10 +12,13 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementArtifact,
     RequirementRevisionSnapshot,
+    TestScenarioArtifact,
     UserStoryArtifact,
 )
 
 _MANAGED_TABLES = (
+    "test_scenarios",
+    "test_scenario_artifacts",
     "user_stories",
     "user_story_artifacts",
     "requirement_fact_links",
@@ -68,6 +71,27 @@ _EXPECTED_COLUMNS = {
         "document_version_id": _TEXT_TYPES,
         "doc_version": _TEXT_TYPES,
         "title": _TEXT_TYPES,
+        "priority": _TEXT_TYPES,
+        "status": _TEXT_TYPES,
+        "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "test_scenario_artifacts": {
+        "artifact_path": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "test_scenarios": {
+        "scenario_id": _TEXT_TYPES,
+        "story_id": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "doc_version": _TEXT_TYPES,
+        "title": _TEXT_TYPES,
+        "scenario_type": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
         "status": _TEXT_TYPES,
         "payload": {"jsonb"},
@@ -207,6 +231,12 @@ class PostgresStore:
                       payload jsonb not null,
                       created_at timestamptz not null default now()
                     );
+                    create table if not exists test_scenario_artifacts (
+                      artifact_path text primary key,
+                      document_version_id text not null,
+                      payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
                     create table if not exists user_stories (
                       story_id text primary key,
                       requirement_id text not null,
@@ -215,6 +245,21 @@ class PostgresStore:
                       document_version_id text not null,
                       doc_version text not null,
                       title text not null,
+                      priority text not null,
+                      status text not null,
+                      payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists test_scenarios (
+                      scenario_id text primary key,
+                      story_id text not null,
+                      requirement_id text not null,
+                      project text not null,
+                      document_id text not null,
+                      document_version_id text not null,
+                      doc_version text not null,
+                      title text not null,
+                      scenario_type text not null,
                       priority text not null,
                       status text not null,
                       payload jsonb not null,
@@ -313,6 +358,12 @@ class PostgresStore:
                       on user_stories(requirement_id);
                     create index if not exists user_stories_document_version_idx
                       on user_stories(document_version_id);
+                    create index if not exists test_scenarios_story_idx
+                      on test_scenarios(story_id);
+                    create index if not exists test_scenarios_requirement_idx
+                      on test_scenarios(requirement_id);
+                    create index if not exists test_scenarios_document_version_idx
+                      on test_scenarios(document_version_id);
                     """
                 )
                 self._validate_schema(cursor)
@@ -612,6 +663,154 @@ class PostgresStore:
         document_version_id: str | None,
     ) -> dict[str, Any] | None:
         rows = [row for row in self._read_local_rows() if row.get("kind") == "user_story_artifact"]
+        if artifact_path is not None:
+            for row in reversed(rows):
+                if row.get("artifact_path") == artifact_path:
+                    artifact = row.get("artifact")
+                    return dict(artifact) if isinstance(artifact, dict) else None
+        if document_version_id is not None:
+            for row in reversed(rows):
+                if row.get("_local_key") == document_version_id:
+                    artifact = row.get("artifact")
+                    return dict(artifact) if isinstance(artifact, dict) else None
+        return None
+
+    def persist_test_scenario_artifact(
+        self,
+        artifact: TestScenarioArtifact,
+        artifact_path: str,
+        run_id: str,
+    ) -> None:
+        payload = artifact.model_dump(mode="json")
+        if self.settings.postgres.mode == "local_json":
+            self._upsert_local(
+                "test_scenario_artifact",
+                artifact.document_version_id,
+                {
+                    "kind": "test_scenario_artifact",
+                    "run_id": run_id,
+                    "artifact_path": artifact_path,
+                    "artifact": payload,
+                },
+            )
+            self._persist_test_scenarios_local(artifact)
+            return
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into test_scenario_artifacts
+                      (artifact_path, document_version_id, payload)
+                    values (%s, %s, %s)
+                    on conflict (artifact_path) do update set payload=excluded.payload
+                    """,
+                    (artifact_path, artifact.document_version_id, json.dumps(payload)),
+                )
+                self._persist_test_scenarios_postgres(cursor, artifact)
+            connection.commit()
+
+    def load_test_scenario_artifact_payload(
+        self,
+        artifact_path: str | None = None,
+        document_version_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if artifact_path is None and document_version_id is None:
+            raise ValueError("artifact_path or document_version_id is required")
+        if self.settings.postgres.mode == "local_json":
+            return self._local_test_scenario_artifact_payload(
+                artifact_path=artifact_path,
+                document_version_id=document_version_id,
+            )
+        with self._connect() as connection, connection.cursor() as cursor:
+            if artifact_path is not None:
+                cursor.execute(
+                    "select payload from test_scenario_artifacts where artifact_path = %s",
+                    (artifact_path,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return _artifact_payload_from_row(row[0])
+            if document_version_id is not None:
+                cursor.execute(
+                    """
+                    select payload from test_scenario_artifacts
+                    where document_version_id = %s
+                    order by created_at desc
+                    limit 1
+                    """,
+                    (document_version_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return _artifact_payload_from_row(row[0])
+        return None
+
+    def _persist_test_scenarios_postgres(
+        self,
+        cursor: Any,
+        artifact: TestScenarioArtifact,
+    ) -> None:
+        for scenario_id, record in artifact.scenarios.items():
+            cursor.execute(
+                """
+                insert into test_scenarios
+                  (scenario_id, story_id, requirement_id, project, document_id,
+                   document_version_id, doc_version, title, scenario_type, priority,
+                   status, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                on conflict (scenario_id) do update
+                set title = excluded.title,
+                    scenario_type = excluded.scenario_type,
+                    priority = excluded.priority,
+                    status = excluded.status,
+                    payload = excluded.payload
+                """,
+                (
+                    scenario_id,
+                    record.story_id,
+                    record.requirement_id,
+                    record.project,
+                    record.document_id,
+                    record.document_version_id,
+                    record.doc_version,
+                    record.title,
+                    record.scenario_type,
+                    record.priority,
+                    json.dumps(record.model_dump(mode="json")),
+                ),
+            )
+
+    def _persist_test_scenarios_local(self, artifact: TestScenarioArtifact) -> None:
+        for scenario_id, record in artifact.scenarios.items():
+            self._upsert_local(
+                "test_scenario",
+                scenario_id,
+                {
+                    "kind": "test_scenario",
+                    "scenario_id": scenario_id,
+                    "story_id": record.story_id,
+                    "requirement_id": record.requirement_id,
+                    "project": record.project,
+                    "document_id": record.document_id,
+                    "document_version_id": record.document_version_id,
+                    "doc_version": record.doc_version,
+                    "title": record.title,
+                    "scenario_type": record.scenario_type,
+                    "priority": record.priority,
+                    "status": "active",
+                    "test_scenario": record.model_dump(mode="json"),
+                },
+            )
+
+    def _local_test_scenario_artifact_payload(
+        self,
+        *,
+        artifact_path: str | None,
+        document_version_id: str | None,
+    ) -> dict[str, Any] | None:
+        rows = [
+            row for row in self._read_local_rows() if row.get("kind") == "test_scenario_artifact"
+        ]
         if artifact_path is not None:
             for row in reversed(rows):
                 if row.get("artifact_path") == artifact_path:

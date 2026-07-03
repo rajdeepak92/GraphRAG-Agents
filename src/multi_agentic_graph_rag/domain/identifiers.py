@@ -127,6 +127,22 @@ def user_story_id(
     return f"US-{token}"
 
 
+def test_scenario_id(
+    project: str,
+    story_identifier: str,
+    normalized_title: str,
+    ordinal: int,
+) -> str:
+    token = stable_token(
+        project,
+        story_identifier,
+        normalized_title,
+        ordinal,
+        length=14,
+    )
+    return f"SC-{token}"
+
+
 def requirement_delta_event_id(
     *,
     event_type: str,
