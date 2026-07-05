@@ -33,6 +33,10 @@ class TraceValidationError(IngestionError):
     """LLM trace data does not match source text."""
 
 
+class CheckpointError(MaragError):
+    """A local crash-resume checkpoint file is missing, corrupted, or mismatched."""
+
+
 class UserStoryValidationError(MaragError):
     """Generated user-story content failed meaningfulness validation."""
 

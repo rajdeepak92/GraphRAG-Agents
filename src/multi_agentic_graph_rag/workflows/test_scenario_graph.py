@@ -16,7 +16,11 @@ from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
-from multi_agentic_graph_rag.domain.errors import ConfigurationError, StoreUnavailableError
+from multi_agentic_graph_rag.domain.errors import (
+    CheckpointError,
+    ConfigurationError,
+    StoreUnavailableError,
+)
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
     TestScenarioModel,
@@ -30,12 +34,28 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reasoning_model,
     create_reranker_model,
 )
+from multi_agentic_graph_rag.observability.logging import RunLogger
 from multi_agentic_graph_rag.observability.session import (
     RunSession,
     command_run_id,
     command_session,
 )
 from multi_agentic_graph_rag.services.artifacts import write_test_scenario_artifact
+from multi_agentic_graph_rag.services.generation_checkpoint import (
+    CONTEXT_MAP_FILENAME,
+    STAGE_TEST_SCENARIO,
+    ContextMapEntry,
+    append_generation_error,
+    hydrate_context_map_entry,
+    load_context_map_checkpoint,
+    load_generation_progress,
+    make_context_map_entry,
+    record_completion,
+    record_failure,
+    validate_context_map,
+    write_context_map_checkpoint,
+    write_generation_progress,
+)
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
     load_requirement_source_from_full_payload,
@@ -178,26 +198,36 @@ def _run_pipeline(
             logger=logger,
         )
         agent = TestScenarioGenerationAgent(reasoning_model, logger=logger)
-        generated: list[tuple[UserStoryRecord, TestScenarioModel]] = []
-        evidence_by_requirement: dict[str, list[str]] = {}
-        for index, story in enumerate(source.stories, start=1):
-            linked = requirement_map.get(story.requirement_id)
-            linked_text = linked.requirement_text if linked else None
-            evidence = list(linked.evidence_chunk_ids) if linked else []
-            evidence_by_requirement[story.requirement_id] = evidence
-            context = retrieval.retrieve_context(
-                requirement_text=_story_query_text(story, linked_text),
-                document_version_id=source.document_version_id,
-                evidence_chunk_ids=evidence,
+        out_dir = _output_dir(request, settings, source, state["run_id"])
+        evidence_by_requirement: dict[str, list[str]] = {
+            story.requirement_id: (
+                list(requirement_map[story.requirement_id].evidence_chunk_ids)
+                if story.requirement_id in requirement_map
+                else []
             )
-            output = agent.generate(
-                story,
-                context,
-                story_index=index,
-                requirement_text=linked_text,
-            )
-            for scenario in output.test_scenarios:
-                generated.append((story, scenario))
+            for story in source.stories
+        }
+
+        # Loop 1: retrieve context identifiers into a checkpointed context map.
+        entries = _build_or_load_context_map(
+            source=source,
+            requirement_map=requirement_map,
+            retrieval=retrieval,
+            out_dir=out_dir,
+            run_id=state["run_id"],
+            logger=logger,
+        )
+        # Loop 2: hydrate full chunk text, feed the LLM, checkpoint per item.
+        generated = _generate_from_context_map(
+            source=source,
+            requirement_map=requirement_map,
+            entries=entries,
+            agent=agent,
+            neo4j=neo4j,
+            out_dir=out_dir,
+            run_id=state["run_id"],
+            logger=logger,
+        )
 
         artifact = build_test_scenario_artifact(
             project=source.project,
@@ -206,7 +236,6 @@ def _run_pipeline(
             doc_version=source.doc_version,
             generated=generated,
         )
-        out_dir = _output_dir(request, settings, source, state["run_id"])
         artifact_path = write_test_scenario_artifact(artifact, out_dir, logger=logger)
         if session is not None:
             session.artifact_payload = artifact.model_dump(mode="json")
@@ -278,6 +307,176 @@ def _run_pipeline(
             logger=logger,
         )
         raise
+
+
+def _build_or_load_context_map(
+    *,
+    source: _StorySource,
+    requirement_map: dict[str, RequirementInput],
+    retrieval: RetrievalService,
+    out_dir: Path,
+    run_id: str,
+    logger: RunLogger | None,
+) -> list[ContextMapEntry]:
+    """Loop 1: build the context map, or reuse a valid checkpoint to skip retrieval."""
+    existing = load_context_map_checkpoint(
+        out_dir,
+        stage=STAGE_TEST_SCENARIO,
+        project=source.project,
+        document_version_id=source.document_version_id,
+        run_id=run_id,
+        logger=logger,
+    )
+    if existing is not None:
+        if logger is not None:
+            logger.info(
+                "Loaded context map from checkpoint; skipping retrieval loop",
+                step="test_scenarios.context_map",
+                entry_count=len(existing),
+                source="checkpoint",
+                status="resumed",
+            )
+        return existing
+
+    entries: list[ContextMapEntry] = []
+    evidence_by_story: dict[str, list[str]] = {}
+    for story in source.stories:
+        linked = requirement_map.get(story.requirement_id)
+        linked_text = linked.requirement_text if linked else None
+        evidence = list(linked.evidence_chunk_ids) if linked else []
+        evidence_by_story[story.story_id] = evidence
+        provenance = retrieval.retrieve_context_map(
+            requirement_text=_story_query_text(story, linked_text),
+            document_version_id=source.document_version_id,
+            evidence_chunk_ids=evidence,
+        )
+        entries.append(
+            make_context_map_entry(
+                requirement_id=story.requirement_id,
+                document_version_id=source.document_version_id,
+                provenance=provenance,
+                story_id=story.story_id,
+            )
+        )
+    entries = validate_context_map(
+        entries,
+        expected_document_version_id=source.document_version_id,
+        require_story_id=True,
+        evidence_by_key=evidence_by_story,
+        logger=logger,
+    )
+    write_context_map_checkpoint(
+        out_dir,
+        run_id=run_id,
+        stage=STAGE_TEST_SCENARIO,
+        project=source.project,
+        document_version_id=source.document_version_id,
+        entries=entries,
+    )
+    if logger is not None:
+        logger.info(
+            "Context map retrieval loop completed and checkpointed",
+            step="test_scenarios.context_map",
+            entry_count=len(entries),
+            path=str(out_dir / CONTEXT_MAP_FILENAME),
+            status="completed",
+        )
+    return entries
+
+
+def _generate_from_context_map(
+    *,
+    source: _StorySource,
+    requirement_map: dict[str, RequirementInput],
+    entries: list[ContextMapEntry],
+    agent: TestScenarioGenerationAgent,
+    neo4j: Neo4jStore,
+    out_dir: Path,
+    run_id: str,
+    logger: RunLogger | None,
+) -> list[tuple[UserStoryRecord, TestScenarioModel]]:
+    """Loop 2: hydrate chunk text, generate per story, checkpoint each item."""
+    stories_by_id = {story.story_id: story for story in source.stories}
+    progress = load_generation_progress(
+        out_dir,
+        stage=STAGE_TEST_SCENARIO,
+        project=source.project,
+        document_version_id=source.document_version_id,
+        run_id=run_id,
+        logger=logger,
+    )
+    generated: list[tuple[UserStoryRecord, TestScenarioModel]] = []
+    for index, entry in enumerate(entries, start=1):
+        story_id = entry.story_id
+        story = stories_by_id.get(story_id) if story_id else None
+        if story is None:
+            raise CheckpointError(f"context map references unknown story_id {entry.story_id}")
+        completed = progress.completed.get(story.story_id)
+        if completed is not None:
+            for scenario in _scenarios_from_payload(completed.payload, story.story_id):
+                generated.append((story, scenario))
+            if logger is not None:
+                logger.info(
+                    "Skipping already-completed story from progress checkpoint",
+                    step="generate_test_scenarios.story",
+                    story_index=index,
+                    story_id=story.story_id,
+                    status="skipped",
+                )
+            continue
+
+        linked = requirement_map.get(story.requirement_id)
+        linked_text = linked.requirement_text if linked else None
+        context = hydrate_context_map_entry(entry, neo4j=neo4j, logger=logger)
+        try:
+            output = agent.generate(
+                story,
+                context,
+                story_index=index,
+                requirement_text=linked_text,
+            )
+        except Exception as exc:
+            record_failure(
+                progress,
+                input_id=story.story_id,
+                error=str(exc),
+                requirement_id=story.requirement_id,
+            )
+            write_generation_progress(out_dir, progress)
+            append_generation_error(
+                out_dir,
+                {
+                    "stage": STAGE_TEST_SCENARIO,
+                    "input_id": story.story_id,
+                    "requirement_id": story.requirement_id,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
+        scenarios = list(output.test_scenarios)
+        for scenario in scenarios:
+            generated.append((story, scenario))
+        record_completion(
+            progress,
+            input_id=story.story_id,
+            requirement_id=story.requirement_id,
+            payload={
+                "test_scenarios": [scenario.model_dump(mode="json") for scenario in scenarios]
+            },
+        )
+        write_generation_progress(out_dir, progress)
+    return generated
+
+
+def _scenarios_from_payload(payload: dict[str, Any], story_id: str) -> list[TestScenarioModel]:
+    raw = payload.get("test_scenarios")
+    if not isinstance(raw, list):
+        raise CheckpointError(f"progress payload for {story_id} is missing test_scenarios")
+    try:
+        return [TestScenarioModel.model_validate(item) for item in raw]
+    except ValidationError as exc:
+        raise CheckpointError(f"progress payload for {story_id} is invalid ({exc})") from exc
 
 
 def run_test_scenario_generation(

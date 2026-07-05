@@ -33,6 +33,42 @@ class RetrievedContext:
     source: str = "hybrid"
 
 
+@dataclass(frozen=True)
+class ChunkProvenance:
+    """Per-chunk retrieval provenance used to build the loop-1 context map.
+
+    Carries identifiers and retrieval metadata only (never chunk text), so it can
+    be checkpointed to ``context_map.json`` without duplicating source content.
+    """
+
+    chunk_id: str
+    source: str
+    rank: int
+    score: float | None = None
+
+
+# Retrieval-source labels recorded per fused chunk (stable identifiers used in
+# the context-map ``retrieval_metadata`` records).
+_SOURCE_EVIDENCE = "evidence"
+_SOURCE_DENSE = "chroma_dense"
+_SOURCE_SPARSE = "neo4j_fulltext"
+_SOURCE_NEIGHBOR = "neo4j_neighbor"
+
+
+@dataclass(frozen=True)
+class _SelectedChunk:
+    chunk_id: str
+    text: str
+    source: str
+    score: float | None
+
+
+@dataclass(frozen=True)
+class _Selection:
+    items: list[_SelectedChunk]
+    source: str
+
+
 class RetrievalService:
     def __init__(
         self,
@@ -58,10 +94,68 @@ class RetrievalService:
         document_version_id: str,
         evidence_chunk_ids: list[str],
     ) -> RetrievedContext:
+        selection = self._retrieve(
+            requirement_text=requirement_text,
+            document_version_id=document_version_id,
+            evidence_chunk_ids=evidence_chunk_ids,
+        )
+        return RetrievedContext(
+            chunks=[
+                RetrievedChunk(chunk_id=item.chunk_id, text=item.text) for item in selection.items
+            ],
+            source=selection.source,
+        )
+
+    def retrieve_context_map(
+        self,
+        *,
+        requirement_text: str,
+        document_version_id: str,
+        evidence_chunk_ids: list[str],
+    ) -> list[ChunkProvenance]:
+        """Loop-1 retrieval: identifiers + provenance only, never chunk text.
+
+        Runs the identical hybrid fusion + rerank + evidence-guarantee selection
+        as :meth:`retrieve_context`, but returns only the selected chunk ids with
+        their retrieval source, deterministic rank order, and (dense/sparse) score
+        so the result can be checkpointed to ``context_map.json``.
+        """
+        selection = self._retrieve(
+            requirement_text=requirement_text,
+            document_version_id=document_version_id,
+            evidence_chunk_ids=evidence_chunk_ids,
+        )
+        return [
+            ChunkProvenance(
+                chunk_id=item.chunk_id,
+                source=item.source,
+                rank=rank,
+                score=item.score,
+            )
+            for rank, item in enumerate(selection.items, start=1)
+        ]
+
+    def _retrieve(
+        self,
+        *,
+        requirement_text: str,
+        document_version_id: str,
+        evidence_chunk_ids: list[str],
+    ) -> _Selection:
         fused: dict[str, str] = {}
+        source_by_id: dict[str, str] = {}
+        score_by_id: dict[str, float | None] = {}
         evidence_ids: list[str] = []
         empty_pairs: list[tuple[str, str]] = []
         empty_scored: list[tuple[str, str, float]] = []
+
+        def add(chunk_id: str, text: str, source: str, score: float | None) -> bool:
+            if chunk_id in fused:
+                return False
+            fused[chunk_id] = text
+            source_by_id[chunk_id] = source
+            score_by_id[chunk_id] = score
+            return True
 
         if evidence_chunk_ids:
             for chunk_id, text in self._safe(
@@ -69,29 +163,26 @@ class RetrievalService:
                 "evidence",
                 empty_pairs,
             ):
-                if chunk_id not in fused:
-                    fused[chunk_id] = text
+                if add(chunk_id, text, _SOURCE_EVIDENCE, None):
                     evidence_ids.append(chunk_id)
 
         retrieved = 0
-        for chunk_id, text, _ in self._safe(
+        for chunk_id, text, score in self._safe(
             lambda: self._dense(requirement_text, document_version_id),
             "dense",
             empty_scored,
         ):
-            if chunk_id not in fused:
-                fused[chunk_id] = text
+            if add(chunk_id, text, _SOURCE_DENSE, score):
                 retrieved += 1
 
-        for chunk_id, text, _ in self._safe(
+        for chunk_id, text, score in self._safe(
             lambda: self.neo4j.fulltext_search_chunks(
                 requirement_text, document_version_id, self.settings.sparse_k
             ),
             "sparse",
             empty_scored,
         ):
-            if chunk_id not in fused:
-                fused[chunk_id] = text
+            if add(chunk_id, text, _SOURCE_SPARSE, score):
                 retrieved += 1
 
         if evidence_chunk_ids:
@@ -102,27 +193,35 @@ class RetrievalService:
                 "graph",
                 empty_pairs,
             ):
-                if chunk_id not in fused:
-                    fused[chunk_id] = text
+                if add(chunk_id, text, _SOURCE_NEIGHBOR, None):
                     retrieved += 1
 
         if not fused:
             self._log_fallback(document_version_id, source="requirement_text_fallback")
-            return RetrievedContext(chunks=[], source="requirement_text_fallback")
+            return _Selection(items=[], source="requirement_text_fallback")
 
-        ranked = self._rerank(requirement_text, fused)
+        ranked_ids = self._rerank_ids(requirement_text, fused)
         top_k = max(self.settings.top_k, 0)
-        selected = ranked[:top_k]
-        selected_ids = {chunk.chunk_id for chunk in selected}
+        selected_ids = ranked_ids[:top_k]
+        selected_set = set(selected_ids)
         for chunk_id in evidence_ids:
-            if chunk_id not in selected_ids:
-                selected.append(RetrievedChunk(chunk_id=chunk_id, text=fused[chunk_id]))
-                selected_ids.add(chunk_id)
+            if chunk_id not in selected_set:
+                selected_ids.append(chunk_id)
+                selected_set.add(chunk_id)
 
+        items = [
+            _SelectedChunk(
+                chunk_id=chunk_id,
+                text=fused[chunk_id],
+                source=source_by_id[chunk_id],
+                score=score_by_id[chunk_id],
+            )
+            for chunk_id in selected_ids
+        ]
         source = "hybrid" if retrieved > 0 else "evidence"
         if source == "evidence":
             self._log_fallback(document_version_id, source=source)
-        return RetrievedContext(chunks=selected, source=source)
+        return _Selection(items=items, source=source)
 
     def _dense(
         self,
@@ -134,7 +233,7 @@ class RetrievalService:
             return []
         return self.chroma.query_chunks(embeddings[0], document_version_id, self.settings.dense_k)
 
-    def _rerank(self, query: str, fused: dict[str, str]) -> list[RetrievedChunk]:
+    def _rerank_ids(self, query: str, fused: dict[str, str]) -> list[str]:
         ids = list(fused)
         texts = [fused[chunk_id] for chunk_id in ids]
         order = list(range(len(ids)))
@@ -143,7 +242,7 @@ class RetrievalService:
             ranked = self._safe(lambda: reranker.rerank(query, texts), "rerank", order)
             if sorted(ranked) == order:
                 order = ranked
-        return [RetrievedChunk(chunk_id=ids[index], text=texts[index]) for index in order]
+        return [ids[index] for index in order]
 
     def _safe(self, operation: Callable[[], T], label: str, default: T) -> T:
         try:
