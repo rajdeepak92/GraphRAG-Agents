@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 
+[project.scripts]
+marag = "multi_agentic_graph_rag.cli:main"
+
+
 [project.optional-dependencies]
 azure = [
     "azure-identity>=1.25.3",
@@ -40,6 +44,9 @@ local-llm = [
     "sentence-transformers>=5.6.0",
     "torch>=2.12.1",
     "transformers>=5.12.1",
+]
+mcp = [
+    "mcp>=1.0.0",
 ]
 
 

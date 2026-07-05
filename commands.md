@@ -25,6 +25,7 @@ If you want optional provider support:
 ```powershell
 uv sync --extra azure
 uv sync --extra local-llm
+uv sync --extra mcp
 ```
 
 Notes:
@@ -32,6 +33,7 @@ Notes:
 - `uv sync` installs the core runtime dependencies from `pyproject.toml`.
 - `--extra azure` adds `openai` and `azure-identity`.
 - `--extra local-llm` adds the Hugging Face / local model stack.
+- `--extra mcp` adds the local stdio MCP server dependency.
 
 ## 2. Sync Dependencies As Needed
 
@@ -49,9 +51,51 @@ uv sync --extra local-llm
 
 # Full local setup
 uv sync --extra azure --extra local-llm
+
+# Claude CLI MCP integration
+uv sync --extra mcp
 ```
 
-## 3. Setup Databases And Check
+## 3. Claude CLI MCP Without Docker
+
+This repo ships a project-local MCP stdio server in
+`multi_agentic_graph_rag.mcp.server` and a `.mcp.json` for Claude CLI.
+
+Install and smoke-check:
+
+```powershell
+uv sync --extra mcp
+uv run python -c "import mcp; print('mcp ok')"
+uv run python -m multi_agentic_graph_rag.mcp.server
+```
+
+Configure `.env` for Windows-native service automation:
+
+```powershell
+MARAG_MCP_STACK_MODE=windows_native
+MARAG_POSTGRES_AUTO_START=true
+MARAG_POSTGRES_SERVICE_NAME=postgresql-x64-18
+MARAG_NEO4J_AUTO_START=true
+MARAG_NEO4J_START_MODE=desktop_dbms
+NEO4J_DBMS_HOME=D:\path\to\neo4j\dbms
+NEO4J_JAVA_HOME=D:\path\to\neo4j\java
+```
+
+Then in Claude CLI:
+
+```powershell
+claude mcp list
+```
+
+Available MCP tools include `marag_health_check`, `marag_start_stack`,
+`marag_find_latest_artifacts`, `marag_ingest_document`,
+`marag_generate_user_stories`, `marag_generate_test_scenarios`, and
+`marag_run_full_pipeline`.
+
+The MCP layer does not use Docker, does not reset databases, and does not stop
+shared PostgreSQL or Neo4j services unless explicit stop flags are enabled.
+
+## 4. Setup Databases And Check
 
 The repo currently supports two database modes:
 
@@ -104,7 +148,7 @@ Then verify:
 uv run marag db-check
 ```
 
-## 4. Clean Databases If Previous Data Exists
+## 5. Clean Databases If Previous Data Exists
 
 Use the cleanup that matches your mode.
 
@@ -148,7 +192,7 @@ directory is usually the fastest reset:
 Remove-Item -Recurse -Force runtime\databases\chroma -ErrorAction SilentlyContinue
 ```
 
-## 5. Configure Hugging Face For Local Dry Runs
+## 6. Configure Hugging Face For Local Dry Runs
 
 For offline local dry-runs, use the local provider defaults and keep Hugging Face
 dependencies installed:
@@ -198,7 +242,7 @@ HUGGINGFACE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 HUGGINGFACE_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 ```
 
-## 6. Configure Azure OpenAI
+## 7. Configure Azure OpenAI
 
 Use Azure when you want hosted reasoning, embeddings, or reranking inputs.
 Keep the provider split explicit.
@@ -236,7 +280,7 @@ NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=neo4j
 ```
 
-## 7. Run Ingest
+## 8. Run Ingest
 
 ```powershell
 uv run marag ingest `
@@ -252,7 +296,7 @@ uv run marag ingest --project PROJECT_1 --document .\documents\inbox\PROJECT_1\s
 uv run marag ingest --project PROJECT_1 --document .\documents\inbox\PROJECT_1\sample.txt --version 1.0 --replace-version
 ```
 
-## 8. Generate User Stories
+## 9. Generate User Stories
 
 Stage 3 consumes the requirement artifact and generates user stories per
 requirement with hybrid retrieval (Chroma dense + Neo4j BM25 + Neo4j multi-hop)
@@ -285,7 +329,7 @@ uv run marag artifact verify-user-stories generated\PROJECT_1\req\<RUN_ID>\user_
 `user_stories.json` is written beside the input requirements file (or under
 `generated/<PROJECT>/user_stories/<RUN_ID>/` when loaded from PostgreSQL).
 
-## 9. Generate Test Scenarios
+## 10. Generate Test Scenarios
 
 Stage 4 consumes `user_stories.json` and generates implementation-ready test
 scenarios per user story. It uses the same hybrid retrieval stack as stage 3:
@@ -333,7 +377,48 @@ TEST_SCENARIO_MAX_NEW_TOKENS=
 `test_scenarios.json` is written beside the input user-story file (or under
 `generated/<PROJECT>/test_scenarios/<RUN_ID>/` when loaded from PostgreSQL).
 
-## 10. Observability
+## 10b. Human Feedback (add-only HFIL stage)
+
+Append *additional*, document-grounded user stories or test scenarios to an
+already-generated artifact. This never edits or deletes existing records —
+destructive requests are declined and recorded. Requires the real stack
+(`POSTGRES_MODE=postgres`, `NEO4J_MODE=neo4j`, real reasoning/embedding/reranker
+providers), same as the generation stages.
+
+```powershell
+# Add a user story anchored to a requirement.
+uv run marag feedback user-stories `
+  --artifact generated\SIIMCS\req\<RUN_ID>\user_stories.json `
+  --comment "Add a story: operators can export threshold configuration for offline review" `
+  --requirement-id REQ-XXXX `
+  --json-output
+
+# Add a test scenario anchored to a story (needs the user-story artifact for lineage).
+uv run marag feedback test-scenarios `
+  --artifact generated\SIIMCS\req\<RUN_ID>\test_scenarios.json `
+  --comment "Add a boundary scenario for the export limit" `
+  --story-id US-XXXX `
+  --user-stories generated\SIIMCS\req\<RUN_ID>\user_stories.json `
+  --json-output
+```
+
+Behavior:
+
+- Anchor resolution ladder: explicit `--requirement-id`/`--story-id` flag →
+  `REQ-`/`US-` id in the comment → hybrid retrieval + Neo4j traceability. An
+  ambiguous retrieval match declines and lists candidate ids (never guesses).
+- New records get `origin="feedback"`, a `FDBK-` `feedback_id`, and the
+  gate-approved `evidence_chunk_ids`; the artifact is rewritten in place
+  atomically and coverage maps updated.
+- Both applied additions and declines land in the `feedback_events` ledger.
+  A decline exits 0 with a clear message; re-running the identical command is an
+  idempotent no-op. The feedback run dir is
+  `generated/<PROJECT>/feedback/<RUN_ID>/` with `run.log`, `run.jsonl`, and
+  `feedback_delta.json` (new records + gate output + resolved anchors).
+- Verify the merged artifact with `marag artifact verify-user-stories` /
+  `verify-test-scenarios`.
+
+## 11. Observability
 
 ### Run files
 

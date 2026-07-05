@@ -143,6 +143,27 @@ def test_scenario_id(
     return f"SC-{token}"
 
 
+test_scenario_id.__test__ = False  # type: ignore[attr-defined]
+
+
+def feedback_id(
+    project: str,
+    document_version_identifier: str,
+    stage: str,
+    comment_text: str,
+    anchor_identifier: str,
+) -> str:
+    token = stable_token(
+        project,
+        document_version_identifier,
+        stage,
+        comment_text.strip(),
+        anchor_identifier,
+        length=14,
+    )
+    return f"FDBK-{token}"
+
+
 def requirement_delta_event_id(
     *,
     event_type: str,

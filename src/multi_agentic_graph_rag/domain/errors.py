@@ -43,3 +43,7 @@ class UserStoryValidationError(MaragError):
 
 class TestScenarioValidationError(MaragError):
     """Generated test-scenario content failed meaningfulness validation."""
+
+
+class FeedbackValidationError(MaragError):
+    """Human-feedback gate output failed closed-world evidence validation."""

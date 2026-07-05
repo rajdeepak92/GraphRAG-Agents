@@ -40,6 +40,7 @@ class UserStoryGenerationAgent:
         context: RetrievedContext,
         *,
         requirement_index: int = 1,
+        reviewer_directive: str | None = None,
     ) -> UserStoryGenerationOutput:
         validation_error: str | None = None
         try:
@@ -48,6 +49,7 @@ class UserStoryGenerationAgent:
                     requirement,
                     context,
                     validation_error=validation_error,
+                    reviewer_directive=reviewer_directive,
                 )
                 _set_response_context(
                     self.reasoning_model,
@@ -190,6 +192,8 @@ def _build_user_story_prompt(
     requirement: RequirementInput,
     context: RetrievedContext,
     validation_error: str | None = None,
+    *,
+    reviewer_directive: str | None = None,
 ) -> str:
     requirement_json = json.dumps(
         {
@@ -216,6 +220,17 @@ def _build_user_story_prompt(
             "Every title, i_want, so_that, and business_value must be a complete, "
             "descriptive phrase of at least two words. Story titles must be unique.\n"
             f"Validation error: {validation_error}\n\n"
+        )
+
+    directive_block = ""
+    if reviewer_directive:
+        directive_block = (
+            "=== Reviewer directive (human feedback) ===\n"
+            f"{reviewer_directive.strip()}\n"
+            "Generate ONLY the additional user story or stories the reviewer asked for, "
+            "grounded strictly in the requirement and retrieved context below. Do not "
+            "restate or duplicate stories that already exist.\n"
+            "=== End reviewer directive ===\n\n"
         )
 
     return (
@@ -262,6 +277,7 @@ def _build_user_story_prompt(
         "phrases, never placeholders or single words.\n"
         "Prefer the requirement's own numbers, limits, and terminology verbatim when they "
         "appear.\n\n"
+        f"{directive_block}"
         f"Requirement:\n{requirement_json}\n\n"
         f"Retrieved context:\n{context_block}\n"
     )

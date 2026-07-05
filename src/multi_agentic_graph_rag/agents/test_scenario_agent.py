@@ -38,6 +38,7 @@ class TestScenarioGenerationAgent:
         *,
         story_index: int = 1,
         requirement_text: str | None = None,
+        reviewer_directive: str | None = None,
     ) -> TestScenarioGenerationOutput:
         validation_error: str | None = None
         try:
@@ -47,6 +48,7 @@ class TestScenarioGenerationAgent:
                     context,
                     requirement_text=requirement_text,
                     validation_error=validation_error,
+                    reviewer_directive=reviewer_directive,
                 )
                 _set_response_context(
                     self.reasoning_model,
@@ -199,6 +201,7 @@ def _build_test_scenario_prompt(
     *,
     requirement_text: str | None = None,
     validation_error: str | None = None,
+    reviewer_directive: str | None = None,
 ) -> str:
     story_json = json.dumps(
         {
@@ -243,6 +246,17 @@ def _build_test_scenario_prompt(
             f"Validation error: {validation_error}\n\n"
         )
 
+    directive_block = ""
+    if reviewer_directive:
+        directive_block = (
+            "=== Reviewer directive (human feedback) ===\n"
+            f"{reviewer_directive.strip()}\n"
+            "Generate ONLY the additional test scenario or scenarios the reviewer asked "
+            "for, grounded strictly in the user story, linked requirement, and retrieved "
+            "context below. Do not restate or duplicate scenarios that already exist.\n"
+            "=== End reviewer directive ===\n\n"
+        )
+
     return (
         "You are a senior QA engineer generating implementation-ready test scenarios "
         "for exactly one approved user story.\n"
@@ -281,6 +295,7 @@ def _build_test_scenario_prompt(
         "that are not supported by that text.\n"
         "Prefer the source text's numbers, limits, and terminology verbatim when they "
         "appear.\n\n"
+        f"{directive_block}"
         f"User story:\n{story_json}\n\n"
         f"Linked requirement:\n{linked_requirement}\n\n"
         f"Retrieved context:\n{context_block}\n"

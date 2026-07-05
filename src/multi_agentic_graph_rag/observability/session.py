@@ -78,6 +78,11 @@ class RunSession:
             log_path = run_dir / "run.log"
             jsonl_path = run_dir / "run.jsonl"
             req_path = run_dir / "requirements.json"
+        elif command == "feedback":
+            run_dir = root / "generated" / project_name / "feedback" / run_id
+            log_path = run_dir / "run.log"
+            jsonl_path = run_dir / "run.jsonl"
+            req_path = run_dir / "run.json"
         else:
             run_dir = root / ".generated" / project_name / "run"
             log_path = run_dir / f"run_{stamp}.log"

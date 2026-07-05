@@ -230,6 +230,16 @@ class Neo4jStore:
                 evidence,
             )
 
+    def resolve_feedback_anchors(
+        self,
+        chunk_ids: list[str],
+        document_version_id: str,
+        stage: str,
+    ) -> list[tuple[str, int]]:
+        if self.settings.neo4j.mode == "local_json":
+            return self._local_feedback_anchors(chunk_ids, document_version_id, stage)
+        return []
+
     def _driver(self) -> Any:
         from neo4j import GraphDatabase
 
@@ -346,6 +356,35 @@ class Neo4jStore:
                 if isinstance(chunk, dict):
                     by_id[str(chunk.get("chunk_id", ""))] = str(chunk.get("text", ""))
         return [(chunk_id, by_id[chunk_id]) for chunk_id in chunk_ids if chunk_id in by_id]
+
+    def _local_feedback_anchors(
+        self,
+        chunk_ids: list[str],
+        document_version_id: str,
+        stage: str,
+    ) -> list[tuple[str, int]]:
+        requested = set(chunk_ids)
+        scores: dict[str, int] = {}
+        for row in self._read_local_rows():
+            if row.get("kind") != "user_story_projection":
+                continue
+            if row.get("document_version_id") != document_version_id:
+                continue
+            evidence = row.get("evidence_chunk_ids")
+            if not isinstance(evidence, list):
+                continue
+            score = len(requested.intersection(str(chunk_id) for chunk_id in evidence))
+            if score <= 0:
+                continue
+            if stage == "user_story":
+                anchor_id = str(row.get("requirement_id", ""))
+            elif stage == "test_scenario":
+                anchor_id = str(row.get("story_id", ""))
+            else:
+                continue
+            if anchor_id:
+                scores[anchor_id] = scores.get(anchor_id, 0) + score
+        return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
 def _lucene_keyword_query(query: str) -> str:

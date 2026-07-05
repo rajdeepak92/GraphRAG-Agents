@@ -76,8 +76,12 @@ runtime/logs/*
 *.log
 
 # Local analysis docs
-# flow.md
+flow.md
 CLAUDE.md
+commands.md
+RUNBOOK.md
+mcp-flow.md
+hugging-face.md
 
 # Local test workspace
 tests/

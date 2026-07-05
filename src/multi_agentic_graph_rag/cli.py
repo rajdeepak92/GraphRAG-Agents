@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from multi_agentic_graph_rag import __version__
+from multi_agentic_graph_rag.agents.feedback_agent import FeedbackAgent
 from multi_agentic_graph_rag.agents.ingestion_document_agent import IngestionDocumentAgent
 from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGeneratorAgent
 from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGeneratorAgent
@@ -29,6 +30,7 @@ from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import MaragError, SchemaMismatchError
 from multi_agentic_graph_rag.domain.identifiers import run_id
 from multi_agentic_graph_rag.domain.schemas import (
+    FeedbackRequest,
     IngestionRequest,
     TestScenarioRequest,
     UserStoryRequest,
@@ -48,6 +50,7 @@ from multi_agentic_graph_rag.services.artifacts import (
     verify_test_scenario_artifact,
     verify_user_story_artifact,
 )
+from multi_agentic_graph_rag.workflows.feedback_graph import resolve_feedback_identity
 from multi_agentic_graph_rag.workflows.test_scenario_graph import resolve_test_scenario_identity
 from multi_agentic_graph_rag.workflows.user_story_graph import resolve_user_story_identity
 
@@ -59,8 +62,10 @@ app = typer.Typer(
 )
 run_app = typer.Typer(help="Run status and recovery commands.")
 artifact_app = typer.Typer(help="Generated artifact commands.")
+feedback_app = typer.Typer(help="Human-feedback (add-only) commands.")
 app.add_typer(run_app, name="run")
 app.add_typer(artifact_app, name="artifact")
+app.add_typer(feedback_app, name="feedback")
 console = Console()
 
 
@@ -663,6 +668,104 @@ def artifact_verify_test_scenarios(path: Annotated[Path, typer.Argument()]) -> N
         )
 
 
+@feedback_app.command("user-stories")
+def feedback_user_stories(
+    artifact: Annotated[Path, typer.Option("--artifact")],
+    comment: Annotated[str, typer.Option("--comment")],
+    requirement_id: Annotated[str | None, typer.Option("--requirement-id")] = None,
+    reasoning_provider: Annotated[str | None, typer.Option("--reasoning-provider")] = None,
+    embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
+    reranker_provider: Annotated[str | None, typer.Option("--reranker-provider")] = None,
+    top_k: Annotated[int | None, typer.Option("--top-k")] = None,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
+) -> None:
+    request = FeedbackRequest(
+        stage="user_story",
+        artifact_path=artifact,
+        comment=comment,
+        requirement_id=requirement_id,
+        reasoning_provider=reasoning_provider,
+        embedding_provider=embedding_provider,
+        reranker_provider=reranker_provider,
+        top_k=top_k,
+    )
+    _run_feedback_command(request, json_output=json_output)
+
+
+@feedback_app.command("test-scenarios")
+def feedback_test_scenarios(
+    artifact: Annotated[Path, typer.Option("--artifact")],
+    comment: Annotated[str, typer.Option("--comment")],
+    story_id: Annotated[str | None, typer.Option("--story-id")] = None,
+    user_stories: Annotated[Path | None, typer.Option("--user-stories")] = None,
+    reasoning_provider: Annotated[str | None, typer.Option("--reasoning-provider")] = None,
+    embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
+    reranker_provider: Annotated[str | None, typer.Option("--reranker-provider")] = None,
+    top_k: Annotated[int | None, typer.Option("--top-k")] = None,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
+) -> None:
+    request = FeedbackRequest(
+        stage="test_scenario",
+        artifact_path=artifact,
+        comment=comment,
+        story_id=story_id,
+        user_stories_path=user_stories,
+        reasoning_provider=reasoning_provider,
+        embedding_provider=embedding_provider,
+        reranker_provider=reranker_provider,
+        top_k=top_k,
+    )
+    _run_feedback_command(request, json_output=json_output)
+
+
+def _run_feedback_command(request: FeedbackRequest, *, json_output: bool) -> None:
+    try:
+        resolved_project, resolved_version = resolve_feedback_identity(request)
+    except (MaragError, FileNotFoundError) as exc:
+        console.print(f"[red]FAIL[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    with command_session(
+        project=resolved_project,
+        version=resolved_version,
+        command="feedback",
+        run_id=command_run_id("feedback"),
+    ) as session:
+        session.request_payload = request.model_dump(mode="json")
+        session.logger.info(
+            "Starting feedback command",
+            step="feedback",
+            stage=request.stage,
+            artifact=str(request.artifact_path),
+            status="started",
+        )
+        try:
+            result = FeedbackAgent().run(request, session=session)
+        except SchemaMismatchError:
+            console.print(
+                "[red]FAIL[/red] PostgreSQL schema mismatch. "
+                "Reset disposable local app tables with: "
+                "python -m multi_agentic_graph_rag postgres-reset --yes"
+            )
+            raise typer.Exit(code=1) from None
+        except MaragError as exc:
+            console.print(f"[red]FAIL[/red] {exc}")
+            raise typer.Exit(code=1) from None
+        if json_output:
+            console.print_json(json.dumps(result.model_dump(mode="json"), indent=2))
+            return
+        if result.status == "applied":
+            console.print(
+                "[green]PASS[/green] feedback applied "
+                f"feedback_id={result.feedback_id} created={','.join(result.created_ids)}"
+            )
+        else:
+            console.print(
+                "[yellow]DECLINED[/yellow] feedback not applied "
+                f"feedback_id={result.feedback_id} reason={result.verdict_reason}"
+            )
+        console.print(f"artifact={result.artifact_path}")
+
+
 def _render_kv(title: str, rows: list[tuple[str, str]]) -> None:
     table = Table(title=title)
     table.add_column("Key", style="bold")
@@ -727,5 +830,9 @@ def _postgres_dsn_host(dsn: str) -> str:
     return urlparse(normalized_dsn).hostname or ""
 
 
-if __name__ == "__main__":
+def main() -> None:
     app()
+
+
+if __name__ == "__main__":
+    main()

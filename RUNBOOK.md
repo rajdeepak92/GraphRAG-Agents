@@ -25,6 +25,13 @@ reranker:
 uv sync --dev --extra azure --extra local-llm
 ```
 
+Add the MCP extra when using Claude CLI tool automation:
+
+```powershell
+uv sync --dev --extra mcp
+uv run python -c "import mcp; print('mcp ok')"
+```
+
 ## 3. Configure `.env`
 
 For Azure OpenAI, set these values in `.env`:
@@ -46,6 +53,21 @@ LOG_LLM_RESPONSES=true
 For the Hugging Face runtime, keep the provider values set to `huggingface`
 and populate the Hugging Face model names and token fields in `.env.example`.
 
+For no-Docker MCP automation on Windows, also configure the local service names
+and Neo4j DBMS paths:
+
+```powershell
+MARAG_MCP_ENABLED=true
+MARAG_MCP_STACK_MODE=windows_native
+MARAG_POSTGRES_AUTO_START=true
+MARAG_POSTGRES_SERVICE_NAME=postgresql-x64-18
+MARAG_NEO4J_AUTO_START=true
+MARAG_NEO4J_START_MODE=desktop_dbms
+NEO4J_DBMS_HOME=D:\path\to\neo4j\dbms
+NEO4J_JAVA_HOME=D:\path\to\neo4j\java
+MARAG_ALLOW_SERVICE_STOP=false
+```
+
 ## 4. First Verification
 
 ```powershell
@@ -66,6 +88,26 @@ uv run python -m multi_agentic_graph_rag db-check
 ```
 
 This checks PostgreSQL, Neo4j, and Chroma in that order.
+
+## 5A. Claude CLI MCP Without Docker
+
+The project-local MCP server is registered in `.mcp.json` as `marag-mcp`.
+Secrets stay in `.env`; `.mcp.json` only starts the local stdio server:
+
+```powershell
+uv run python -m multi_agentic_graph_rag.mcp.server
+claude mcp list
+```
+
+Use these MCP tools from Claude CLI:
+
+- `marag_health_check` checks PostgreSQL service/port, Neo4j ports, Chroma persistence, and `marag db-check`.
+- `marag_start_stack` starts only the configured PostgreSQL Windows service and configured Neo4j DBMS path.
+- `marag_find_latest_artifacts` returns latest `requirements.json`, `user_stories.json`, and `test_scenarios.json`.
+- `marag_run_full_pipeline` runs stack check/start, ingest, user stories, test scenarios, and artifact verification.
+
+Safety defaults: no Docker, no raw SQL/Cypher tools, no database reset, no
+process killing, and no service stop unless `MARAG_ALLOW_SERVICE_STOP=true`.
 
 Storage responsibilities:
 

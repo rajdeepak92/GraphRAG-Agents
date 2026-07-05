@@ -17,6 +17,7 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 
 _MANAGED_TABLES = (
+    "feedback_events",
     "test_scenarios",
     "test_scenario_artifacts",
     "user_stories",
@@ -55,6 +56,20 @@ _EXPECTED_COLUMNS = {
         "artifact_path": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
         "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "feedback_events": {
+        "feedback_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "stage": _TEXT_TYPES,
+        "anchor_requirement_id": _TEXT_TYPES,
+        "anchor_story_id": _TEXT_TYPES,
+        "comment_text": _TEXT_TYPES,
+        "verdict": _TEXT_TYPES,
+        "reason": _TEXT_TYPES,
+        "created_ids": {"jsonb"},
+        "run_id": _TEXT_TYPES,
         "created_at": {"timestamp with time zone"},
     },
     "user_story_artifacts": {
@@ -263,6 +278,20 @@ class PostgresStore:
                       priority text not null,
                       status text not null,
                       payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists feedback_events (
+                      feedback_id text primary key,
+                      project text not null,
+                      document_version_id text not null,
+                      stage text not null,
+                      anchor_requirement_id text,
+                      anchor_story_id text,
+                      comment_text text not null,
+                      verdict text not null,
+                      reason text not null,
+                      created_ids jsonb not null default '[]',
+                      run_id text not null,
                       created_at timestamptz not null default now()
                     );
                     create table if not exists canonical_facts (
@@ -848,6 +877,110 @@ class PostgresStore:
                     ),
                 )
             connection.commit()
+
+    def persist_feedback_event(
+        self,
+        *,
+        feedback_id: str,
+        project: str,
+        document_version_id: str,
+        stage: str,
+        anchor_requirement_id: str | None,
+        anchor_story_id: str | None,
+        comment_text: str,
+        verdict: str,
+        reason: str,
+        created_ids: list[str],
+        run_id: str,
+    ) -> bool:
+        if self.settings.postgres.mode == "local_json":
+            existed = self.load_feedback_event(feedback_id) is not None
+            self._upsert_local(
+                "feedback_event",
+                feedback_id,
+                {
+                    "kind": "feedback_event",
+                    "feedback_id": feedback_id,
+                    "project": project,
+                    "document_version_id": document_version_id,
+                    "stage": stage,
+                    "anchor_requirement_id": anchor_requirement_id,
+                    "anchor_story_id": anchor_story_id,
+                    "comment_text": comment_text,
+                    "verdict": verdict,
+                    "reason": reason,
+                    "created_ids": list(created_ids),
+                    "run_id": run_id,
+                },
+            )
+            return existed
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into feedback_events
+                      (feedback_id, project, document_version_id, stage,
+                       anchor_requirement_id, anchor_story_id, comment_text,
+                       verdict, reason, created_ids, run_id)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (feedback_id) do nothing
+                    returning feedback_id
+                    """,
+                    (
+                        feedback_id,
+                        project,
+                        document_version_id,
+                        stage,
+                        anchor_requirement_id,
+                        anchor_story_id,
+                        comment_text,
+                        verdict,
+                        reason,
+                        json.dumps(list(created_ids)),
+                        run_id,
+                    ),
+                )
+                inserted = cursor.fetchone() is not None
+            connection.commit()
+        # No row returned by the insert means the row already existed.
+        return not inserted
+
+    def load_feedback_event(self, feedback_id: str) -> dict[str, Any] | None:
+        if self.settings.postgres.mode == "local_json":
+            for row in reversed(self._read_local_rows()):
+                if row.get("kind") == "feedback_event" and row.get("_local_key") == feedback_id:
+                    return dict(row)
+            return None
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select feedback_id, project, document_version_id, stage,
+                       anchor_requirement_id, anchor_story_id, comment_text,
+                       verdict, reason, created_ids, run_id
+                from feedback_events
+                where feedback_id = %s
+                """,
+                (feedback_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        created_ids = row[9]
+        if not isinstance(created_ids, list):
+            created_ids = json.loads(created_ids)
+        return {
+            "feedback_id": row[0],
+            "project": row[1],
+            "document_version_id": row[2],
+            "stage": row[3],
+            "anchor_requirement_id": row[4],
+            "anchor_story_id": row[5],
+            "comment_text": row[6],
+            "verdict": row[7],
+            "reason": row[8],
+            "created_ids": created_ids,
+            "run_id": row[10],
+        }
 
     def _persist_requirement_ledger_postgres(
         self,
