@@ -21,7 +21,7 @@ def run_marag_command(
     timeout_seconds: int = 1800,
     expect_json: bool = False,
 ) -> CliRunResult:
-    command = ["uv", "run", "marag", *args]
+    command = ["uv", "run", "python", "-m", "multi_agentic_graph_rag", *args]
 
     try:
         completed = subprocess.run(
