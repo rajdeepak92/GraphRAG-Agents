@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, TypedDict
 
+from common_defs import ModeName, ProviderName, RuntimeCommand
 from langgraph.graph import END, StateGraph
 
 from multi_agentic_graph_rag.agents.requirement_discovery_agent import RequirementDiscoveryAgent
@@ -412,7 +413,7 @@ def run_ingestion(
         with command_session(
             project=request.project,
             version=request.version,
-            command="ingest",
+            command=RuntimeCommand.INGEST.value,
             run_id=generated_run_id,
         ) as managed_session:
             return run_ingestion(request, session=managed_session)
@@ -445,9 +446,9 @@ def _ingest_run_dir(settings: AppSettings, project: str, run_identifier: str) ->
 
 
 def _validate_required_ingest_stack(settings: AppSettings) -> None:
-    invalid_reasoning = {"local_heuristic"}
-    invalid_embedding = {"local_hash"}
-    invalid_reranker = {"none"}
+    invalid_reasoning = {ProviderName.LOCAL_HEURISTIC.value}
+    invalid_embedding = {ProviderName.LOCAL_HASH.value}
+    invalid_reranker = {ProviderName.NONE.value}
     if settings.reasoning_model.provider in invalid_reasoning:
         raise ConfigurationError(
             f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} is not valid for ingest"
@@ -460,9 +461,9 @@ def _validate_required_ingest_stack(settings: AppSettings) -> None:
         raise ConfigurationError(
             f"RERANKER_MODEL_PROVIDER={settings.reranker_model.provider} is not valid for ingest"
         )
-    if settings.postgres.mode != "postgres":
+    if settings.postgres.mode != ModeName.POSTGRES.value:
         raise ConfigurationError("POSTGRES_MODE=postgres is required for ingest")
-    if settings.neo4j.mode != "neo4j":
+    if settings.neo4j.mode != ModeName.NEO4J.value:
         raise ConfigurationError("NEO4J_MODE=neo4j is required for ingest")
 
 

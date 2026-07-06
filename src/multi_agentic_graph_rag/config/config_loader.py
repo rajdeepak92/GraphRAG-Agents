@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from common_defs import EnvVar, ModeName, PathDef, ProviderName
+
 from multi_agentic_graph_rag.config.huggingface_env import (
     env_bool,
     env_positive_int,
@@ -90,7 +92,7 @@ def load_config(
     env_file_values = _read_dotenv(root / ".env")
     env = {**env_file_values, **os.environ}
     huggingface_token = first_huggingface_token(env)
-    huggingface_offline = env_bool(env.get("HUGGINGFACE_OFFLINE"), default=False)
+    huggingface_offline = env_bool(env.get(EnvVar.HUGGINGFACE_OFFLINE.value), default=False)
 
     if cli_overrides:
         config_data = _deep_update(config_data, cli_overrides)
@@ -99,43 +101,64 @@ def load_config(
         project_root=root,
         global_cache_dir=Path(
             env.get(
-                "GLOBAL_CACHE_DIR",
-                _cfg_path(root, config_data, "global_cache_dir", ".global_cache"),
+                EnvVar.GLOBAL_CACHE_DIR.value,
+                _cfg_path(root, config_data, "global_cache_dir", PathDef.GLOBAL_CACHE_DIR.value),
             )
         ),
         documents_inbox_dir=Path(
             env.get(
-                "DOCUMENTS_INBOX_DIR",
-                _cfg_path(root, config_data, "documents_inbox_dir", "documents/inbox"),
+                EnvVar.DOCUMENTS_INBOX_DIR.value,
+                _cfg_path(
+                    root,
+                    config_data,
+                    "documents_inbox_dir",
+                    PathDef.DOCUMENTS_INBOX_DIR.value,
+                ),
             )
         ),
         generated_requirements_dir=Path(
             env.get(
-                "GENERATED_REQUIREMENTS_DIR",
-                _cfg_path(root, config_data, "generated_requirements_dir", "generated"),
+                EnvVar.GENERATED_REQUIREMENTS_DIR.value,
+                _cfg_path(
+                    root,
+                    config_data,
+                    "generated_requirements_dir",
+                    PathDef.GENERATED_REQUIREMENTS_DIR.value,
+                ),
             )
         ),
         chroma_persist_dir=Path(
             env.get(
-                "CHROMA_PERSIST_DIR",
-                _cfg_path(root, config_data, "chroma_persist_dir", "runtime/databases/chroma"),
+                EnvVar.CHROMA_PERSIST_DIR.value,
+                _cfg_path(
+                    root,
+                    config_data,
+                    "chroma_persist_dir",
+                    PathDef.CHROMA_DB_PATH.value,
+                ),
             )
         ),
         runtime_staging_dir=Path(
             env.get(
-                "RUNTIME_STAGING_DIR",
-                _cfg_path(root, config_data, "runtime_staging_dir", "runtime/staging"),
+                EnvVar.RUNTIME_STAGING_DIR.value,
+                _cfg_path(
+                    root,
+                    config_data,
+                    "runtime_staging_dir",
+                    PathDef.RUNTIME_STAGING_DIR.value,
+                ),
             )
         ),
         runtime_logs_dir=Path(
             env.get(
-                "RUNTIME_LOGS_DIR", _cfg_path(root, config_data, "runtime_logs_dir", "runtime/logs")
+                EnvVar.RUNTIME_LOGS_DIR.value,
+                _cfg_path(root, config_data, "runtime_logs_dir", PathDef.RUNTIME_LOGS_DIR.value),
             )
         ),
         runtime_locks_dir=Path(
             env.get(
-                "RUNTIME_LOCKS_DIR",
-                _cfg_path(root, config_data, "runtime_locks_dir", "runtime/locks"),
+                EnvVar.RUNTIME_LOCKS_DIR.value,
+                _cfg_path(root, config_data, "runtime_locks_dir", PathDef.RUNTIME_LOCKS_DIR.value),
             )
         ),
     )
@@ -155,28 +178,31 @@ def load_config(
         default=1,
     )
     discovery_batch_size = env_positive_int(
-        env.get("DISCOVERY_BATCH_SIZE") or env.get("HUGGINGFACE_DISCOVERY_BATCH_SIZE"),
+        env.get(EnvVar.DISCOVERY_BATCH_SIZE.value)
+        or env.get(EnvVar.HUGGINGFACE_DISCOVERY_BATCH_SIZE.value),
         default=configured_discovery_batch_size,
     )
     log_llm_responses = env_bool(
-        env.get("LOG_LLM_RESPONSES"),
+        env.get(EnvVar.LOG_LLM_RESPONSES.value),
         default=bool(discovery_cfg.get("log_llm_responses", False)),
     )
 
     user_story_cfg = config_data.get("user_story", {})
     user_story_max_new_tokens = _optional_positive_int(
-        env.get("USER_STORY_MAX_NEW_TOKENS", user_story_cfg.get("max_new_tokens"))
+        env.get(EnvVar.USER_STORY_MAX_NEW_TOKENS.value, user_story_cfg.get("max_new_tokens"))
     )
     user_story = UserStorySettings(
-        top_k=_positive_int(env.get("USER_STORY_TOP_K", user_story_cfg.get("top_k")), default=4),
+        top_k=_positive_int(
+            env.get(EnvVar.USER_STORY_TOP_K.value, user_story_cfg.get("top_k")), default=4
+        ),
         dense_k=_positive_int(
-            env.get("USER_STORY_DENSE_K", user_story_cfg.get("dense_k")), default=8
+            env.get(EnvVar.USER_STORY_DENSE_K.value, user_story_cfg.get("dense_k")), default=8
         ),
         sparse_k=_positive_int(
-            env.get("USER_STORY_SPARSE_K", user_story_cfg.get("sparse_k")), default=8
+            env.get(EnvVar.USER_STORY_SPARSE_K.value, user_story_cfg.get("sparse_k")), default=8
         ),
         neighbor_window=_positive_int(
-            env.get("USER_STORY_NEIGHBOR_WINDOW", user_story_cfg.get("neighbor_window")),
+            env.get(EnvVar.USER_STORY_NEIGHBOR_WINDOW.value, user_story_cfg.get("neighbor_window")),
             default=1,
         ),
         max_new_tokens=user_story_max_new_tokens,
@@ -184,20 +210,29 @@ def load_config(
 
     test_scenario_cfg = config_data.get("test_scenario", {})
     test_scenario_max_new_tokens = _optional_positive_int(
-        env.get("TEST_SCENARIO_MAX_NEW_TOKENS", test_scenario_cfg.get("max_new_tokens"))
+        env.get(
+            EnvVar.TEST_SCENARIO_MAX_NEW_TOKENS.value,
+            test_scenario_cfg.get("max_new_tokens"),
+        )
     )
     test_scenario = TestScenarioSettings(
         top_k=_positive_int(
-            env.get("TEST_SCENARIO_TOP_K", test_scenario_cfg.get("top_k")), default=4
+            env.get(EnvVar.TEST_SCENARIO_TOP_K.value, test_scenario_cfg.get("top_k")),
+            default=4,
         ),
         dense_k=_positive_int(
-            env.get("TEST_SCENARIO_DENSE_K", test_scenario_cfg.get("dense_k")), default=8
+            env.get(EnvVar.TEST_SCENARIO_DENSE_K.value, test_scenario_cfg.get("dense_k")),
+            default=8,
         ),
         sparse_k=_positive_int(
-            env.get("TEST_SCENARIO_SPARSE_K", test_scenario_cfg.get("sparse_k")), default=8
+            env.get(EnvVar.TEST_SCENARIO_SPARSE_K.value, test_scenario_cfg.get("sparse_k")),
+            default=8,
         ),
         neighbor_window=_positive_int(
-            env.get("TEST_SCENARIO_NEIGHBOR_WINDOW", test_scenario_cfg.get("neighbor_window")),
+            env.get(
+                EnvVar.TEST_SCENARIO_NEIGHBOR_WINDOW.value,
+                test_scenario_cfg.get("neighbor_window"),
+            ),
             default=1,
         ),
         max_new_tokens=test_scenario_max_new_tokens,
@@ -205,40 +240,50 @@ def load_config(
 
     settings = AppSettings(
         app_env=env.get(
-            "APP_ENV", config_data.get("application", {}).get("app_env", "development")
+            EnvVar.APP_ENV.value, config_data.get("application", {}).get("app_env", "development")
         ),
-        log_level=env.get("LOG_LEVEL", config_data.get("application", {}).get("log_level", "INFO")),
+        log_level=env.get(
+            EnvVar.LOG_LEVEL.value, config_data.get("application", {}).get("log_level", "INFO")
+        ),
         paths=paths,
         reasoning_model=ModelSection(
             provider=env.get(
-                "REASONING_MODEL_PROVIDER",
-                env.get("REASONING_LLM_PROVIDER", reasoning_cfg.get("provider", "huggingface")),
+                EnvVar.REASONING_MODEL_PROVIDER.value,
+                env.get(
+                    EnvVar.REASONING_LLM_PROVIDER.value,
+                    reasoning_cfg.get("provider", ProviderName.HUGGINGFACE.value),
+                ),
             ),
             model=env.get(
-                "HUGGINGFACE_REASONING_MODEL",
+                EnvVar.HUGGINGFACE_REASONING_MODEL.value,
                 reasoning_cfg.get("model", "Qwen/Qwen2.5-Coder-7B-Instruct"),
             ),
             deployment=env.get(
-                "AZURE_OPENAI_REASONING_DEPLOYMENT", reasoning_cfg.get("deployment")
+                EnvVar.AZURE_OPENAI_REASONING_DEPLOYMENT.value, reasoning_cfg.get("deployment")
             ),
         ),
         embedding_model=ModelSection(
             provider=env.get(
-                "EMBEDDING_MODEL_PROVIDER",
-                env.get("EMBEDDING_PROVIDER", embedding_cfg.get("provider", "huggingface")),
+                EnvVar.EMBEDDING_MODEL_PROVIDER.value,
+                env.get(
+                    EnvVar.EMBEDDING_PROVIDER.value,
+                    embedding_cfg.get("provider", ProviderName.HUGGINGFACE.value),
+                ),
             ),
-            model=env.get("HUGGINGFACE_EMBEDDING_MODEL", embedding_cfg.get("model", "BAAI/bge-m3")),
+            model=env.get(
+                EnvVar.HUGGINGFACE_EMBEDDING_MODEL.value, embedding_cfg.get("model", "BAAI/bge-m3")
+            ),
             deployment=env.get(
-                "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", embedding_cfg.get("deployment")
+                EnvVar.AZURE_OPENAI_EMBEDDING_DEPLOYMENT.value, embedding_cfg.get("deployment")
             ),
         ),
         reranker_model=ModelSection(
             provider=env.get(
-                "RERANKER_MODEL_PROVIDER",
-                reranker_cfg.get("provider", "huggingface"),
+                EnvVar.RERANKER_MODEL_PROVIDER.value,
+                reranker_cfg.get("provider", ProviderName.HUGGINGFACE.value),
             ),
             model=env.get(
-                "HUGGINGFACE_RERANKER_MODEL",
+                EnvVar.HUGGINGFACE_RERANKER_MODEL.value,
                 reranker_cfg.get("model", "BAAI/bge-reranker-base"),
             ),
         ),
@@ -248,9 +293,11 @@ def load_config(
             log_llm_responses=log_llm_responses,
         ),
         postgres=PostgresSettings(
-            mode=env.get("POSTGRES_MODE", postgres_cfg.get("mode", "postgres")),
+            mode=env.get(
+                EnvVar.POSTGRES_MODE.value, postgres_cfg.get("mode", ModeName.POSTGRES.value)
+            ),
             dsn=env.get(
-                "POSTGRES_DSN",
+                EnvVar.POSTGRES_DSN.value,
                 postgres_cfg.get("dsn", "postgresql://marag:marag@127.0.0.1:5432/marag"),
             ),
             local_path=Path(
@@ -258,11 +305,11 @@ def load_config(
             ),
         ),
         neo4j=Neo4jSettings(
-            mode=env.get("NEO4J_MODE", neo4j_cfg.get("mode", "neo4j")),
-            uri=env.get("NEO4J_URI", neo4j_cfg.get("uri", "bolt://127.0.0.1:7687")),
-            username=env.get("NEO4J_USERNAME", neo4j_cfg.get("username", "neo4j")),
-            password=env.get("NEO4J_PASSWORD", neo4j_cfg.get("password", "")),
-            database=env.get("NEO4J_DATABASE", neo4j_cfg.get("database", "neo4j")),
+            mode=env.get(EnvVar.NEO4J_MODE.value, neo4j_cfg.get("mode", ModeName.NEO4J.value)),
+            uri=env.get(EnvVar.NEO4J_URI.value, neo4j_cfg.get("uri", "bolt://127.0.0.1:7687")),
+            username=env.get(EnvVar.NEO4J_USERNAME.value, neo4j_cfg.get("username", "neo4j")),
+            password=env.get(EnvVar.NEO4J_PASSWORD.value, neo4j_cfg.get("password", "")),
+            database=env.get(EnvVar.NEO4J_DATABASE.value, neo4j_cfg.get("database", "neo4j")),
             local_path=Path(
                 neo4j_cfg.get("local_path", paths.runtime_staging_dir / "neo4j_projection.jsonl")
             ),
@@ -271,21 +318,25 @@ def load_config(
         user_story=user_story,
         test_scenario=test_scenario,
         azure_openai=AzureOpenAISettings(
-            endpoint=env.get("AZURE_OPENAI_ENDPOINT", ""),
-            api_key=env.get("AZURE_OPENAI_API_KEY", ""),
-            api_version=env.get("AZURE_OPENAI_API_VERSION", "2024-10-21"),
-            reasoning_deployment=env.get("AZURE_OPENAI_REASONING_DEPLOYMENT", ""),
-            embedding_deployment=env.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", ""),
+            endpoint=env.get(EnvVar.AZURE_OPENAI_ENDPOINT.value, ""),
+            api_key=env.get(EnvVar.AZURE_OPENAI_API_KEY.value, ""),
+            api_version=env.get(EnvVar.AZURE_OPENAI_API_VERSION.value, "2024-10-21"),
+            reasoning_deployment=env.get(EnvVar.AZURE_OPENAI_REASONING_DEPLOYMENT.value, ""),
+            embedding_deployment=env.get(EnvVar.AZURE_OPENAI_EMBEDDING_DEPLOYMENT.value, ""),
         ),
         huggingface=HuggingFaceSettings(
             token=huggingface_token,
             reasoning_model=env.get(
-                "HUGGINGFACE_REASONING_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"
+                EnvVar.HUGGINGFACE_REASONING_MODEL.value, "Qwen/Qwen2.5-Coder-7B-Instruct"
             ),
-            embedding_model=env.get("HUGGINGFACE_EMBEDDING_MODEL", "BAAI/bge-m3"),
-            reranker_model=env.get("HUGGINGFACE_RERANKER_MODEL", "BAAI/bge-reranker-base"),
+            embedding_model=env.get(EnvVar.HUGGINGFACE_EMBEDDING_MODEL.value, "BAAI/bge-m3"),
+            reranker_model=env.get(
+                EnvVar.HUGGINGFACE_RERANKER_MODEL.value, "BAAI/bge-reranker-base"
+            ),
             offline=huggingface_offline,
-            max_new_tokens=env_positive_int(env.get("HUGGINGFACE_MAX_NEW_TOKENS"), default=4096),
+            max_new_tokens=env_positive_int(
+                env.get(EnvVar.HUGGINGFACE_MAX_NEW_TOKENS.value), default=4096
+            ),
             discovery_batch_size=discovery_batch_size,
             log_llm_responses=log_llm_responses,
         ),

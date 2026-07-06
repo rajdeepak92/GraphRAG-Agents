@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from common_defs import IdentifierPrefix, PathDef, RuntimeCommand
+
 from multi_agentic_graph_rag.observability.logging import RunLogger, session_slug
 
 
@@ -37,7 +39,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _command_run_id(command: str) -> str:
     timestamp = _utc_stamp().replace("-", "")
-    return f"RUN-{timestamp}-{session_slug(command).upper()}"
+    return f"{IdentifierPrefix.RUN.value}{timestamp}-{session_slug(command).upper()}"
 
 
 @dataclass
@@ -73,18 +75,22 @@ class RunSession:
         project_name = project if project == "_system" else session_slug(project)
         version_name = session_slug(version)
         stamp = f"{_utc_stamp()}_{project_name}_{version_name}_{run_id}"
-        if command == "ingest":
-            run_dir = root / "generated" / project_name / "req" / run_id
+        if command == RuntimeCommand.INGEST.value:
+            run_dir = (
+                root / PathDef.GENERATED_REQUIREMENTS_DIR.value / project_name / "req" / run_id
+            )
             log_path = run_dir / "run.log"
             jsonl_path = run_dir / "run.jsonl"
             req_path = run_dir / "requirements.json"
-        elif command == "feedback":
-            run_dir = root / "generated" / project_name / "feedback" / run_id
+        elif command == RuntimeCommand.FEEDBACK.value:
+            run_dir = (
+                root / PathDef.GENERATED_REQUIREMENTS_DIR.value / project_name / "feedback" / run_id
+            )
             log_path = run_dir / "run.log"
             jsonl_path = run_dir / "run.jsonl"
             req_path = run_dir / "run.json"
         else:
-            run_dir = root / ".generated" / project_name / "run"
+            run_dir = root / PathDef.LEGACY_GENERATED_DIR.value / project_name / "run"
             log_path = run_dir / f"run_{stamp}.log"
             jsonl_path = run_dir / f"run_{stamp}.jsonl"
             req_path = run_dir / f"req_{stamp}.json"
@@ -257,12 +263,12 @@ def command_run_id(command: str) -> str:
 
 
 def find_run_jsonl(project_root: Path, run_id: str) -> Path | None:
-    generated_root = project_root / "generated"
+    generated_root = project_root / PathDef.GENERATED_REQUIREMENTS_DIR.value
     if generated_root.exists():
         matches = sorted(generated_root.glob(f"*/req/{run_id}/run.jsonl"))
         if matches:
             return matches[-1]
-    legacy_generated_root = project_root / ".generated"
+    legacy_generated_root = project_root / PathDef.LEGACY_GENERATED_DIR.value
     if legacy_generated_root.exists():
         matches = sorted(legacy_generated_root.glob(f"*/run/run_*{run_id}*.jsonl"))
         if matches:

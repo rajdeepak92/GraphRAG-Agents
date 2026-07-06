@@ -6,6 +6,10 @@ import json
 import re
 from typing import Any
 
+from multi_agentic_graph_rag.common_prompt_defs import (
+    PromptSharedFragments,
+    PromptTestScenarioGeneration,
+)
 from multi_agentic_graph_rag.domain.errors import (
     ModelOutputError,
     TestScenarioValidationError,
@@ -239,62 +243,25 @@ def _build_test_scenario_prompt(
     feedback = ""
     if validation_error:
         feedback = (
-            "Previous output failed validation. Return one corrected JSON object only.\n"
+            f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
             "Every title, description, and expected_result must be a complete, descriptive "
             "phrase of at least two words. Preconditions must be non-empty and scenario "
             "titles must be unique per story.\n"
-            f"Validation error: {validation_error}\n\n"
+            f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )
 
     directive_block = ""
     if reviewer_directive:
         directive_block = (
-            "=== Reviewer directive (human feedback) ===\n"
+            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_HEADER.value}\n"
             f"{reviewer_directive.strip()}\n"
-            "Generate ONLY the additional test scenario or scenarios the reviewer asked "
-            "for, grounded strictly in the user story, linked requirement, and retrieved "
-            "context below. Do not restate or duplicate scenarios that already exist.\n"
-            "=== End reviewer directive ===\n\n"
+            f"{PromptSharedFragments.GENERATE_ONLY_ADDITIONAL_TEST_SCENARIOS.value}\n"
+            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_FOOTER.value}\n\n"
         )
 
     return (
-        "You are a senior QA engineer generating implementation-ready test scenarios "
-        "for exactly one approved user story.\n"
-        "Return exactly one valid JSON object and no other text. Do not include markdown, "
-        "code fences, commentary, XML tags, hidden reasoning, or explanations.\n\n"
+        f"{PromptTestScenarioGeneration.PROMPT_TEST_SCENARIO_GENERATION.value}"
         f"{feedback}"
-        "Output schema:\n"
-        "{\n"
-        '  "test_scenarios": [\n'
-        "    {\n"
-        '      "scenario_id": "SC1",\n'
-        '      "title": "...",\n'
-        '      "description": "...",\n'
-        '      "scenario_type": "Positive | Negative | Boundary | Alternative | '
-        'Exception | Performance | Security | Usability",\n'
-        '      "preconditions": ["..."],\n'
-        '      "expected_result": "...",\n'
-        '      "priority": "High | Medium | Low",\n'
-        '      "confidence": 0.85\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "Rules:\n"
-        "Cover every acceptance criterion in the user story with one or more scenarios.\n"
-        "Expand each seed hint from test_scenario_hints into a full scenario when it is "
-        "consistent with the user story, linked requirement, and retrieved context.\n"
-        "Use negative, boundary, and exception scenarios only when they are supported by "
-        "the provided text.\n"
-        "Use temporary scenario_id values such as SC1 and SC2. Python replaces them with "
-        "permanent SC- ids.\n"
-        "scenario_type must be exactly one of Positive, Negative, Boundary, Alternative, "
-        "Exception, Performance, Security, or Usability.\n"
-        "confidence must be a number from 0.0 to 1.0.\n"
-        "Derive scenarios ONLY from the user story, linked requirement, and retrieved "
-        "context below. Do not invent domain facts, thresholds, integrations, or actors "
-        "that are not supported by that text.\n"
-        "Prefer the source text's numbers, limits, and terminology verbatim when they "
-        "appear.\n\n"
         f"{directive_block}"
         f"User story:\n{story_json}\n\n"
         f"Linked requirement:\n{linked_requirement}\n\n"

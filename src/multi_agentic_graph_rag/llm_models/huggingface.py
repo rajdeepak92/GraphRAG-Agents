@@ -9,6 +9,7 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
+from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.config.settings import HuggingFaceSettings
 from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.llm_models.json_output import (
@@ -18,11 +19,7 @@ from multi_agentic_graph_rag.llm_models.json_output import (
 
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
-_DEFAULT_SYSTEM_MESSAGE = (
-    "You are a requirement discovery engine. Output exactly one JSON object matching "
-    "RequirementDiscoveryChunkOutput and nothing else. Do not include markdown, code "
-    "fences, XML tags, chain-of-thought, or explanatory text."
-)
+_DEFAULT_SYSTEM_MESSAGE = PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value
 
 
 class HuggingFaceReasoningModel:

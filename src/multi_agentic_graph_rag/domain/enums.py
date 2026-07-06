@@ -1,15 +1,6 @@
 """Domain enums."""
 
-from enum import StrEnum
+from common_defs import StatusName
 
-
-class RunStatus(StrEnum):
-    STARTED = "started"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class DocumentVersionStatus(StrEnum):
-    NEW = "new"
-    IDEMPOTENT = "idempotent"
-    REPLACED = "replaced"
+RunStatus = StatusName
+DocumentVersionStatus = StatusName

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, TypedDict
 
+from common_defs import ModeName, ProviderName, RuntimeCommand
 from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
@@ -96,7 +97,7 @@ def _validate_request(
         )
     if request.requirements_path is not None and not request.requirements_path.exists():
         raise FileNotFoundError(request.requirements_path)
-    rid = state.get("run_id") or command_run_id("user-stories")
+    rid = state.get("run_id") or command_run_id(RuntimeCommand.GENERATE_USER_STORIES.value)
     if logger is not None:
         logger.debug(
             "Validated user-story request",
@@ -433,8 +434,8 @@ def run_user_story_generation(
         with command_session(
             project=project,
             version=version,
-            command="user-stories",
-            run_id=command_run_id("user-stories"),
+            command=RuntimeCommand.GENERATE_USER_STORIES.value,
+            run_id=command_run_id(RuntimeCommand.GENERATE_USER_STORIES.value),
         ) as managed_session:
             return run_user_story_generation(request, session=managed_session)
     session.request_payload = request.model_dump(mode="json")
@@ -536,24 +537,24 @@ def _output_dir(
 
 
 def _validate_required_user_story_stack(settings: AppSettings) -> None:
-    if settings.reasoning_model.provider in {"local_heuristic"}:
+    if settings.reasoning_model.provider in {ProviderName.LOCAL_HEURISTIC.value}:
         raise ConfigurationError(
             f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} "
             "is not valid for user-story generation"
         )
-    if settings.embedding_model.provider in {"local_hash"}:
+    if settings.embedding_model.provider in {ProviderName.LOCAL_HASH.value}:
         raise ConfigurationError(
             f"EMBEDDING_MODEL_PROVIDER={settings.embedding_model.provider} "
             "is not valid for user-story generation"
         )
-    if settings.reranker_model.provider in {"none"}:
+    if settings.reranker_model.provider in {ProviderName.NONE.value}:
         raise ConfigurationError(
             f"RERANKER_MODEL_PROVIDER={settings.reranker_model.provider} "
             "is not valid for user-story generation"
         )
-    if settings.postgres.mode != "postgres":
+    if settings.postgres.mode != ModeName.POSTGRES.value:
         raise ConfigurationError("POSTGRES_MODE=postgres is required for user-story generation")
-    if settings.neo4j.mode != "neo4j":
+    if settings.neo4j.mode != ModeName.NEO4J.value:
         raise ConfigurationError("NEO4J_MODE=neo4j is required for user-story generation")
 
 

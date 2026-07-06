@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from common_defs import ModeName, ProviderName
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -35,13 +36,13 @@ class ChunkingSettings(BaseModel):
 
 
 class PostgresSettings(BaseModel):
-    mode: str = "postgres"
+    mode: str = ModeName.POSTGRES.value
     dsn: str = "postgresql://marag:marag@127.0.0.1:5432/marag"
     local_path: Path
 
 
 class Neo4jSettings(BaseModel):
-    mode: str = "neo4j"
+    mode: str = ModeName.NEO4J.value
     uri: str = "bolt://127.0.0.1:7687"
     username: str = "neo4j"
     password: str = ""
@@ -97,14 +98,18 @@ class AppSettings(BaseModel):
     paths: PathsSettings
     reasoning_model: ModelSection = Field(
         default_factory=lambda: ModelSection(
-            provider="huggingface", model="Qwen/Qwen2.5-Coder-7B-Instruct"
+            provider=ProviderName.HUGGINGFACE.value, model="Qwen/Qwen2.5-Coder-7B-Instruct"
         )
     )
     embedding_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(provider="huggingface", model="BAAI/bge-m3")
+        default_factory=lambda: ModelSection(
+            provider=ProviderName.HUGGINGFACE.value, model="BAAI/bge-m3"
+        )
     )
     reranker_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(provider="huggingface", model="BAAI/bge-reranker-base")
+        default_factory=lambda: ModelSection(
+            provider=ProviderName.HUGGINGFACE.value, model="BAAI/bge-reranker-base"
+        )
     )
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     postgres: PostgresSettings

@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from common_defs import IdentifierPrefix
+
 _SAFE = re.compile(r"[^A-Za-z0-9]+")
 
 
@@ -24,11 +26,13 @@ def safe_slug(value: str) -> str:
 def run_id(project: str, document: Path, version: str) -> str:
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     token = stable_token(project, document.name, version, timestamp, uuid4().hex, length=8)
-    return f"RUN-{timestamp}-{token}"
+    return f"{IdentifierPrefix.RUN.value}{timestamp}-{token}"
 
 
 def document_id(project: str, logical_name: str) -> str:
-    return f"DOC-{safe_slug(project)}-{stable_token(logical_name, length=10)}"
+    return (
+        f"{IdentifierPrefix.DOC.value}{safe_slug(project)}-{stable_token(logical_name, length=10)}"
+    )
 
 
 def document_version_id(document_identifier: str, version: str, checksum: str) -> str:
@@ -42,15 +46,20 @@ def chunk_id(document_version_identifier: str, ordinal: int, text: str) -> str:
 
 
 def fact_id(project: str, version: str, text: str, ordinal: int) -> str:
-    return f"FACT-{stable_token(project, version, text, ordinal, length=14)}"
+    return (
+        f"{IdentifierPrefix.FACT.value}{stable_token(project, version, text, ordinal, length=14)}"
+    )
 
 
 def requirement_id(project: str, version: str, text: str, ordinal: int) -> str:
-    return f"REQ-{stable_token(project, version, text, ordinal, length=14)}"
+    return f"{IdentifierPrefix.REQ.value}{stable_token(project, version, text, ordinal, length=14)}"
 
 
 def canonical_fact_id(project: str, document_identifier: str, normalized_text: str) -> str:
-    return f"FACTCAN-{stable_token(project, document_identifier, normalized_text, length=14)}"
+    return (
+        f"{IdentifierPrefix.FACTCAN.value}"
+        f"{stable_token(project, document_identifier, normalized_text, length=14)}"
+    )
 
 
 def fact_occurrence_id(
@@ -73,7 +82,7 @@ def fact_occurrence_id(
         end_char,
         length=14,
     )
-    return f"FACT-{token}"
+    return f"{IdentifierPrefix.FACT.value}{token}"
 
 
 def requirement_lineage_id(
@@ -81,11 +90,17 @@ def requirement_lineage_id(
     document_identifier: str,
     requirement_key: str,
 ) -> str:
-    return f"REQ-{stable_token(project, document_identifier, requirement_key, length=14)}"
+    return (
+        f"{IdentifierPrefix.REQ.value}"
+        f"{stable_token(project, document_identifier, requirement_key, length=14)}"
+    )
 
 
 def requirement_revision_id(requirement_identifier: str, normalized_statement: str) -> str:
-    return f"REQREV-{stable_token(requirement_identifier, normalized_statement, length=14)}"
+    return (
+        f"{IdentifierPrefix.REQREV.value}"
+        f"{stable_token(requirement_identifier, normalized_statement, length=14)}"
+    )
 
 
 def requirement_evidence_id(
@@ -108,7 +123,7 @@ def requirement_evidence_id(
         end_char,
         length=14,
     )
-    return f"REQEVID-{token}"
+    return f"{IdentifierPrefix.REQEVID.value}{token}"
 
 
 def user_story_id(
@@ -124,7 +139,7 @@ def user_story_id(
         ordinal,
         length=14,
     )
-    return f"US-{token}"
+    return f"{IdentifierPrefix.US.value}{token}"
 
 
 def test_scenario_id(
@@ -140,7 +155,7 @@ def test_scenario_id(
         ordinal,
         length=14,
     )
-    return f"SC-{token}"
+    return f"{IdentifierPrefix.SC.value}{token}"
 
 
 test_scenario_id.__test__ = False  # type: ignore[attr-defined]
@@ -161,7 +176,7 @@ def feedback_id(
         anchor_identifier,
         length=14,
     )
-    return f"FDBK-{token}"
+    return f"{IdentifierPrefix.FDBK.value}{token}"
 
 
 def requirement_delta_event_id(
@@ -180,4 +195,4 @@ def requirement_delta_event_id(
         document_version_identifier,
         length=14,
     )
-    return f"REQDELTA-{token}"
+    return f"{IdentifierPrefix.REQDELTA.value}{token}"

@@ -11,6 +11,7 @@ from typing import Annotated, Any
 from urllib.parse import urlparse
 
 import typer
+from common_defs import EnvVar, RuntimeCommand
 from rich.console import Console
 from rich.table import Table
 
@@ -74,8 +75,8 @@ def version_command() -> None:
     with command_session(
         project="_system",
         version=__version__,
-        command="version",
-        run_id=command_run_id("version"),
+        command=RuntimeCommand.VERSION.value,
+        run_id=command_run_id(RuntimeCommand.VERSION.value),
     ) as session:
         session.logger.info(
             "Reporting version {version}",
@@ -93,8 +94,8 @@ def config_check(
     with command_session(
         project="_system",
         version=__version__,
-        command="config-check",
-        run_id=command_run_id("config-check"),
+        command=RuntimeCommand.CONFIG_CHECK.value,
+        run_id=command_run_id(RuntimeCommand.CONFIG_CHECK.value),
     ) as session:
         settings = load_config(config_path=config)
         session.set_log_level(settings.log_level)
@@ -144,8 +145,8 @@ def hf_check(
     with command_session(
         project="_system",
         version=__version__,
-        command="hf-check",
-        run_id=command_run_id("hf-check"),
+        command=RuntimeCommand.HF_CHECK.value,
+        run_id=command_run_id(RuntimeCommand.HF_CHECK.value),
     ) as session:
         settings = load_config(config_path=config)
         session.set_log_level(settings.log_level)
@@ -230,8 +231,8 @@ def doctor() -> None:
     with command_session(
         project="_system",
         version=__version__,
-        command="doctor",
-        run_id=command_run_id("doctor"),
+        command=RuntimeCommand.DOCTOR.value,
+        run_id=command_run_id(RuntimeCommand.DOCTOR.value),
     ) as session:
         settings = load_config()
         session.set_log_level(settings.log_level)
@@ -250,8 +251,8 @@ def db_check() -> None:
     with command_session(
         project="_system",
         version=__version__,
-        command="db-check",
-        run_id=command_run_id("db-check"),
+        command=RuntimeCommand.DB_CHECK.value,
+        run_id=command_run_id(RuntimeCommand.DB_CHECK.value),
     ) as session:
         settings = load_config()
         session.set_log_level(settings.log_level)
@@ -296,15 +297,15 @@ def postgres_reset(
         bool,
         typer.Option(
             "--allow-nonlocal",
-            help="Allow reset when POSTGRES_DSN does not point to localhost.",
+            help=f"Allow reset when {EnvVar.POSTGRES_DSN.value} does not point to localhost.",
         ),
     ] = False,
 ) -> None:
     with command_session(
         project="_system",
         version=__version__,
-        command="postgres-reset",
-        run_id=command_run_id("postgres-reset"),
+        command=RuntimeCommand.POSTGRES_RESET.value,
+        run_id=command_run_id(RuntimeCommand.POSTGRES_RESET.value),
     ) as session:
         settings = load_config()
         session.set_log_level(settings.log_level)
@@ -314,7 +315,8 @@ def postgres_reset(
             host = _postgres_dsn_host(settings.postgres.dsn)
             if host not in {"", "localhost", "127.0.0.1", "::1"}:
                 raise typer.BadParameter(
-                    "POSTGRES_DSN is not local; pass --allow-nonlocal only if you intend that"
+                    f"{EnvVar.POSTGRES_DSN.value} is not local; "
+                    "pass --allow-nonlocal only if you intend that"
                 )
         detail = PostgresStore(settings).reset_schema()
         session.logger.warning(
@@ -340,7 +342,7 @@ def ingest(
     with command_session(
         project=project,
         version=version,
-        command="ingest",
+        command=RuntimeCommand.INGEST.value,
         run_id=run_id(project, document, version),
     ) as session:
         session.request_payload = {
@@ -421,8 +423,8 @@ def generate_user_stories(
     with command_session(
         project=resolved_project,
         version=resolved_version,
-        command="user-stories",
-        run_id=command_run_id("user-stories"),
+        command=RuntimeCommand.GENERATE_USER_STORIES.value,
+        run_id=command_run_id(RuntimeCommand.GENERATE_USER_STORIES.value),
     ) as session:
         session.request_payload = request.model_dump(mode="json")
         session.logger.info(
@@ -486,8 +488,8 @@ def generate_test_scenarios(
     with command_session(
         project=resolved_project,
         version=resolved_version,
-        command="test-scenarios",
-        run_id=command_run_id("test-scenarios"),
+        command=RuntimeCommand.GENERATE_TEST_SCENARIOS.value,
+        run_id=command_run_id(RuntimeCommand.GENERATE_TEST_SCENARIOS.value),
     ) as session:
         session.request_payload = request.model_dump(mode="json")
         session.logger.info(
@@ -527,8 +529,8 @@ def run_status(run_id_value: Annotated[str, typer.Argument()]) -> None:
     with command_session(
         project="_system",
         version=__version__,
-        command="run-status",
-        run_id=command_run_id("run-status"),
+        command=RuntimeCommand.RUN_STATUS.value,
+        run_id=command_run_id(RuntimeCommand.RUN_STATUS.value),
     ) as session:
         settings = load_config()
         session.set_log_level(settings.log_level)
@@ -573,8 +575,8 @@ def run_resume(run_id_value: Annotated[str, typer.Argument()]) -> None:
     with command_session(
         project="_system",
         version=__version__,
-        command="run-resume",
-        run_id=command_run_id("run-resume"),
+        command=RuntimeCommand.RUN_RESUME.value,
+        run_id=command_run_id(RuntimeCommand.RUN_RESUME.value),
     ) as session:
         settings = load_config()
         session.set_log_level(settings.log_level)
@@ -599,8 +601,8 @@ def artifact_verify(path: Annotated[Path, typer.Argument()]) -> None:
     with command_session(
         project="_system",
         version=__version__,
-        command="artifact-verify",
-        run_id=command_run_id("artifact-verify"),
+        command=RuntimeCommand.ARTIFACT_VERIFY.value,
+        run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY.value),
     ) as session:
         artifact = verify_requirement_artifact(path)
         session.logger.info(
@@ -623,8 +625,8 @@ def artifact_verify_user_stories(path: Annotated[Path, typer.Argument()]) -> Non
     with command_session(
         project="_system",
         version=__version__,
-        command="artifact-verify-user-stories",
-        run_id=command_run_id("artifact-verify-user-stories"),
+        command=RuntimeCommand.ARTIFACT_VERIFY_USER_STORIES.value,
+        run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY_USER_STORIES.value),
     ) as session:
         artifact = verify_user_story_artifact(path)
         session.logger.info(
@@ -647,8 +649,8 @@ def artifact_verify_test_scenarios(path: Annotated[Path, typer.Argument()]) -> N
     with command_session(
         project="_system",
         version=__version__,
-        command="artifact-verify-test-scenarios",
-        run_id=command_run_id("artifact-verify-test-scenarios"),
+        command=RuntimeCommand.ARTIFACT_VERIFY_TEST_SCENARIOS.value,
+        run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY_TEST_SCENARIOS.value),
     ) as session:
         artifact = verify_test_scenario_artifact(path)
         session.logger.info(
@@ -727,8 +729,8 @@ def _run_feedback_command(request: FeedbackRequest, *, json_output: bool) -> Non
     with command_session(
         project=resolved_project,
         version=resolved_version,
-        command="feedback",
-        run_id=command_run_id("feedback"),
+        command=RuntimeCommand.FEEDBACK.value,
+        run_id=command_run_id(RuntimeCommand.FEEDBACK.value),
     ) as session:
         session.request_payload = request.model_dump(mode="json")
         session.logger.info(

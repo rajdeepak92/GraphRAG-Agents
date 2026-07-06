@@ -1,17 +1,7 @@
 """Provider name constants."""
 
-from enum import StrEnum
+from common_defs import ProviderName
 
-
-class ReasoningProvider(StrEnum):
-    AZURE_OPENAI = "azure_openai"
-    HUGGINGFACE = "huggingface"
-
-
-class EmbeddingProvider(StrEnum):
-    AZURE_OPENAI = "azure_openai"
-    HUGGINGFACE = "huggingface"
-
-
-class RerankerProvider(StrEnum):
-    HUGGINGFACE = "huggingface"
+ReasoningProvider = ProviderName
+EmbeddingProvider = ProviderName
+RerankerProvider = ProviderName

@@ -5,8 +5,14 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-HF_TOKEN_ALIASES = ("HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN")
-HF_OFFLINE_FLAGS = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+from common_defs import EnvVar
+
+HF_TOKEN_ALIASES = (
+    EnvVar.HF_TOKEN.value,
+    EnvVar.HUGGINGFACE_TOKEN.value,
+    EnvVar.HUGGING_FACE_HUB_TOKEN.value,
+)
+HF_OFFLINE_FLAGS = (EnvVar.HF_HUB_OFFLINE.value, EnvVar.TRANSFORMERS_OFFLINE.value)
 
 
 def first_huggingface_token(env: Mapping[str, str]) -> str:

@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
+from common_defs import ModeName, ProviderName, RuntimeCommand
 from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
 from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGenerationAgent
+from multi_agentic_graph_rag.common_prompt_defs import PromptTestScenarioGeneration
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
@@ -115,7 +117,7 @@ def _validate_request(
         raise FileNotFoundError(request.user_stories_path)
     if request.requirements_path is not None and not request.requirements_path.exists():
         raise FileNotFoundError(request.requirements_path)
-    rid = state.get("run_id") or command_run_id("test-scenarios")
+    rid = state.get("run_id") or command_run_id(RuntimeCommand.GENERATE_TEST_SCENARIOS.value)
     if logger is not None:
         logger.debug(
             "Validated test-scenario request",
@@ -488,8 +490,8 @@ def run_test_scenario_generation(
         with command_session(
             project=project,
             version=version,
-            command="test-scenarios",
-            run_id=command_run_id("test-scenarios"),
+            command=RuntimeCommand.GENERATE_TEST_SCENARIOS.value,
+            run_id=command_run_id(RuntimeCommand.GENERATE_TEST_SCENARIOS.value),
         ) as managed_session:
             return run_test_scenario_generation(request, session=managed_session)
     session.request_payload = request.model_dump(mode="json")
@@ -743,35 +745,31 @@ def _output_dir(
 
 
 def _validate_required_test_scenario_stack(settings: AppSettings) -> None:
-    if settings.reasoning_model.provider in {"local_heuristic"}:
+    if settings.reasoning_model.provider in {ProviderName.LOCAL_HEURISTIC.value}:
         raise ConfigurationError(
             f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} "
             "is not valid for test-scenario generation"
         )
-    if settings.embedding_model.provider in {"local_hash"}:
+    if settings.embedding_model.provider in {ProviderName.LOCAL_HASH.value}:
         raise ConfigurationError(
             f"EMBEDDING_MODEL_PROVIDER={settings.embedding_model.provider} "
             "is not valid for test-scenario generation"
         )
-    if settings.reranker_model.provider in {"none"}:
+    if settings.reranker_model.provider in {ProviderName.NONE.value}:
         raise ConfigurationError(
             f"RERANKER_MODEL_PROVIDER={settings.reranker_model.provider} "
             "is not valid for test-scenario generation"
         )
-    if settings.postgres.mode != "postgres":
+    if settings.postgres.mode != ModeName.POSTGRES.value:
         raise ConfigurationError("POSTGRES_MODE=postgres is required for test-scenario generation")
-    if settings.neo4j.mode != "neo4j":
+    if settings.neo4j.mode != ModeName.NEO4J.value:
         raise ConfigurationError("NEO4J_MODE=neo4j is required for test-scenario generation")
 
 
 def _apply_test_scenario_system_message(reasoning_model: Any) -> None:
     setter = getattr(reasoning_model, "set_system_message", None)
     if callable(setter):
-        setter(
-            "You are a test scenario generation engine. Output exactly one JSON object "
-            "matching TestScenarioGenerationOutput and nothing else. Do not include markdown, "
-            "code fences, XML tags, chain-of-thought, or explanatory text."
-        )
+        setter(PromptTestScenarioGeneration.SYS_PROMPT_TEST_SCENARIO_GENERATION.value)
 
 
 def _check_store(logger: Any | None, step: str, check: Any) -> None:

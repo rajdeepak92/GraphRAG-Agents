@@ -6,8 +6,10 @@ import re
 from dataclasses import dataclass, field
 from re import Pattern
 
-REQUIREMENT_ID_RE = re.compile(r"\bREQ-[A-Z0-9][A-Z0-9-]*\b")
-STORY_ID_RE = re.compile(r"\bUS-[A-Z0-9][A-Z0-9-]*\b")
+from common_defs import IdentifierPrefix
+
+REQUIREMENT_ID_RE = re.compile(rf"\b{re.escape(IdentifierPrefix.REQ.value)}[A-Z0-9][A-Z0-9-]*\b")
+STORY_ID_RE = re.compile(rf"\b{re.escape(IdentifierPrefix.US.value)}[A-Z0-9][A-Z0-9-]*\b")
 
 
 @dataclass(frozen=True)

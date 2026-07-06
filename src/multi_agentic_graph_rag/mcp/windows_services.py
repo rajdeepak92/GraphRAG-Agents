@@ -7,6 +7,8 @@ import socket
 import subprocess
 import time
 
+from common_defs import EnvVar, ServiceName
+
 from multi_agentic_graph_rag.mcp.contracts import ServiceStatus
 
 
@@ -50,9 +52,9 @@ def get_windows_service_status(service_name: str) -> str:
 def start_windows_service(service_name: str) -> ServiceStatus:
     if not service_name:
         return ServiceStatus(
-            name="postgres_service",
+            name=ServiceName.POSTGRES_SERVICE.value,
             status="skipped",
-            detail="MARAG_POSTGRES_SERVICE_NAME is not configured",
+            detail=f"{EnvVar.MARAG_POSTGRES_SERVICE_NAME.value} is not configured",
         )
     if not is_windows():
         return ServiceStatus(
@@ -98,9 +100,9 @@ def start_windows_service(service_name: str) -> ServiceStatus:
 def stop_windows_service(service_name: str) -> ServiceStatus:
     if not service_name:
         return ServiceStatus(
-            name="postgres_service",
+            name=ServiceName.POSTGRES_SERVICE.value,
             status="skipped",
-            detail="MARAG_POSTGRES_SERVICE_NAME is not configured",
+            detail=f"{EnvVar.MARAG_POSTGRES_SERVICE_NAME.value} is not configured",
         )
     if not is_windows():
         return ServiceStatus(

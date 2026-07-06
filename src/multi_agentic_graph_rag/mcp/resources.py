@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from common_defs import EnvVar
+
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.mcp import service_manager
 from multi_agentic_graph_rag.mcp.artifact_index import find_latest_artifacts
@@ -20,12 +22,12 @@ from multi_agentic_graph_rag.observability.session import find_run_jsonl
 ProjectRootFactory = Callable[[], Path]
 
 SECRET_KEYS = {
-    "POSTGRES_DSN",
-    "NEO4J_PASSWORD",
-    "AZURE_OPENAI_API_KEY",
-    "HF_TOKEN",
-    "HUGGINGFACE_TOKEN",
-    "HUGGING_FACE_HUB_TOKEN",
+    EnvVar.POSTGRES_DSN.value,
+    EnvVar.NEO4J_PASSWORD.value,
+    EnvVar.AZURE_OPENAI_API_KEY.value,
+    EnvVar.HF_TOKEN.value,
+    EnvVar.HUGGINGFACE_TOKEN.value,
+    EnvVar.HUGGING_FACE_HUB_TOKEN.value,
 }
 
 
@@ -125,7 +127,7 @@ def _latest_artifact_payload(project_root: Path, project: str, key: str) -> str:
 
 
 def _mask_env_value(key: str, value: str) -> str:
-    if key == "POSTGRES_DSN":
+    if key == EnvVar.POSTGRES_DSN.value:
         return _mask_dsn(value)
     if key in SECRET_KEYS:
         return _mask_secret(value)

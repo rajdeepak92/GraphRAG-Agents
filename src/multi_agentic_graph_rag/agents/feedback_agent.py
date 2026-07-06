@@ -12,6 +12,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from multi_agentic_graph_rag.common_prompt_defs import (
+    PromptFeedbackGate,
+    PromptSharedFragments,
+)
 from multi_agentic_graph_rag.domain.errors import FeedbackValidationError, ModelOutputError
 from multi_agentic_graph_rag.domain.schemas import (
     FeedbackGateOutput,
@@ -152,31 +156,15 @@ def _build_gate_prompt(
     feedback = ""
     if validation_error:
         feedback = (
-            "Previous output failed validation. Return one corrected JSON object only.\n"
+            f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
             "supporting_chunk_ids must be a subset of the allowed chunk ids, and an "
             "'approve' verdict must cite at least one chunk id.\n"
-            f"Validation error: {validation_error}\n\n"
+            f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )
     return (
-        "You are a requirements reviewer gate deciding whether a human comment describes a "
-        "NEW, document-grounded work item to add.\n"
-        "Return exactly one valid JSON object and no other text. Do not include markdown, "
-        "code fences, commentary, XML tags, hidden reasoning, or explanations.\n\n"
+        f"{PromptFeedbackGate.SYS_PROMPT_FEEDBACK_GATE.value}"
         f"{feedback}"
-        "Output schema:\n"
-        "{\n"
-        '  "verdict": "approve | decline",\n'
-        '  "reason": "...",\n'
-        '  "supporting_chunk_ids": ["CHUNK-...."]\n'
-        "}\n\n"
-        "Rules:\n"
-        "Approve ONLY when the comment asks for a new item that is supported by the "
-        "retrieved context below and is not already covered by the anchor.\n"
-        "Decline when the request is destructive, ungrounded, or duplicates existing work.\n"
-        "supporting_chunk_ids MUST be chosen only from these allowed chunk ids: "
-        f"{allowed_ids}\n"
-        "An 'approve' verdict must cite at least one supporting chunk id. reason must be a "
-        "complete sentence.\n\n"
+        f"supporting_chunk_ids MUST be chosen only from these allowed chunk ids: {allowed_ids}\n"
         f"Reviewer comment:\n{comment}\n\n"
         f"Anchor requirement:\n{anchor_requirement_text}\n\n"
         f"{story_block}"

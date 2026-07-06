@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
+from common_defs import EnvVar, ModeName
+
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.mcp.cli_runner import CliExecutionError, run_marag_command
@@ -32,8 +34,8 @@ def check_marag_stack(project_root: Path) -> HealthReport:
     settings = _load_project_settings(root)
     checks: list[ServiceStatus] = []
 
-    if settings.postgres.mode == "postgres":
-        service_name = env.get("MARAG_POSTGRES_SERVICE_NAME", "")
+    if settings.postgres.mode == ModeName.POSTGRES.value:
+        service_name = env.get(EnvVar.MARAG_POSTGRES_SERVICE_NAME.value, "")
         if service_name:
             service_status = get_windows_service_status(service_name)
             checks.append(_service_status_from_raw(service_name, service_status))
@@ -56,20 +58,20 @@ def check_marag_stack(project_root: Path) -> HealthReport:
             )
         )
 
-    if settings.neo4j.mode == "neo4j":
+    if settings.neo4j.mode == ModeName.NEO4J.value:
         neo4j_host = _neo4j_host(settings)
         checks.append(
             _port_check(
                 "neo4j_http",
                 neo4j_host,
-                _int_env(env, "MARAG_NEO4J_HTTP_PORT", 7474),
+                _int_env(env, EnvVar.MARAG_NEO4J_HTTP_PORT.value, 7474),
             )
         )
         checks.append(
             _port_check(
                 "neo4j_bolt",
                 neo4j_host,
-                _int_env(env, "MARAG_NEO4J_BOLT_PORT", 7687),
+                _int_env(env, EnvVar.MARAG_NEO4J_BOLT_PORT.value, 7687),
             )
         )
     else:
@@ -99,9 +101,9 @@ def start_local_stack(project_root: Path) -> HealthReport:
     settings = _load_project_settings(root)
     checks: list[ServiceStatus] = []
 
-    if settings.postgres.mode == "postgres":
-        if _env_bool(env, "MARAG_POSTGRES_AUTO_START", default=False):
-            service_name = env.get("MARAG_POSTGRES_SERVICE_NAME", "")
+    if settings.postgres.mode == ModeName.POSTGRES.value:
+        if _env_bool(env, EnvVar.MARAG_POSTGRES_AUTO_START.value, default=False):
+            service_name = env.get(EnvVar.MARAG_POSTGRES_SERVICE_NAME.value, "")
             checks.append(start_windows_service(service_name))
         else:
             checks.append(
@@ -122,7 +124,7 @@ def start_local_stack(project_root: Path) -> HealthReport:
             )
         )
 
-    if settings.neo4j.mode == "neo4j":
+    if settings.neo4j.mode == ModeName.NEO4J.value:
         checks.extend(_start_neo4j(root, settings, env))
     else:
         checks.append(
@@ -149,7 +151,7 @@ def stop_local_stack(project_root: Path) -> HealthReport:
     root = project_root.resolve()
     env = read_project_env(root)
     checks: list[ServiceStatus] = []
-    if not _env_bool(env, "MARAG_ALLOW_SERVICE_STOP", default=False):
+    if not _env_bool(env, EnvVar.MARAG_ALLOW_SERVICE_STOP.value, default=False):
         checks.append(
             ServiceStatus(
                 name="service_stop",
@@ -159,8 +161,8 @@ def stop_local_stack(project_root: Path) -> HealthReport:
         )
         return _remember(HealthReport(overall_status="warn", checks=checks))
 
-    if _env_bool(env, "MARAG_POSTGRES_ALLOW_STOP", default=False):
-        checks.append(stop_windows_service(env.get("MARAG_POSTGRES_SERVICE_NAME", "")))
+    if _env_bool(env, EnvVar.MARAG_POSTGRES_ALLOW_STOP.value, default=False):
+        checks.append(stop_windows_service(env.get(EnvVar.MARAG_POSTGRES_SERVICE_NAME.value, "")))
     else:
         checks.append(
             ServiceStatus(
@@ -197,12 +199,12 @@ def read_project_env(project_root: Path) -> dict[str, str]:
 def _start_neo4j(root: Path, settings: AppSettings, env: dict[str, str]) -> list[ServiceStatus]:
     checks: list[ServiceStatus] = []
     host = _neo4j_host(settings)
-    bolt_port = _int_env(env, "MARAG_NEO4J_BOLT_PORT", 7687)
-    http_port = _int_env(env, "MARAG_NEO4J_HTTP_PORT", 7474)
+    bolt_port = _int_env(env, EnvVar.MARAG_NEO4J_BOLT_PORT.value, 7687)
+    http_port = _int_env(env, EnvVar.MARAG_NEO4J_HTTP_PORT.value, 7474)
 
     if test_tcp_port(host, bolt_port, timeout_seconds=1.0):
         checks.append(ServiceStatus(name="neo4j_bolt", status="pass", detail="already listening"))
-    elif not _env_bool(env, "MARAG_NEO4J_AUTO_START", default=False):
+    elif not _env_bool(env, EnvVar.MARAG_NEO4J_AUTO_START.value, default=False):
         checks.append(
             ServiceStatus(
                 name="neo4j",
@@ -211,8 +213,8 @@ def _start_neo4j(root: Path, settings: AppSettings, env: dict[str, str]) -> list
             )
         )
     else:
-        mode = env.get("MARAG_NEO4J_START_MODE", "desktop_dbms")
-        if mode != "desktop_dbms":
+        mode = env.get(EnvVar.MARAG_NEO4J_START_MODE.value, ModeName.DESKTOP_DBMS.value)
+        if mode != ModeName.DESKTOP_DBMS.value:
             checks.append(
                 ServiceStatus(
                     name="neo4j",
@@ -303,8 +305,8 @@ def _db_check(project_root: Path) -> ServiceStatus:
 
 def _postgres_host_port(settings: AppSettings, env: dict[str, str]) -> tuple[str, int]:
     parsed = urlparse(settings.postgres.dsn)
-    host = env.get("MARAG_POSTGRES_HOST") or parsed.hostname or "127.0.0.1"
-    port = _int_env(env, "MARAG_POSTGRES_PORT", parsed.port or 5432)
+    host = env.get(EnvVar.MARAG_POSTGRES_HOST.value) or parsed.hostname or "127.0.0.1"
+    port = _int_env(env, EnvVar.MARAG_POSTGRES_PORT.value, parsed.port or 5432)
     return host, port
 
 

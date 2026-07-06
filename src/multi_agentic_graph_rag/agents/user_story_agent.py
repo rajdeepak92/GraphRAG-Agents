@@ -6,6 +6,10 @@ import json
 import re
 from typing import Any
 
+from multi_agentic_graph_rag.common_prompt_defs import (
+    PromptSharedFragments,
+    PromptUserStoryGeneration,
+)
 from multi_agentic_graph_rag.domain.errors import ModelOutputError, UserStoryValidationError
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
@@ -216,67 +220,24 @@ def _build_user_story_prompt(
     feedback = ""
     if validation_error:
         feedback = (
-            "Previous output failed validation. Return one corrected JSON object only.\n"
+            f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
             "Every title, i_want, so_that, and business_value must be a complete, "
             "descriptive phrase of at least two words. Story titles must be unique.\n"
-            f"Validation error: {validation_error}\n\n"
+            f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )
 
     directive_block = ""
     if reviewer_directive:
         directive_block = (
-            "=== Reviewer directive (human feedback) ===\n"
+            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_HEADER.value}\n"
             f"{reviewer_directive.strip()}\n"
-            "Generate ONLY the additional user story or stories the reviewer asked for, "
-            "grounded strictly in the requirement and retrieved context below. Do not "
-            "restate or duplicate stories that already exist.\n"
-            "=== End reviewer directive ===\n\n"
+            f"{PromptSharedFragments.GENERATE_ONLY_ADDITIONAL_USER_STORIES.value}\n"
+            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_FOOTER.value}\n\n"
         )
 
     return (
-        "You are an enterprise business analyst generating implementation-ready user "
-        "stories for exactly one approved requirement.\n"
-        "Return exactly one valid JSON object and no other text. Do not include markdown, "
-        "code fences, commentary, XML tags, hidden reasoning, or explanations.\n\n"
+        f"{PromptUserStoryGeneration.SYS_PROMPT_USER_STORY_GENERATION.value}"
         f"{feedback}"
-        "Output schema:\n"
-        "{\n"
-        '  "user_stories": [\n'
-        "    {\n"
-        '      "story_id": "US1",\n'
-        '      "title": "...",\n'
-        '      "epic": "...",\n'
-        '      "priority": "High | Medium | Low",\n'
-        '      "persona": "...",\n'
-        '      "user_story": {"as_a": "...", "i_want": "...", "so_that": "..."},\n'
-        '      "business_value": "...",\n'
-        '      "scope": {"in_scope": ["..."], "out_of_scope": ["..."]},\n'
-        '      "acceptance_criteria": [\n'
-        '        {"id": "AC1", "title": "...", "given": "...", "when": "...", "then": "..."}\n'
-        "      ],\n"
-        '      "business_rules": [{"id": "BR1", "rule": "..."}],\n'
-        '      "test_scenarios": [{"id": "TS1", "scenario": "..."}],\n'
-        '      "definition_of_done": ["..."]\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "Rules:\n"
-        "Return one to many user stories for the requirement. Emit more than one only when "
-        "the requirement clearly contains separable capabilities.\n"
-        "Use temporary story_id, acceptance_criteria id, business_rules id, and "
-        "test_scenarios id values such as US1, AC1, BR1, TS1. Python replaces them with "
-        "permanent ids, so never reuse ids from other requirements.\n"
-        "priority must be exactly one of High, Medium, or Low.\n"
-        "Every user story must include at least one acceptance criterion, each with a "
-        "non-empty given, when, and then.\n"
-        "Derive persona, scope, acceptance criteria, business rules, test scenarios, and "
-        "definition of done ONLY from the requirement statement and the retrieved context "
-        "below. Do not invent domain facts, thresholds, integrations, or actors that are "
-        "not supported by that text.\n"
-        "title, business_value, and each user_story field must be complete, descriptive "
-        "phrases, never placeholders or single words.\n"
-        "Prefer the requirement's own numbers, limits, and terminology verbatim when they "
-        "appear.\n\n"
         f"{directive_block}"
         f"Requirement:\n{requirement_json}\n\n"
         f"Retrieved context:\n{context_block}\n"
