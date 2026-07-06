@@ -47,8 +47,8 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
                 _fact(
                     "BR-CFG-01: The system shall import and export files.",
                     requirements=[
-                        _requirement("R1", "The system shall import files."),
-                        _requirement("R2", "The system shall export files."),
+                        _requirement("The system shall import files."),
+                        _requirement("The system shall export files."),
                     ],
                 )
             ]
@@ -73,8 +73,7 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
                     "industrial monitoring and control telemetry.",
                     requirements=[
                         _requirement(
-                            "R1",
-                            "The system shall support industrial monitoring and control telemetry.",
+                            "The system shall support industrial monitoring and control telemetry."
                         )
                     ],
                 )
@@ -97,10 +96,7 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
                 _fact(
                     "BR-ALT-001 Users shall be able to configure warning thresholds.",
                     requirements=[
-                        _requirement(
-                            "R1",
-                            "Users shall be able to configure warning thresholds.",
-                        )
+                        _requirement("Users shall be able to configure warning thresholds.")
                     ],
                 )
             ]
@@ -127,7 +123,7 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
                         "facts": [
                             _fact(
                                 "The controller shall collect data from configured sensors.",
-                                requirements=[_requirement("R1", req_text)],
+                                requirements=[_requirement(req_text)],
                             )
                         ]
                     }
@@ -365,21 +361,18 @@ def _requirement_quote(chunk_text: str) -> str:
 def _fact(
     quote: str,
     *,
-    fact_id: str = "F1",
     fact_text: str | None = None,
     requirements: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
-        "fact_id": fact_id,
         "fact_text": fact_text or quote,
         "quote": quote,
-        "requirements": requirements if requirements is not None else [_requirement("R1", quote)],
+        "requirements": requirements if requirements is not None else [_requirement(quote)],
     }
 
 
-def _requirement(req_id: str, req_text: str) -> dict[str, str]:
+def _requirement(req_text: str) -> dict[str, str]:
     return {
-        "req_id": req_id,
         "req_text": req_text,
         "requirement_type": "functional",
         "priority": "medium",

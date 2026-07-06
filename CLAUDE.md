@@ -37,6 +37,8 @@ planned foundation for the deferred re-discover-with-feedback stage.
   `postgres-reset --yes`, `ingest`, `generate-user-stories`,
   `generate-test-scenarios`,
   `feedback user-stories|test-scenarios --artifact <path> --comment "<text>"`,
+  `coverage --project <P> [--document-version-id <DV>]` (per-requirement
+  no_story/story_covered/scenario_covered rollup, read-only),
   `run status|resume <RUN-ID>`, `artifact verify <path>`.
 - Ingest: `... ingest --project P --document PATH --version V [--logical-name N] [--replace-version] [--reasoning-provider ...] [--embedding-provider ...] --json-output`
 - Checks before commit: `uv run ruff check .`; `uv run python -m unittest discover -s tests`; `uv run mypy src/multi_agentic_graph_rag` (mypy **strict**); `uv run python -m compileall -q src`.
@@ -67,7 +69,8 @@ planned foundation for the deferred re-discover-with-feedback stage.
   local JSON is absent. Managed tables in `db/postgres.py::_MANAGED_TABLES`
   include `feedback_events` (HFIL add-only ledger; owns the audit trail of
   applied additions and structured declines), `test_scenarios`,
-  `test_scenario_artifacts`, `user_stories`,
+  `test_scenario_evidence` (scenario→story/req/chunk links), `test_scenario_artifacts`,
+  `user_stories`, `user_story_evidence` (story→req/chunk links),
   `user_story_artifacts`, `canonical_facts`, `fact_occurrences`,
   `requirements`, `requirement_revisions`, `requirement_evidence`,
   `requirement_fact_links`, `requirement_delta_events`,

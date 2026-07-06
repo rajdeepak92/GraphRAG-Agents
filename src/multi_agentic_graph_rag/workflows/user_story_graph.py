@@ -36,10 +36,10 @@ from multi_agentic_graph_rag.observability.session import (
 )
 from multi_agentic_graph_rag.services.artifacts import write_user_story_artifact
 from multi_agentic_graph_rag.services.generation_checkpoint import (
-    CONTEXT_MAP_FILENAME,
     STAGE_USER_STORY,
     ContextMapEntry,
     append_generation_error,
+    context_map_filename,
     hydrate_context_map_entry,
     load_context_map_checkpoint,
     load_generation_progress,
@@ -338,7 +338,7 @@ def _build_or_load_context_map(
             "Context map retrieval loop completed and checkpointed",
             step="user_stories.context_map",
             entry_count=len(entries),
-            path=str(out_dir / CONTEXT_MAP_FILENAME),
+            path=str(out_dir / context_map_filename(STAGE_USER_STORY)),
             status="completed",
         )
     return entries
@@ -395,6 +395,7 @@ def _generate_from_context_map(
             write_generation_progress(out_dir, progress)
             append_generation_error(
                 out_dir,
+                STAGE_USER_STORY,
                 {
                     "stage": STAGE_USER_STORY,
                     "input_id": entry.requirement_id,

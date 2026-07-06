@@ -161,6 +161,39 @@ def test_scenario_id(
 test_scenario_id.__test__ = False  # type: ignore[attr-defined]
 
 
+def user_story_evidence_id(
+    *,
+    story_identifier: str,
+    document_version_identifier: str,
+    chunk_identifier: str,
+) -> str:
+    token = stable_token(
+        story_identifier,
+        document_version_identifier,
+        chunk_identifier,
+        length=14,
+    )
+    return f"{IdentifierPrefix.USEVID.value}{token}"
+
+
+def test_scenario_evidence_id(
+    *,
+    scenario_identifier: str,
+    document_version_identifier: str,
+    chunk_identifier: str,
+) -> str:
+    token = stable_token(
+        scenario_identifier,
+        document_version_identifier,
+        chunk_identifier,
+        length=14,
+    )
+    return f"{IdentifierPrefix.SCEVID.value}{token}"
+
+
+test_scenario_evidence_id.__test__ = False  # type: ignore[attr-defined]
+
+
 def feedback_id(
     project: str,
     document_version_identifier: str,

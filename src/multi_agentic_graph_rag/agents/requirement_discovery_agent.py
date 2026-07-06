@@ -266,7 +266,10 @@ def _chunk_to_nested(
             )
         return RequirementDiscoveryOutput(chunks=[])
 
-    facts = [_fact_to_candidate(context, fact) for fact in output.facts]
+    facts = [
+        _fact_to_candidate(context, fact, fact_index)
+        for fact_index, fact in enumerate(output.facts, start=1)
+    ]
     return RequirementDiscoveryOutput(
         chunks=[LLMChunkExtraction(chunk_id=context.chunk.chunk_id, facts=facts)]
     )
@@ -275,43 +278,50 @@ def _chunk_to_nested(
 def _fact_to_candidate(
     context: _NormalizedChunk,
     fact: LLMDiscoveredFact,
+    fact_index: int,
 ) -> LLMFactCandidate:
-    trace = _source_trace_from_quote(fact, context)
+    # Temp ids are synthesized by ordinal (not returned by the model); they are used
+    # only as human-readable labels in validation error messages. Permanent ids are
+    # assigned later by requirement_builder.
+    fact_label = f"F{fact_index}"
+    trace = _source_trace_from_quote(fact, context, fact_label)
     requirements = [
         LLMRequirementCandidate(
-            temp_id=requirement.req_id,
+            temp_id=f"R{requirement_index}",
             statement=requirement.req_text,
             requirement_type=requirement.requirement_type,
             priority=requirement.priority,
             requirement_key=requirement.requirement_key,
             source_trace=trace.model_copy(),
         )
-        for requirement in fact.requirements
+        for requirement_index, requirement in enumerate(fact.requirements, start=1)
     ]
     return LLMFactCandidate(
-        temp_id=fact.fact_id,
+        temp_id=fact_label,
         text=fact.fact_text,
         source_trace=trace,
         requirements=requirements,
     )
 
 
-def _source_trace_from_quote(fact: LLMDiscoveredFact, context: _NormalizedChunk) -> SourceTrace:
+def _source_trace_from_quote(
+    fact: LLMDiscoveredFact, context: _NormalizedChunk, fact_label: str
+) -> SourceTrace:
     normalized_quote, _ = _normalize_for_prompt(fact.quote)
     if not normalized_quote:
-        raise TraceValidationError(f"empty source quote for fact {fact.fact_id}")
+        raise TraceValidationError(f"empty source quote for fact {fact_label}")
 
     normalized_start = context.text.find(normalized_quote)
     if normalized_start < 0:
         raise TraceValidationError(
-            f"source quote for fact {fact.fact_id} cannot be located in "
+            f"source quote for fact {fact_label} cannot be located in "
             f"{context.chunk.chunk_id} after normalization"
         )
 
     normalized_end = normalized_start + len(normalized_quote)
     if normalized_start >= len(context.char_map) or normalized_end > len(context.char_map):
         raise TraceValidationError(
-            f"source quote for fact {fact.fact_id} cannot be mapped to raw text"
+            f"source quote for fact {fact_label} cannot be mapped to raw text"
         )
 
     raw_start = context.char_map[normalized_start]

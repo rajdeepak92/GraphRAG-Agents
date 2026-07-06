@@ -38,12 +38,10 @@ class PromptRequirementDiscovery(StrEnum):
         "{\n"
         '  "facts": [\n'
         "    {\n"
-        '      "fact_id": "F1",\n'
         '      "fact_text": "...",\n'
         '      "quote": "...",\n'
         '      "requirements": [\n'
         "        {\n"
-        '          "req_id": "R1",\n'
         '          "req_text": "...",\n'
         '          "requirement_type": "...",\n'
         '          "priority": "Medium",\n'
@@ -54,16 +52,15 @@ class PromptRequirementDiscovery(StrEnum):
         "  ]\n"
         "}\n\n"
         "Required root field: facts.\n"
-        "Each fact entry must contain exactly these fields: fact_id, fact_text, quote, "
-        "requirements.\n"
-        "Each requirement entry must contain exactly these fields: req_id, req_text, "
-        "requirement_type, priority, requirement_key.\n"
+        "Each fact entry must contain exactly these fields: fact_text, quote, requirements.\n"
+        "Each requirement entry must contain exactly these fields: req_text, requirement_type, "
+        "priority, requirement_key.\n"
         "All returned field values must be JSON strings except facts and requirements, which "
         "must be JSON arrays.\n"
-        "Never return null for fact_id, fact_text, quote, requirements, req_id, req_text, "
-        "requirement_type, priority, or requirement_key.\n"
-        "Use temporary fact_id and req_id values only, such as F1, F2, R1, and R2. Python will "
-        "replace them with permanent IDs.\n\n"
+        "Never return null for fact_text, quote, requirements, req_text, requirement_type, "
+        "priority, or requirement_key.\n"
+        "Do not return any id fields. Return facts and requirements as lists; Python assigns all "
+        "permanent IDs from list position.\n\n"
         "Primary task:\n"
         "Analyze the entire input chunk_text for the provided chunk_id. Extract complete, "
         "meaningful business requirement traceability facts that can later be used to create "
@@ -175,7 +172,6 @@ class PromptUserStoryGeneration(StrEnum):
         "{\n"
         '  "user_stories": [\n'
         "    {\n"
-        '      "story_id": "US1",\n'
         '      "title": "...",\n'
         '      "epic": "...",\n'
         '      "priority": "High | Medium | Low",\n'
@@ -184,10 +180,10 @@ class PromptUserStoryGeneration(StrEnum):
         '      "business_value": "...",\n'
         '      "scope": {"in_scope": ["..."], "out_of_scope": ["..."]},\n'
         '      "acceptance_criteria": [\n'
-        '        {"id": "AC1", "title": "...", "given": "...", "when": "...", "then": "..."}\n'
+        '        {"title": "...", "given": "...", "when": "...", "then": "..."}\n'
         "      ],\n"
-        '      "business_rules": [{"id": "BR1", "rule": "..."}],\n'
-        '      "test_scenarios": [{"id": "TS1", "scenario": "..."}],\n'
+        '      "business_rules": [{"rule": "..."}],\n'
+        '      "test_scenarios": [{"scenario": "..."}],\n'
         '      "definition_of_done": ["..."]\n'
         "    }\n"
         "  ]\n"
@@ -195,9 +191,8 @@ class PromptUserStoryGeneration(StrEnum):
         "Rules:\n"
         "Return one to many user stories for the requirement. Emit more than one only when the "
         "requirement clearly contains separable capabilities.\n"
-        "Use temporary story_id, acceptance_criteria id, business_rules id, and test_scenarios "
-        "id values such as US1, AC1, BR1, TS1. Python replaces them with permanent ids, so "
-        "never reuse ids from other requirements.\n"
+        "Do not return any id fields. Return user_stories, acceptance_criteria, business_rules, "
+        "and test_scenarios as lists; Python assigns all permanent ids from list position.\n"
         "priority must be exactly one of High, Medium, or Low.\n"
         "Every user story must include at least one acceptance criterion, each with a non-empty "
         "given, when, and then.\n"
@@ -226,7 +221,6 @@ class PromptTestScenarioGeneration(StrEnum):
         "{\n"
         '  "test_scenarios": [\n'
         "    {\n"
-        '      "scenario_id": "SC1",\n'
         '      "title": "...",\n'
         '      "description": "...",\n'
         '      "scenario_type": "Positive | Negative | Boundary | Alternative | Exception | '
@@ -244,8 +238,8 @@ class PromptTestScenarioGeneration(StrEnum):
         "consistent with the user story, linked requirement, and retrieved context.\n"
         "Use negative, boundary, and exception scenarios only when they are supported by the "
         "provided text.\n"
-        "Use temporary scenario_id values such as SC1 and SC2. Python replaces them with "
-        "permanent SC- ids.\n"
+        "Do not return any id fields. Return test_scenarios as a list; Python assigns all "
+        "permanent SC- ids from list position.\n"
         "scenario_type must be exactly one of Positive, Negative, Boundary, Alternative, "
         "Exception, Performance, Security, or Usability.\n"
         "confidence must be a number from 0.0 to 1.0.\n"

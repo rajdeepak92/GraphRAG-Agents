@@ -8,6 +8,10 @@ from typing import Any
 
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.domain.errors import SchemaMismatchError, VersionConflictError
+from multi_agentic_graph_rag.domain.identifiers import (
+    test_scenario_evidence_id,
+    user_story_evidence_id,
+)
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementArtifact,
@@ -18,8 +22,10 @@ from multi_agentic_graph_rag.domain.schemas import (
 
 _MANAGED_TABLES = (
     "feedback_events",
+    "test_scenario_evidence",
     "test_scenarios",
     "test_scenario_artifacts",
+    "user_story_evidence",
     "user_stories",
     "user_story_artifacts",
     "requirement_fact_links",
@@ -88,7 +94,18 @@ _EXPECTED_COLUMNS = {
         "title": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
         "status": _TEXT_TYPES,
+        "origin": _TEXT_TYPES,
+        "run_id": _TEXT_TYPES,
         "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "user_story_evidence": {
+        "evidence_id": _TEXT_TYPES,
+        "story_id": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "chunk_id": _TEXT_TYPES,
+        "run_id": _TEXT_TYPES,
         "created_at": {"timestamp with time zone"},
     },
     "test_scenario_artifacts": {
@@ -109,7 +126,19 @@ _EXPECTED_COLUMNS = {
         "scenario_type": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
         "status": _TEXT_TYPES,
+        "origin": _TEXT_TYPES,
+        "run_id": _TEXT_TYPES,
         "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "test_scenario_evidence": {
+        "evidence_id": _TEXT_TYPES,
+        "scenario_id": _TEXT_TYPES,
+        "story_id": _TEXT_TYPES,
+        "requirement_id": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "chunk_id": _TEXT_TYPES,
+        "run_id": _TEXT_TYPES,
         "created_at": {"timestamp with time zone"},
     },
     "canonical_facts": {
@@ -262,7 +291,18 @@ class PostgresStore:
                       title text not null,
                       priority text not null,
                       status text not null,
+                      origin text not null default 'generation',
+                      run_id text not null default '',
                       payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists user_story_evidence (
+                      evidence_id text primary key,
+                      story_id text not null,
+                      requirement_id text not null,
+                      document_version_id text not null,
+                      chunk_id text not null,
+                      run_id text not null default '',
                       created_at timestamptz not null default now()
                     );
                     create table if not exists test_scenarios (
@@ -277,7 +317,19 @@ class PostgresStore:
                       scenario_type text not null,
                       priority text not null,
                       status text not null,
+                      origin text not null default 'generation',
+                      run_id text not null default '',
                       payload jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists test_scenario_evidence (
+                      evidence_id text primary key,
+                      scenario_id text not null,
+                      story_id text not null,
+                      requirement_id text not null,
+                      document_version_id text not null,
+                      chunk_id text not null,
+                      run_id text not null default '',
                       created_at timestamptz not null default now()
                     );
                     create table if not exists feedback_events (
@@ -393,6 +445,18 @@ class PostgresStore:
                       on test_scenarios(requirement_id);
                     create index if not exists test_scenarios_document_version_idx
                       on test_scenarios(document_version_id);
+                    create index if not exists user_story_evidence_story_idx
+                      on user_story_evidence(story_id);
+                    create index if not exists user_story_evidence_chunk_idx
+                      on user_story_evidence(chunk_id);
+                    create index if not exists user_story_evidence_document_version_idx
+                      on user_story_evidence(document_version_id);
+                    create index if not exists test_scenario_evidence_scenario_idx
+                      on test_scenario_evidence(scenario_id);
+                    create index if not exists test_scenario_evidence_chunk_idx
+                      on test_scenario_evidence(chunk_id);
+                    create index if not exists test_scenario_evidence_document_version_idx
+                      on test_scenario_evidence(document_version_id);
                     """
                 )
                 self._validate_schema(cursor)
@@ -586,7 +650,7 @@ class PostgresStore:
                     "artifact": payload,
                 },
             )
-            self._persist_user_stories_local(artifact)
+            self._persist_user_stories_local(artifact, run_id)
             return
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -599,7 +663,7 @@ class PostgresStore:
                     """,
                     (artifact_path, artifact.document_version_id, json.dumps(payload)),
                 )
-                self._persist_user_stories_postgres(cursor, artifact)
+                self._persist_user_stories_postgres(cursor, artifact, run_id)
             connection.commit()
 
     def load_user_story_artifact_payload(
@@ -638,18 +702,22 @@ class PostgresStore:
                     return _artifact_payload_from_row(row[0])
         return None
 
-    def _persist_user_stories_postgres(self, cursor: Any, artifact: UserStoryArtifact) -> None:
+    def _persist_user_stories_postgres(
+        self, cursor: Any, artifact: UserStoryArtifact, run_id: str
+    ) -> None:
         for story_id, record in artifact.stories.items():
             cursor.execute(
                 """
                 insert into user_stories
                   (story_id, requirement_id, project, document_id, document_version_id,
-                   doc_version, title, priority, status, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                   doc_version, title, priority, status, origin, run_id, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
                 on conflict (story_id) do update
                 set title = excluded.title,
                     priority = excluded.priority,
                     status = excluded.status,
+                    origin = excluded.origin,
+                    run_id = excluded.run_id,
                     payload = excluded.payload
                 """,
                 (
@@ -661,11 +729,35 @@ class PostgresStore:
                     record.doc_version,
                     record.title,
                     record.priority,
+                    record.origin,
+                    run_id,
                     json.dumps(record.model_dump(mode="json")),
                 ),
             )
+            for chunk_id in record.evidence_chunk_ids:
+                cursor.execute(
+                    """
+                    insert into user_story_evidence
+                      (evidence_id, story_id, requirement_id, document_version_id,
+                       chunk_id, run_id)
+                    values (%s, %s, %s, %s, %s, %s)
+                    on conflict (evidence_id) do nothing
+                    """,
+                    (
+                        user_story_evidence_id(
+                            story_identifier=story_id,
+                            document_version_identifier=record.document_version_id,
+                            chunk_identifier=chunk_id,
+                        ),
+                        story_id,
+                        record.requirement_id,
+                        record.document_version_id,
+                        chunk_id,
+                        run_id,
+                    ),
+                )
 
-    def _persist_user_stories_local(self, artifact: UserStoryArtifact) -> None:
+    def _persist_user_stories_local(self, artifact: UserStoryArtifact, run_id: str) -> None:
         for story_id, record in artifact.stories.items():
             self._upsert_local(
                 "user_story",
@@ -681,9 +773,28 @@ class PostgresStore:
                     "title": record.title,
                     "priority": record.priority,
                     "status": "active",
+                    "origin": record.origin,
+                    "run_id": run_id,
                     "user_story": record.model_dump(mode="json"),
                 },
             )
+            for chunk_id in record.evidence_chunk_ids:
+                self._upsert_local(
+                    "user_story_evidence",
+                    user_story_evidence_id(
+                        story_identifier=story_id,
+                        document_version_identifier=record.document_version_id,
+                        chunk_identifier=chunk_id,
+                    ),
+                    {
+                        "kind": "user_story_evidence",
+                        "story_id": story_id,
+                        "requirement_id": record.requirement_id,
+                        "document_version_id": record.document_version_id,
+                        "chunk_id": chunk_id,
+                        "run_id": run_id,
+                    },
+                )
 
     def _local_user_story_artifact_payload(
         self,
@@ -722,7 +833,7 @@ class PostgresStore:
                     "artifact": payload,
                 },
             )
-            self._persist_test_scenarios_local(artifact)
+            self._persist_test_scenarios_local(artifact, run_id)
             return
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -735,7 +846,7 @@ class PostgresStore:
                     """,
                     (artifact_path, artifact.document_version_id, json.dumps(payload)),
                 )
-                self._persist_test_scenarios_postgres(cursor, artifact)
+                self._persist_test_scenarios_postgres(cursor, artifact, run_id)
             connection.commit()
 
     def load_test_scenario_artifact_payload(
@@ -778,6 +889,7 @@ class PostgresStore:
         self,
         cursor: Any,
         artifact: TestScenarioArtifact,
+        run_id: str,
     ) -> None:
         for scenario_id, record in artifact.scenarios.items():
             cursor.execute(
@@ -785,13 +897,15 @@ class PostgresStore:
                 insert into test_scenarios
                   (scenario_id, story_id, requirement_id, project, document_id,
                    document_version_id, doc_version, title, scenario_type, priority,
-                   status, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                   status, origin, run_id, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
                 on conflict (scenario_id) do update
                 set title = excluded.title,
                     scenario_type = excluded.scenario_type,
                     priority = excluded.priority,
                     status = excluded.status,
+                    origin = excluded.origin,
+                    run_id = excluded.run_id,
                     payload = excluded.payload
                 """,
                 (
@@ -805,11 +919,36 @@ class PostgresStore:
                     record.title,
                     record.scenario_type,
                     record.priority,
+                    record.origin,
+                    run_id,
                     json.dumps(record.model_dump(mode="json")),
                 ),
             )
+            for chunk_id in record.evidence_chunk_ids:
+                cursor.execute(
+                    """
+                    insert into test_scenario_evidence
+                      (evidence_id, scenario_id, story_id, requirement_id,
+                       document_version_id, chunk_id, run_id)
+                    values (%s, %s, %s, %s, %s, %s, %s)
+                    on conflict (evidence_id) do nothing
+                    """,
+                    (
+                        test_scenario_evidence_id(
+                            scenario_identifier=scenario_id,
+                            document_version_identifier=record.document_version_id,
+                            chunk_identifier=chunk_id,
+                        ),
+                        scenario_id,
+                        record.story_id,
+                        record.requirement_id,
+                        record.document_version_id,
+                        chunk_id,
+                        run_id,
+                    ),
+                )
 
-    def _persist_test_scenarios_local(self, artifact: TestScenarioArtifact) -> None:
+    def _persist_test_scenarios_local(self, artifact: TestScenarioArtifact, run_id: str) -> None:
         for scenario_id, record in artifact.scenarios.items():
             self._upsert_local(
                 "test_scenario",
@@ -827,9 +966,29 @@ class PostgresStore:
                     "scenario_type": record.scenario_type,
                     "priority": record.priority,
                     "status": "active",
+                    "origin": record.origin,
+                    "run_id": run_id,
                     "test_scenario": record.model_dump(mode="json"),
                 },
             )
+            for chunk_id in record.evidence_chunk_ids:
+                self._upsert_local(
+                    "test_scenario_evidence",
+                    test_scenario_evidence_id(
+                        scenario_identifier=scenario_id,
+                        document_version_identifier=record.document_version_id,
+                        chunk_identifier=chunk_id,
+                    ),
+                    {
+                        "kind": "test_scenario_evidence",
+                        "scenario_id": scenario_id,
+                        "story_id": record.story_id,
+                        "requirement_id": record.requirement_id,
+                        "document_version_id": record.document_version_id,
+                        "chunk_id": chunk_id,
+                        "run_id": run_id,
+                    },
+                )
 
     def _local_test_scenario_artifact_payload(
         self,
@@ -851,6 +1010,86 @@ class PostgresStore:
                     artifact = row.get("artifact")
                     return dict(artifact) if isinstance(artifact, dict) else None
         return None
+
+    def load_coverage_status(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-requirement coverage: no_story / story_covered / scenario_covered.
+
+        Computed purely from existing relational columns (`user_stories.requirement_id`,
+        `test_scenarios.story_id`); no coverage table required.
+        """
+        if self.settings.postgres.mode == "local_json":
+            return self._local_coverage_status(
+                project=project, document_version_id=document_version_id
+            )
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "select requirement_id, status from requirements where project = %s",
+                (project,),
+            )
+            requirements = [(str(r[0]), str(r[1])) for r in cursor.fetchall()]
+
+            story_sql = (
+                "select story_id, requirement_id from user_stories "
+                "where project = %s and status = 'active'"
+            )
+            story_params: list[str] = [project]
+            if document_version_id is not None:
+                story_sql += " and document_version_id = %s"
+                story_params.append(document_version_id)
+            cursor.execute(story_sql, tuple(story_params))
+            stories = [(str(r[0]), str(r[1])) for r in cursor.fetchall()]
+
+            scenario_sql = (
+                "select story_id from test_scenarios where project = %s and status = 'active'"
+            )
+            scenario_params: list[str] = [project]
+            if document_version_id is not None:
+                scenario_sql += " and document_version_id = %s"
+                scenario_params.append(document_version_id)
+            cursor.execute(scenario_sql, tuple(scenario_params))
+            scenario_story_ids = [str(r[0]) for r in cursor.fetchall()]
+        return _compute_coverage(requirements, stories, scenario_story_ids)
+
+    def _local_coverage_status(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None,
+    ) -> list[dict[str, Any]]:
+        rows = self._read_local_rows()
+        requirements = [
+            (str(row.get("requirement_id")), str(row.get("status", "active")))
+            for row in rows
+            if row.get("kind") == "requirement" and row.get("project") == project
+        ]
+
+        def _matches_version(row: dict[str, Any]) -> bool:
+            return (
+                document_version_id is None or row.get("document_version_id") == document_version_id
+            )
+
+        stories = [
+            (str(row.get("story_id")), str(row.get("requirement_id")))
+            for row in rows
+            if row.get("kind") == "user_story"
+            and row.get("project") == project
+            and row.get("status", "active") == "active"
+            and _matches_version(row)
+        ]
+        scenario_story_ids = [
+            str(row.get("story_id"))
+            for row in rows
+            if row.get("kind") == "test_scenario"
+            and row.get("project") == project
+            and row.get("status", "active") == "active"
+            and _matches_version(row)
+        ]
+        return _compute_coverage(requirements, stories, scenario_story_ids)
 
     def record_run(self, run_id: str, status: str, payload: dict[str, Any]) -> None:
         if self.settings.postgres.mode == "local_json":
@@ -1433,3 +1672,45 @@ def _artifact_payload_from_row(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return dict(value)
+
+
+def _compute_coverage(
+    requirements: list[tuple[str, str]],
+    stories: list[tuple[str, str]],
+    scenario_story_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Derive per-requirement coverage status from flat relational rows.
+
+    ``requirements`` = (requirement_id, requirement_status);
+    ``stories`` = (story_id, requirement_id); ``scenario_story_ids`` = parent story of
+    each active scenario. Pure and deterministic for unit testing.
+    """
+    stories_by_requirement: dict[str, list[str]] = {}
+    for story_id, requirement_id in stories:
+        stories_by_requirement.setdefault(requirement_id, []).append(story_id)
+
+    scenario_count_by_story: dict[str, int] = {}
+    for story_id in scenario_story_ids:
+        scenario_count_by_story[story_id] = scenario_count_by_story.get(story_id, 0) + 1
+
+    result: list[dict[str, Any]] = []
+    for requirement_id, requirement_status in sorted(requirements):
+        story_ids = stories_by_requirement.get(requirement_id, [])
+        if not story_ids:
+            coverage_status = "no_story"
+        elif all(scenario_count_by_story.get(story_id, 0) > 0 for story_id in story_ids):
+            coverage_status = "scenario_covered"
+        else:
+            coverage_status = "story_covered"
+        result.append(
+            {
+                "requirement_id": requirement_id,
+                "requirement_status": requirement_status,
+                "coverage_status": coverage_status,
+                "story_ids": story_ids,
+                "scenario_count": sum(
+                    scenario_count_by_story.get(story_id, 0) for story_id in story_ids
+                ),
+            }
+        )
+    return result

@@ -143,7 +143,6 @@ class LLMFactCandidate(StrictModel):
 
 
 class LLMDiscoveredRequirement(StrictModel):
-    req_id: str
     req_text: str
     requirement_type: str = "Functional Requirement"
     priority: str = "Medium"
@@ -221,12 +220,11 @@ class LLMDiscoveredRequirement(StrictModel):
 
 
 class LLMDiscoveredFact(StrictModel):
-    fact_id: str
     fact_text: str
     quote: str
     requirements: list[LLMDiscoveredRequirement] = Field(default_factory=list)
 
-    @field_validator("fact_id", "fact_text", "quote")
+    @field_validator("fact_text", "quote")
     @classmethod
     def non_empty_text(cls, value: str) -> str:
         value = value.strip()
@@ -457,9 +455,11 @@ class _UserStoryContent(StrictModel):
 
 
 class UserStoryModel(_UserStoryContent):
-    """A single user story exactly as returned by the reasoning model (temp ids)."""
+    """A single user story exactly as returned by the reasoning model.
 
-    story_id: str = ""
+    The model returns content only; Python assigns the permanent ``story_id`` and
+    renumbers nested acceptance-criteria / business-rule / test-scenario ids.
+    """
 
 
 class UserStoryGenerationOutput(StrictModel):
@@ -602,9 +602,10 @@ class _TestScenarioContent(StrictModel):
 
 
 class TestScenarioModel(_TestScenarioContent):
-    """A single test scenario exactly as returned by the reasoning model (temp ids)."""
+    """A single test scenario exactly as returned by the reasoning model.
 
-    scenario_id: str = ""
+    The model returns content only; Python assigns the permanent ``scenario_id``.
+    """
 
 
 class TestScenarioGenerationOutput(StrictModel):

@@ -103,6 +103,7 @@ def _to_record(
         business_rules=business_rules,
         test_scenarios=test_scenarios,
         definition_of_done=list(story.definition_of_done),
+        evidence_chunk_ids=list(requirement.evidence_chunk_ids),
     )
 
 

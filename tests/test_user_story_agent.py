@@ -141,7 +141,6 @@ def _empty_context() -> RetrievedContext:
 
 def _story_payload(title: str) -> dict[str, Any]:
     return {
-        "story_id": "US1",
         "title": title,
         "epic": "Threshold Management",
         "priority": "Medium",

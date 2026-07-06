@@ -241,11 +241,18 @@ class Neo4jStore:
         return []
 
     def _driver(self) -> Any:
-        from neo4j import GraphDatabase
+        from neo4j import GraphDatabase, NotificationDisabledClassification
 
+        # PDF chunks have no ``section`` property (only Markdown/DOCX headings set it),
+        # so the multi-hop ``neighbor_chunks`` query referencing ``c.section`` emits a
+        # spurious UnknownPropertyKey (UNRECOGNIZED) notification. Disable only that
+        # classification; genuine schema/performance notifications still surface.
         return GraphDatabase.driver(
             self.settings.neo4j.uri,
             auth=(self.settings.neo4j.username, self.settings.neo4j.password),
+            notifications_disabled_classifications=[
+                NotificationDisabledClassification.UNRECOGNIZED,
+            ],
         )
 
     def _append_local(self, payload: dict[str, Any]) -> None:

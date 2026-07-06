@@ -87,6 +87,7 @@ def _to_record(
         expected_result=scenario.expected_result,
         priority=scenario.priority,
         confidence=scenario.confidence,
+        evidence_chunk_ids=list(story.evidence_chunk_ids),
     )
 
 

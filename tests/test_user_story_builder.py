@@ -117,7 +117,6 @@ def _story(
     test_scenarios: int = 1,
 ) -> UserStoryModel:
     return UserStoryModel(
-        story_id="US1",
         title=title,
         epic="Threshold Management",
         priority=priority,

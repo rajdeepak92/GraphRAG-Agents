@@ -290,6 +290,53 @@ def db_check() -> None:
             raise typer.Exit(code=1)
 
 
+@app.command("coverage")
+def coverage(
+    project: Annotated[str, typer.Option("--project", help="Project to report coverage for.")],
+    document_version_id: Annotated[
+        str | None,
+        typer.Option("--document-version-id", help="Optional document version scope."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
+) -> None:
+    """Report per-requirement coverage (no_story / story_covered / scenario_covered)."""
+    with command_session(
+        project=project,
+        version=__version__,
+        command=RuntimeCommand.COVERAGE.value,
+        run_id=command_run_id(RuntimeCommand.COVERAGE.value),
+    ) as session:
+        settings = load_config()
+        session.set_log_level(settings.log_level)
+        rows = PostgresStore(settings).load_coverage_status(
+            project=project,
+            document_version_id=document_version_id,
+        )
+        session.logger.info(
+            "Computed coverage for {project}",
+            step="coverage",
+            project=project,
+            requirement_count=len(rows),
+            status="completed",
+        )
+        if json_output:
+            console.print_json(json.dumps(rows))
+            return
+        table = Table(title=f"Coverage — {project}")
+        table.add_column("Requirement")
+        table.add_column("Coverage")
+        table.add_column("Stories", justify="right")
+        table.add_column("Scenarios", justify="right")
+        for row in rows:
+            table.add_row(
+                str(row["requirement_id"]),
+                str(row["coverage_status"]),
+                str(len(row["story_ids"])),
+                str(row["scenario_count"]),
+            )
+        console.print(table)
+
+
 @app.command("postgres-reset")
 def postgres_reset(
     yes: Annotated[bool, typer.Option("--yes", help="Confirm PostgreSQL schema reset.")] = False,

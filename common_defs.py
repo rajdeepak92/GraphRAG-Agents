@@ -134,6 +134,8 @@ class IdentifierPrefix(StrEnum):
     REQREV = "REQREV-"
     REQEVID = "REQEVID-"
     REQDELTA = "REQDELTA-"
+    USEVID = "USEVID-"
+    SCEVID = "SCEVID-"
 
 
 class ServiceName(StrEnum):
@@ -157,6 +159,7 @@ class RuntimeCommand(StrEnum):
     GENERATE_USER_STORIES = "user-stories"
     GENERATE_TEST_SCENARIOS = "test-scenarios"
     FEEDBACK = "feedback"
+    COVERAGE = "coverage"
     RUN_STATUS = "run-status"
     RUN_RESUME = "run-resume"
     ARTIFACT_VERIFY = "artifact-verify"

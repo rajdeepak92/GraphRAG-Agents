@@ -35,12 +35,37 @@ from multi_agentic_graph_rag.services.retrieval import (
     RetrievedContext,
 )
 
-CONTEXT_MAP_FILENAME = "context_map.json"
-GENERATION_PROGRESS_FILENAME = "generation_progress.json"
-GENERATION_ERRORS_FILENAME = "generation_errors.jsonl"
-
 STAGE_USER_STORY = "user_story"
 STAGE_TEST_SCENARIO = "test_scenario"
+
+# Stage-scoped checkpoint filenames. The user-story and test-scenario stages can
+# share one output directory (full pipeline), so every checkpoint file is named per
+# stage to prevent cross-stage collisions (e.g. context_story.json vs
+# context_scenario.json).
+_STAGE_FILE_SUFFIX = {
+    STAGE_USER_STORY: "story",
+    STAGE_TEST_SCENARIO: "scenario",
+}
+
+
+def _stage_suffix(stage: str) -> str:
+    try:
+        return _STAGE_FILE_SUFFIX[stage]
+    except KeyError as exc:
+        raise CheckpointError(f"unknown checkpoint stage {stage!r}") from exc
+
+
+def context_map_filename(stage: str) -> str:
+    return f"context_{_stage_suffix(stage)}.json"
+
+
+def generation_progress_filename(stage: str) -> str:
+    return f"progress_{_stage_suffix(stage)}.json"
+
+
+def generation_errors_filename(stage: str) -> str:
+    return f"errors_{_stage_suffix(stage)}.jsonl"
+
 
 _EVIDENCE_SOURCE = "evidence"
 
@@ -285,7 +310,7 @@ def write_context_map_checkpoint(
         "document_version_id": document_version_id,
         "entries": [_dump_entry(entry) for entry in entries],
     }
-    path = out_dir / CONTEXT_MAP_FILENAME
+    path = out_dir / context_map_filename(stage)
     atomic_write_json(path, payload)
     return path
 
@@ -305,7 +330,7 @@ def load_context_map_checkpoint(
     different stage/project/document version so checkpoint data is never mixed
     silently across runs.
     """
-    path = out_dir / CONTEXT_MAP_FILENAME
+    path = out_dir / context_map_filename(stage)
     if not path.exists():
         return None
     checkpoint = _load_model(path, ContextMapCheckpoint)
@@ -332,7 +357,7 @@ def load_generation_progress(
     logger: RunLogger | None = None,
 ) -> GenerationProgress:
     """Load prior per-item progress, or a fresh empty tracker if none exists."""
-    path = out_dir / GENERATION_PROGRESS_FILENAME
+    path = out_dir / generation_progress_filename(stage)
     if not path.exists():
         return GenerationProgress(
             run_id=run_id,
@@ -363,7 +388,7 @@ def write_generation_progress(out_dir: Path, progress: GenerationProgress) -> Pa
         "completed": {key: _dump_item(item) for key, item in progress.completed.items()},
         "failed": {key: _dump_item(item) for key, item in progress.failed.items()},
     }
-    path = out_dir / GENERATION_PROGRESS_FILENAME
+    path = out_dir / generation_progress_filename(progress.stage)
     atomic_write_json(path, payload)
     return path
 
@@ -401,9 +426,9 @@ def record_failure(
     )
 
 
-def append_generation_error(out_dir: Path, record: dict[str, Any]) -> None:
+def append_generation_error(out_dir: Path, stage: str, record: dict[str, Any]) -> None:
     """Append one per-item failure to the local debug log (best effort)."""
-    path = out_dir / GENERATION_ERRORS_FILENAME
+    path = out_dir / generation_errors_filename(stage)
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {"logged_at": _now_iso(), **record}
     with path.open("a", encoding="utf-8") as handle:

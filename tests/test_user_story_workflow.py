@@ -141,7 +141,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _story_payload() -> dict[str, Any]:
     return {
-        "story_id": "US1",
         "title": "Configure warning thresholds",
         "epic": "Threshold Management",
         "priority": "Medium",
