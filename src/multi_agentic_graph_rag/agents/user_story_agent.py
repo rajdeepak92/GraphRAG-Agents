@@ -26,12 +26,12 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 class UserStoryGenerationAgent:
-    """One strict prompt per requirement, validated with a single fed-back retry.
+    """One strict prompt per requirement, validated with a single retry.
 
     Mirrors :class:`RequirementDiscoveryAgent`: the provider adapter already does
     JSON extraction + strict Pydantic + one internal retry inside
     ``generate_structured``; this agent adds a meaningfulness pass on top and a
-    second fed-back retry, persisting the raw response on terminal failure.
+    second validation retry, persisting the raw response on terminal failure.
     """
 
     def __init__(self, reasoning_model: ReasoningModel, *, logger: Any | None = None) -> None:
@@ -44,7 +44,6 @@ class UserStoryGenerationAgent:
         context: RetrievedContext,
         *,
         requirement_index: int = 1,
-        reviewer_directive: str | None = None,
     ) -> UserStoryGenerationOutput:
         validation_error: str | None = None
         try:
@@ -53,7 +52,6 @@ class UserStoryGenerationAgent:
                     requirement,
                     context,
                     validation_error=validation_error,
-                    reviewer_directive=reviewer_directive,
                 )
                 _set_response_context(
                     self.reasoning_model,
@@ -196,8 +194,6 @@ def _build_user_story_prompt(
     requirement: RequirementInput,
     context: RetrievedContext,
     validation_error: str | None = None,
-    *,
-    reviewer_directive: str | None = None,
 ) -> str:
     requirement_json = json.dumps(
         {
@@ -226,19 +222,9 @@ def _build_user_story_prompt(
             f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )
 
-    directive_block = ""
-    if reviewer_directive:
-        directive_block = (
-            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_HEADER.value}\n"
-            f"{reviewer_directive.strip()}\n"
-            f"{PromptSharedFragments.GENERATE_ONLY_ADDITIONAL_USER_STORIES.value}\n"
-            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_FOOTER.value}\n\n"
-        )
-
     return (
         f"{PromptUserStoryGeneration.SYS_PROMPT_USER_STORY_GENERATION.value}"
         f"{feedback}"
-        f"{directive_block}"
         f"Requirement:\n{requirement_json}\n\n"
         f"Retrieved context:\n{context_block}\n"
     )

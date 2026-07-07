@@ -75,13 +75,9 @@ runtime/logs/*
 # Generic logs
 *.log
 
-# Local analysis docs
-flow.md
-CLAUDE.md
-commands.md
-RUNBOOK.md
-mcp-flow.md
-hugging-face.md
+# Markdown docs
+*.md
+!/README.md
 
 # Local test workspace
 tests/

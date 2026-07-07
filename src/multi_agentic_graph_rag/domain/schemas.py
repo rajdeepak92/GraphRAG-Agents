@@ -475,8 +475,7 @@ class UserStoryRecord(_UserStoryContent):
     document_id: str
     document_version_id: str
     doc_version: str
-    origin: Literal["generation", "feedback"] = "generation"
-    feedback_id: str | None = None
+    origin: Literal["generation"] = "generation"
     evidence_chunk_ids: list[str] = Field(default_factory=list)
 
 
@@ -622,8 +621,7 @@ class TestScenarioRecord(_TestScenarioContent):
     document_id: str
     document_version_id: str
     doc_version: str
-    origin: Literal["generation", "feedback"] = "generation"
-    feedback_id: str | None = None
+    origin: Literal["generation"] = "generation"
     evidence_chunk_ids: list[str] = Field(default_factory=list)
 
 
@@ -667,60 +665,6 @@ class TestScenarioResult(StrictModel):
     requirement_coverage: dict[str, list[str]] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
-
-
-class FeedbackRequest(StrictModel):
-    """A single human-feedback request against an already-generated artifact."""
-
-    stage: Literal["user_story", "test_scenario"]
-    artifact_path: Path
-    comment: str
-    requirement_id: str | None = None
-    story_id: str | None = None
-    user_stories_path: Path | None = None
-    reasoning_provider: str | None = None
-    embedding_provider: str | None = None
-    reranker_provider: str | None = None
-    top_k: int | None = None
-
-    @field_validator("comment")
-    @classmethod
-    def non_empty_comment(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("comment must not be empty")
-        return value
-
-
-class FeedbackGateOutput(StrictModel):
-    """LLM gate response (feedback call 1): approve/decline with grounding chunks."""
-
-    verdict: Literal["approve", "decline"]
-    reason: str
-    supporting_chunk_ids: list[str] = Field(default_factory=list)
-
-    @field_validator("reason")
-    @classmethod
-    def non_empty_reason(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("reason must not be empty")
-        return value
-
-
-class FeedbackResult(StrictModel):
-    run_id: str
-    feedback_id: str
-    status: Literal["applied", "declined"]
-    stage: str
-    project: str
-    document_version_id: str
-    verdict_reason: str
-    anchor_requirement_id: str | None = None
-    anchor_story_id: str | None = None
-    created_ids: list[str] = Field(default_factory=list)
-    artifact_path: Path
-    warnings: list[str] = Field(default_factory=list)
 
 
 class IngestionResult(StrictModel):

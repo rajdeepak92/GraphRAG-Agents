@@ -29,7 +29,7 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 class TestScenarioGenerationAgent:
-    """One strict prompt per user story, validated with a single fed-back retry."""
+    """One strict prompt per user story, validated with a single retry."""
 
     def __init__(self, reasoning_model: ReasoningModel, *, logger: Any | None = None) -> None:
         self.reasoning_model = reasoning_model
@@ -42,7 +42,6 @@ class TestScenarioGenerationAgent:
         *,
         story_index: int = 1,
         requirement_text: str | None = None,
-        reviewer_directive: str | None = None,
     ) -> TestScenarioGenerationOutput:
         validation_error: str | None = None
         try:
@@ -52,7 +51,6 @@ class TestScenarioGenerationAgent:
                     context,
                     requirement_text=requirement_text,
                     validation_error=validation_error,
-                    reviewer_directive=reviewer_directive,
                 )
                 _set_response_context(
                     self.reasoning_model,
@@ -205,7 +203,6 @@ def _build_test_scenario_prompt(
     *,
     requirement_text: str | None = None,
     validation_error: str | None = None,
-    reviewer_directive: str | None = None,
 ) -> str:
     story_json = json.dumps(
         {
@@ -250,19 +247,9 @@ def _build_test_scenario_prompt(
             f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )
 
-    directive_block = ""
-    if reviewer_directive:
-        directive_block = (
-            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_HEADER.value}\n"
-            f"{reviewer_directive.strip()}\n"
-            f"{PromptSharedFragments.GENERATE_ONLY_ADDITIONAL_TEST_SCENARIOS.value}\n"
-            f"{PromptSharedFragments.REVIEWER_DIRECTIVE_FOOTER.value}\n\n"
-        )
-
     return (
         f"{PromptTestScenarioGeneration.PROMPT_TEST_SCENARIO_GENERATION.value}"
         f"{feedback}"
-        f"{directive_block}"
         f"User story:\n{story_json}\n\n"
         f"Linked requirement:\n{linked_requirement}\n\n"
         f"Retrieved context:\n{context_block}\n"

@@ -13,18 +13,6 @@ class PromptSharedFragments(StrEnum):
     )
     CORRECTED_JSON_ONLY = "Return one corrected JSON object only."
     VALIDATION_ERROR_PREFIX = "Validation error: "
-    REVIEWER_DIRECTIVE_HEADER = "=== Reviewer directive (human feedback) ==="
-    REVIEWER_DIRECTIVE_FOOTER = "=== End reviewer directive ==="
-    GENERATE_ONLY_ADDITIONAL_USER_STORIES = (
-        "Generate ONLY the additional user story or stories the reviewer asked for, grounded "
-        "strictly in the requirement and retrieved context below. Do not restate or duplicate "
-        "stories that already exist."
-    )
-    GENERATE_ONLY_ADDITIONAL_TEST_SCENARIOS = (
-        "Generate ONLY the additional test scenario or scenarios the reviewer asked for, "
-        "grounded strictly in the user story, linked requirement, and retrieved context below. "
-        "Do not restate or duplicate scenarios that already exist."
-    )
 
 
 class PromptRequirementDiscovery(StrEnum):
@@ -250,29 +238,7 @@ class PromptTestScenarioGeneration(StrEnum):
     )
 
 
-class PromptFeedbackGate(StrEnum):
-    SYS_PROMPT_FEEDBACK_GATE = (
-        "You are a requirements reviewer gate deciding whether a human comment describes a NEW, "
-        "document-grounded work item to add.\n"
-        f"{PromptSharedFragments.JSON_ONLY.value}\n\n"
-        "Output schema:\n"
-        "{\n"
-        '  "verdict": "approve | decline",\n'
-        '  "reason": "...",\n'
-        '  "supporting_chunk_ids": ["CHUNK-...."]\n'
-        "}\n\n"
-        "Rules:\n"
-        "Approve ONLY when the comment asks for a new item that is supported by the retrieved "
-        "context below and is not already covered by the anchor.\n"
-        "Decline when the request is destructive, ungrounded, or duplicates existing work.\n"
-        "supporting_chunk_ids MUST be chosen only from the allowed chunk ids.\n"
-        "An 'approve' verdict must cite at least one supporting chunk id. reason must be a "
-        "complete sentence.\n\n"
-    )
-
-
 __all__ = [
-    "PromptFeedbackGate",
     "PromptRequirementDiscovery",
     "PromptSharedFragments",
     "PromptTestScenarioGeneration",

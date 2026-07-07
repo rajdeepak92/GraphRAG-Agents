@@ -82,13 +82,6 @@ class RunSession:
             log_path = run_dir / "run.log"
             jsonl_path = run_dir / "run.jsonl"
             req_path = run_dir / "requirements.json"
-        elif command == RuntimeCommand.FEEDBACK.value:
-            run_dir = (
-                root / PathDef.GENERATED_REQUIREMENTS_DIR.value / project_name / "feedback" / run_id
-            )
-            log_path = run_dir / "run.log"
-            jsonl_path = run_dir / "run.jsonl"
-            req_path = run_dir / "run.json"
         else:
             run_dir = root / PathDef.LEGACY_GENERATED_DIR.value / project_name / "run"
             log_path = run_dir / f"run_{stamp}.log"
