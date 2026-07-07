@@ -31,19 +31,23 @@ ProjectRootFactory = Callable[[], Path]
 
 
 def register_tools(mcp: Any, *, project_root: ProjectRootFactory) -> None:
-    @mcp.tool()
+    @mcp.tool(description="Check PostgreSQL, Neo4j, Chroma, and application health.")
     def marag_health_check() -> dict[str, Any]:
         return health_check_tool(project_root()).model_dump(mode="json")
 
-    @mcp.tool()
+    @mcp.tool(description="Start the configured local stack and return health details.")
     def marag_start_stack() -> dict[str, Any]:
         return start_stack_tool(project_root()).model_dump(mode="json")
 
-    @mcp.tool()
+    @mcp.tool(description="Stop the configured local stack when shutdown is enabled.")
     def marag_stop_stack() -> dict[str, Any]:
         return stop_stack_tool(project_root()).model_dump(mode="json")
 
-    @mcp.tool()
+    @mcp.tool(
+        description=(
+            "Ingest a BRD/SRS document, discover requirements, and write generated artifacts."
+        )
+    )
     def marag_ingest_document(
         project: str,
         document: str,
@@ -64,7 +68,12 @@ def register_tools(mcp: Any, *, project_root: ProjectRootFactory) -> None:
         )
         return ingest_document_tool(project_root(), request)
 
-    @mcp.tool()
+    @mcp.tool(
+        description=(
+            "Generate user stories from requirements or a document version "
+            "using retrieval and reranking."
+        )
+    )
     def marag_generate_user_stories(
         project: str | None = None,
         requirements: str | None = None,
@@ -85,7 +94,12 @@ def register_tools(mcp: Any, *, project_root: ProjectRootFactory) -> None:
         )
         return generate_user_stories_tool(project_root(), request)
 
-    @mcp.tool()
+    @mcp.tool(
+        description=(
+            "Generate test scenarios from user stories and requirements "
+            "using retrieval and reranking."
+        )
+    )
     def marag_generate_test_scenarios(
         project: str | None = None,
         user_stories: str | None = None,
@@ -108,7 +122,12 @@ def register_tools(mcp: Any, *, project_root: ProjectRootFactory) -> None:
         )
         return generate_test_scenarios_tool(project_root(), request)
 
-    @mcp.tool()
+    @mcp.tool(
+        description=(
+            "Run the full pipeline: stack check, ingest, user stories, "
+            "test scenarios, and verification."
+        )
+    )
     def marag_run_full_pipeline(
         project: str,
         document: str,
@@ -133,18 +152,24 @@ def register_tools(mcp: Any, *, project_root: ProjectRootFactory) -> None:
         )
         return full_pipeline_tool(project_root(), request)
 
-    @mcp.tool()
+    @mcp.tool(
+        description=(
+            "Find the latest generated requirement, user-story, and test-scenario artifacts."
+        )
+    )
     def marag_find_latest_artifacts(project: str) -> dict[str, Any]:
         return find_latest_artifacts(project_root(), project).model_dump(mode="json")
 
-    @mcp.tool()
+    @mcp.tool(
+        description="Verify a generated requirements, user-stories, or test-scenarios artifact."
+    )
     def marag_verify_artifact(artifact_type: str, path: str) -> dict[str, Any]:
         request = VerifyArtifactToolInput.model_validate(
             {"artifact_type": artifact_type, "path": path}
         )
         return verify_artifact_tool(project_root(), request)
 
-    @mcp.tool()
+    @mcp.tool(description="Open run status and logs for a specific run id.")
     def marag_open_run_status(run_id: str) -> dict[str, Any]:
         return run_status_tool(project_root(), run_id)
 

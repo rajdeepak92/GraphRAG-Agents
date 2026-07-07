@@ -291,10 +291,23 @@ def _port_check(name: str, host: str, port: int) -> ServiceStatus:
 
 
 def _db_check(project_root: Path) -> ServiceStatus:
+    env = read_project_env(project_root)
+
+    if _env_bool(env, "MARAG_MCP_SKIP_DB_CHECK", default=False):
+        return ServiceStatus(
+            name="marag_db_check",
+            status="skipped",
+            detail=(
+                "Skipped via MARAG_MCP_SKIP_DB_CHECK=true. "
+                "Run `uv run marag db-check` or the dev helper for deep DB validation."
+            ),
+        )
+
     try:
         result = run_marag_command(["db-check"], project_root=project_root, timeout_seconds=180)
     except CliExecutionError as exc:
         return ServiceStatus(name="marag_db_check", status="fail", detail=str(exc))
+
     detail = result.stdout.strip() or result.stderr.strip()
     return ServiceStatus(
         name="marag_db_check",

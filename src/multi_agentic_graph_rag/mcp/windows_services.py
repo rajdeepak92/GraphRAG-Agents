@@ -29,21 +29,32 @@ def get_windows_service_status(service_name: str) -> str:
         return "not_configured"
     if not is_windows():
         return "skipped_non_windows"
+
+    safe_service_name = service_name.replace("'", "''")
+    command = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$svc = Get-Service -Name '{safe_service_name}' -ErrorAction SilentlyContinue; "
+        "if ($null -eq $svc) { "
+        "Write-Output 'not_found' "
+        "} else { "
+        "Write-Output $svc.Status.ToString() "
+        "}"
+    )
+
     completed = subprocess.run(
         [
             "powershell.exe",
             "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
             "-Command",
-            (
-                "$svc = Get-Service -Name $args[0] -ErrorAction SilentlyContinue; "
-                "if ($null -eq $svc) { 'not_found' } else { $svc.Status.ToString() }"
-            ),
-            service_name,
+            command,
         ],
         text=True,
         capture_output=True,
         check=False,
     )
+
     if completed.returncode != 0:
         return f"error: {completed.stderr.strip() or completed.stdout.strip()}"
     return completed.stdout.strip() or "unknown"
