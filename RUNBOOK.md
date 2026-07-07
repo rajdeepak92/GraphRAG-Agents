@@ -217,7 +217,32 @@ TEST_SCENARIO_NEIGHBOR_WINDOW=1
 TEST_SCENARIO_MAX_NEW_TOKENS=
 ```
 
-## 10. Observability
+Optional HFIL review:
+
+```powershell
+uv run marag generate-test-scenarios `
+  --user-stories generated\<PROJECT>\req\<RUN_ID>\user_stories.json `
+  --project <PROJECT> `
+  --hfil
+```
+
+HFIL supports feedback comments, `remove duplicates`, and `exit`. Review turns
+do not write PostgreSQL or JSON; final persistence happens after `exit`.
+`test_scenarios.json` remains canonical. `--emit-md` writes an optional
+Markdown report.
+
+## 10. Reconcile Local JSON
+
+Generated artifacts commit to PostgreSQL first and mirror to local JSON after
+the DB commit. If a run crashes after DB commit or local JSON becomes stale,
+rebuild local mirrors:
+
+```powershell
+uv run marag reconcile --project <PROJECT>
+uv run marag reconcile --project <PROJECT> --document-version <DV-ID>
+```
+
+## 11. Observability
 
 Inspect the latest run:
 
@@ -237,10 +262,11 @@ What to expect:
   when parsing fails, and successful responses are also captured when
   `LOG_LLM_RESPONSES=true`.
 
-## 11. Notes
+## 12. Notes
 
 - `run status` still supports the legacy `.generated/<PROJECT>/run/` path.
 - The repo keeps generated outputs and runtime data out of version control.
 - `generate-user-stories` writes its session log under `.generated/<PROJECT>/run/`; the `user_stories.json` artifact lands beside the input requirements file.
 - `generate-test-scenarios` writes its session log under `.generated/<PROJECT>/run/`; the `test_scenarios.json` artifact lands beside the input user-story file.
-
+- Strictly outdated requirement hard delete uses application-level cascade and retains `TODO: Add approval gate before destructive cascade delete.`
+- Feature testcase coverage was intentionally deferred for the HFIL/version-lineage implementation pass.

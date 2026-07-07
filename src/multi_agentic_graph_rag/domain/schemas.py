@@ -281,7 +281,15 @@ class VerifiedRequirement(StrictModel):
 
 class RequirementDeltaEvent(StrictModel):
     event_id: str
-    event_type: Literal["new", "duplicate", "changed", "superseded"]
+    event_type: Literal[
+        "new",
+        "duplicate",
+        "changed",
+        "superseded",
+        "updated",
+        "strictly_outdated",
+        "unchanged",
+    ]
     requirement_id: str
     revision_id: str | None = None
     previous_revision_id: str | None = None
@@ -337,6 +345,7 @@ class RequirementInput(StrictModel):
     """Normalized requirement fed into user-story generation (stage 3 input)."""
 
     requirement_id: str
+    revision_id: str = ""
     requirement_text: str
     requirement_type: str = "Functional Requirement"
     priority: Literal["High", "Medium", "Low"] = "Medium"
@@ -471,11 +480,14 @@ class UserStoryRecord(_UserStoryContent):
 
     story_id: str
     requirement_id: str
+    requirement_revision_id: str = ""
     project: str
     document_id: str
     document_version_id: str
     doc_version: str
-    origin: Literal["generation"] = "generation"
+    origin_version: str = ""
+    status: Literal["active", "superseded", "outdated"] = "active"
+    origin: Literal["generation", "feedback"] = "generation"
     evidence_chunk_ids: list[str] = Field(default_factory=list)
 
 
@@ -617,11 +629,14 @@ class TestScenarioRecord(_TestScenarioContent):
     scenario_id: str
     story_id: str
     requirement_id: str
+    requirement_revision_id: str = ""
     project: str
     document_id: str
     document_version_id: str
     doc_version: str
-    origin: Literal["generation"] = "generation"
+    origin_version: str = ""
+    status: Literal["active", "superseded", "outdated"] = "active"
+    origin: Literal["generation", "feedback"] = "generation"
     evidence_chunk_ids: list[str] = Field(default_factory=list)
 
 
@@ -649,6 +664,9 @@ class TestScenarioRequest(StrictModel):
     embedding_provider: str | None = None
     reranker_provider: str | None = None
     top_k: int | None = None
+    hfil_enabled: bool | None = None
+    emit_md: bool = False
+    thread_id: str | None = None
 
 
 class TestScenarioResult(StrictModel):
@@ -665,6 +683,90 @@ class TestScenarioResult(StrictModel):
     requirement_coverage: dict[str, list[str]] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+
+class FeedbackRequest(StrictModel):
+    """Human feedback request envelope. Requirements are intentionally immutable."""
+
+    stage: Literal["user_story", "test_scenario"]
+    target_id: str
+    comment: str
+
+
+class CanonicalScenario(StrictModel):
+    entity: str
+    action: str
+    condition: str
+    expected_behavior: str
+    given: str
+    when: str
+    then: str
+    canonical_text: str
+
+
+class DuplicateCandidate(StrictModel):
+    left_id: str
+    right_id: str
+    cosine: float
+    reason: str = "embedding_recall"
+
+
+class DuplicateGroup(StrictModel):
+    scenario_ids: list[str]
+    scenarios: list[TestScenarioRecord]
+    story_ids: list[str]
+    reason: str
+    confidence: float
+    verification_method: str
+
+
+class DuplicateJudgeResult(StrictModel):
+    a_entails_b: bool
+    b_entails_a: bool
+    verdict: Literal["DUPLICATE", "DISTINCT"]
+    reason: str
+
+
+class HFILTurn(StrictModel):
+    command: str
+    message: str = ""
+    deleted_scenario_ids: list[str] = Field(default_factory=list)
+    added_scenario_ids: list[str] = Field(default_factory=list)
+
+
+class HFILState(StrictModel):
+    hfil_enabled: bool = False
+    hfil_done: bool = False
+    hfil_phase: str = "start"
+    hfil_pending_prompt: str = ""
+    hfil_scenarios: list[TestScenarioRecord] = Field(default_factory=list)
+    hfil_user_stories: list[UserStoryRecord] = Field(default_factory=list)
+    hfil_last_duplicate_groups: list[DuplicateGroup] = Field(default_factory=list)
+    hfil_messages: list[str] = Field(default_factory=list)
+
+
+class RequirementDeltaDecision(StrictModel):
+    requirement_id: str
+    revision_id: str
+    label: Literal["new", "updated", "strictly_outdated", "unchanged"]
+    prior_revision_id: str | None = None
+    reason: str = ""
+
+
+class ArtifactReadResult(StrictModel):
+    source: Literal["local_json", "postgres"]
+    valid_local: bool
+    artifact_path: str | None = None
+    payload: dict[str, Any]
+    repaired: bool = False
+    reason: str = ""
+
+
+class ReconcileReport(StrictModel):
+    project: str
+    document_version_id: str | None = None
+    repaired_paths: list[str] = Field(default_factory=list)
+    missing_artifacts: list[str] = Field(default_factory=list)
 
 
 class IngestionResult(StrictModel):

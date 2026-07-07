@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 from typing import Any, TypedDict
 
-from common_defs import ModeName, ProviderName, RuntimeCommand
 from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
+from common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGenerationAgent
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
@@ -19,7 +19,9 @@ from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import CheckpointError, ConfigurationError
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
+    UserStoryArtifact,
     UserStoryModel,
+    UserStoryRecord,
     UserStoryRequest,
     UserStoryResult,
 )
@@ -34,7 +36,7 @@ from multi_agentic_graph_rag.observability.session import (
     command_run_id,
     command_session,
 )
-from multi_agentic_graph_rag.services.artifacts import write_user_story_artifact
+from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.generation_checkpoint import (
     STAGE_USER_STORY,
     ContextMapEntry,
@@ -206,7 +208,15 @@ def _run_pipeline(
             doc_version=source.doc_version,
             generated=generated,
         )
-        artifact_path = write_user_story_artifact(artifact, out_dir, logger=logger)
+        artifact = _preserve_existing_story_ids(
+            artifact,
+            postgres.load_user_stories_for_generation(project=source.project),
+        )
+        artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
+            artifact=artifact,
+            artifact_path=out_dir / "user_stories.json",
+            run_id=state["run_id"],
+        )
         if session is not None:
             session.artifact_payload = artifact.model_dump(mode="json")
         if logger is not None:
@@ -218,7 +228,6 @@ def _run_pipeline(
                 requirement_count=len(artifact.coverage),
                 status="completed",
             )
-        postgres.persist_user_story_artifact(artifact, str(artifact_path), state["run_id"])
         if logger is not None:
             logger.info(
                 "Projecting user-story coverage into Neo4j and marking requirements covered",
@@ -426,6 +435,30 @@ def _stories_from_payload(payload: dict[str, Any], requirement_id: str) -> list[
         raise CheckpointError(f"progress payload for {requirement_id} is invalid ({exc})") from exc
 
 
+def _preserve_existing_story_ids(
+    artifact: UserStoryArtifact,
+    existing_stories: list[UserStoryRecord],
+) -> UserStoryArtifact:
+    existing_by_requirement: dict[str, list[UserStoryRecord]] = {}
+    for story in existing_stories:
+        existing_by_requirement.setdefault(story.requirement_id, []).append(story)
+    for stories in existing_by_requirement.values():
+        stories.sort(key=lambda item: item.story_id)
+
+    rewritten: dict[str, UserStoryRecord] = {}
+    coverage: dict[str, list[str]] = {}
+    ordinal_by_requirement: dict[str, int] = {}
+    for story in artifact.stories.values():
+        ordinal = ordinal_by_requirement.get(story.requirement_id, 0)
+        ordinal_by_requirement[story.requirement_id] = ordinal + 1
+        prior = existing_by_requirement.get(story.requirement_id, [])
+        stable_story_id = prior[ordinal].story_id if ordinal < len(prior) else story.story_id
+        record = story.model_copy(update={"story_id": stable_story_id})
+        rewritten[stable_story_id] = record
+        coverage.setdefault(record.requirement_id, []).append(stable_story_id)
+    return artifact.model_copy(update={"stories": rewritten, "coverage": coverage})
+
+
 def run_user_story_generation(
     request: UserStoryRequest,
     session: RunSession | None = None,
@@ -502,6 +535,15 @@ def _load_requirement_source(
                 path=str(request.requirements_path),
                 source="local_json",
             )
+        local_payload = json.loads(request.requirements_path.read_text(encoding="utf-8"))
+        project = request.project or str(local_payload.get("project", ""))
+        document_version_id = str(local_payload.get("document_version_id", ""))
+        ArtifactMirror(postgres).read_preferring_local(
+            artifact_path=request.requirements_path,
+            project=project,
+            run_id=None,
+            document_version_id=document_version_id,
+        )
         return load_requirement_source_local(request.requirements_path)
 
     if not request.document_version_id:

@@ -15,12 +15,17 @@ from multi_agentic_graph_rag.domain.identifiers import (
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementArtifact,
+    RequirementInput,
     RequirementRevisionSnapshot,
     TestScenarioArtifact,
+    TestScenarioRecord,
     UserStoryArtifact,
+    UserStoryRecord,
+    normalize_priority_label,
 )
 
 _MANAGED_TABLES = (
+    "schema_migrations",
     "test_scenario_evidence",
     "test_scenarios",
     "test_scenario_artifacts",
@@ -72,10 +77,12 @@ _EXPECTED_COLUMNS = {
     "user_stories": {
         "story_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_revision_id": _TEXT_TYPES,
         "project": _TEXT_TYPES,
         "document_id": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
         "doc_version": _TEXT_TYPES,
+        "origin_version": _TEXT_TYPES,
         "title": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
         "status": _TEXT_TYPES,
@@ -83,6 +90,7 @@ _EXPECTED_COLUMNS = {
         "run_id": _TEXT_TYPES,
         "payload": {"jsonb"},
         "created_at": {"timestamp with time zone"},
+        "updated_at": {"timestamp with time zone"},
     },
     "user_story_evidence": {
         "evidence_id": _TEXT_TYPES,
@@ -103,10 +111,12 @@ _EXPECTED_COLUMNS = {
         "scenario_id": _TEXT_TYPES,
         "story_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_revision_id": _TEXT_TYPES,
         "project": _TEXT_TYPES,
         "document_id": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
         "doc_version": _TEXT_TYPES,
+        "origin_version": _TEXT_TYPES,
         "title": _TEXT_TYPES,
         "scenario_type": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
@@ -115,6 +125,7 @@ _EXPECTED_COLUMNS = {
         "run_id": _TEXT_TYPES,
         "payload": {"jsonb"},
         "created_at": {"timestamp with time zone"},
+        "updated_at": {"timestamp with time zone"},
     },
     "test_scenario_evidence": {
         "evidence_id": _TEXT_TYPES,
@@ -158,6 +169,8 @@ _EXPECTED_COLUMNS = {
         "status": _TEXT_TYPES,
         "first_seen_document_version_id": _TEXT_TYPES,
         "active_revision_id": _TEXT_TYPES,
+        "superseded_by_version": _TEXT_TYPES,
+        "superseded_at": {"timestamp with time zone"},
         "created_at": {"timestamp with time zone"},
         "updated_at": {"timestamp with time zone"},
     },
@@ -170,6 +183,8 @@ _EXPECTED_COLUMNS = {
         "priority": _TEXT_TYPES,
         "status": _TEXT_TYPES,
         "first_seen_document_version_id": _TEXT_TYPES,
+        "superseded_by_version": _TEXT_TYPES,
+        "superseded_at": {"timestamp with time zone"},
         "created_at": {"timestamp with time zone"},
         "updated_at": {"timestamp with time zone"},
     },
@@ -207,6 +222,10 @@ _EXPECTED_COLUMNS = {
         "payload": {"jsonb"},
         "created_at": {"timestamp with time zone"},
     },
+    "schema_migrations": {
+        "version": _TEXT_TYPES,
+        "applied_at": {"timestamp with time zone"},
+    },
 }
 
 
@@ -241,6 +260,10 @@ class PostgresStore:
                       created_at timestamptz not null default now(),
                       unique(document_id, version)
                     );
+                    create table if not exists schema_migrations (
+                      version text primary key,
+                      applied_at timestamptz not null default now()
+                    );
                     create table if not exists ingestion_runs (
                       run_id text primary key,
                       document_version_id text not null,
@@ -269,17 +292,20 @@ class PostgresStore:
                     create table if not exists user_stories (
                       story_id text primary key,
                       requirement_id text not null,
+                      requirement_revision_id text not null default '',
                       project text not null,
                       document_id text not null,
                       document_version_id text not null,
                       doc_version text not null,
+                      origin_version text not null default '',
                       title text not null,
                       priority text not null,
                       status text not null,
                       origin text not null default 'generation',
                       run_id text not null default '',
                       payload jsonb not null,
-                      created_at timestamptz not null default now()
+                      created_at timestamptz not null default now(),
+                      updated_at timestamptz not null default now()
                     );
                     create table if not exists user_story_evidence (
                       evidence_id text primary key,
@@ -294,10 +320,12 @@ class PostgresStore:
                       scenario_id text primary key,
                       story_id text not null,
                       requirement_id text not null,
+                      requirement_revision_id text not null default '',
                       project text not null,
                       document_id text not null,
                       document_version_id text not null,
                       doc_version text not null,
+                      origin_version text not null default '',
                       title text not null,
                       scenario_type text not null,
                       priority text not null,
@@ -305,7 +333,8 @@ class PostgresStore:
                       origin text not null default 'generation',
                       run_id text not null default '',
                       payload jsonb not null,
-                      created_at timestamptz not null default now()
+                      created_at timestamptz not null default now(),
+                      updated_at timestamptz not null default now()
                     );
                     create table if not exists test_scenario_evidence (
                       evidence_id text primary key,
@@ -349,6 +378,8 @@ class PostgresStore:
                       status text not null,
                       first_seen_document_version_id text not null,
                       active_revision_id text,
+                      superseded_by_version text,
+                      superseded_at timestamptz,
                       created_at timestamptz not null default now(),
                       updated_at timestamptz not null default now(),
                       unique(project, document_id, requirement_key)
@@ -362,6 +393,8 @@ class PostgresStore:
                       priority text not null,
                       status text not null,
                       first_seen_document_version_id text not null,
+                      superseded_by_version text,
+                      superseded_at timestamptz,
                       created_at timestamptz not null default now(),
                       updated_at timestamptz not null default now()
                     );
@@ -428,6 +461,23 @@ class PostgresStore:
                       on test_scenario_evidence(chunk_id);
                     create index if not exists test_scenario_evidence_document_version_idx
                       on test_scenario_evidence(document_version_id);
+                    alter table user_stories
+                      add column if not exists requirement_revision_id text not null default '',
+                      add column if not exists origin_version text not null default '',
+                      add column if not exists updated_at timestamptz not null default now();
+                    alter table test_scenarios
+                      add column if not exists requirement_revision_id text not null default '',
+                      add column if not exists origin_version text not null default '',
+                      add column if not exists updated_at timestamptz not null default now();
+                    alter table requirements
+                      add column if not exists superseded_by_version text,
+                      add column if not exists superseded_at timestamptz;
+                    alter table requirement_revisions
+                      add column if not exists superseded_by_version text,
+                      add column if not exists superseded_at timestamptz;
+                    insert into schema_migrations(version)
+                    values ('0001_version_lineage_inline')
+                    on conflict (version) do nothing;
                     """
                 )
                 self._validate_schema(cursor)
@@ -680,26 +730,35 @@ class PostgresStore:
             cursor.execute(
                 """
                 insert into user_stories
-                  (story_id, requirement_id, project, document_id, document_version_id,
-                   doc_version, title, priority, status, origin, run_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                  (story_id, requirement_id, requirement_revision_id, project, document_id,
+                   document_version_id, doc_version, origin_version, title, priority, status,
+                   origin, run_id, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (story_id) do update
-                set title = excluded.title,
+                set requirement_revision_id = excluded.requirement_revision_id,
+                    document_version_id = excluded.document_version_id,
+                    doc_version = excluded.doc_version,
+                    origin_version = excluded.origin_version,
+                    title = excluded.title,
                     priority = excluded.priority,
                     status = excluded.status,
                     origin = excluded.origin,
                     run_id = excluded.run_id,
-                    payload = excluded.payload
+                    payload = excluded.payload,
+                    updated_at = now()
                 """,
                 (
                     story_id,
                     record.requirement_id,
+                    record.requirement_revision_id,
                     record.project,
                     record.document_id,
                     record.document_version_id,
                     record.doc_version,
+                    record.origin_version,
                     record.title,
                     record.priority,
+                    record.status,
                     record.origin,
                     run_id,
                     json.dumps(record.model_dump(mode="json")),
@@ -737,13 +796,15 @@ class PostgresStore:
                     "kind": "user_story",
                     "story_id": story_id,
                     "requirement_id": record.requirement_id,
+                    "requirement_revision_id": record.requirement_revision_id,
                     "project": record.project,
                     "document_id": record.document_id,
                     "document_version_id": record.document_version_id,
                     "doc_version": record.doc_version,
+                    "origin_version": record.origin_version,
                     "title": record.title,
                     "priority": record.priority,
-                    "status": "active",
+                    "status": record.status,
                     "origin": record.origin,
                     "run_id": run_id,
                     "user_story": record.model_dump(mode="json"),
@@ -867,17 +928,22 @@ class PostgresStore:
                 """
                 insert into test_scenarios
                   (scenario_id, story_id, requirement_id, project, document_id,
-                   document_version_id, doc_version, title, scenario_type, priority,
-                   status, origin, run_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                   document_version_id, doc_version, requirement_revision_id, origin_version,
+                   title, scenario_type, priority, status, origin, run_id, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (scenario_id) do update
-                set title = excluded.title,
+                set requirement_revision_id = excluded.requirement_revision_id,
+                    document_version_id = excluded.document_version_id,
+                    doc_version = excluded.doc_version,
+                    origin_version = excluded.origin_version,
+                    title = excluded.title,
                     scenario_type = excluded.scenario_type,
                     priority = excluded.priority,
                     status = excluded.status,
                     origin = excluded.origin,
                     run_id = excluded.run_id,
-                    payload = excluded.payload
+                    payload = excluded.payload,
+                    updated_at = now()
                 """,
                 (
                     scenario_id,
@@ -887,9 +953,12 @@ class PostgresStore:
                     record.document_id,
                     record.document_version_id,
                     record.doc_version,
+                    record.requirement_revision_id,
+                    record.origin_version,
                     record.title,
                     record.scenario_type,
                     record.priority,
+                    record.status,
                     record.origin,
                     run_id,
                     json.dumps(record.model_dump(mode="json")),
@@ -929,14 +998,16 @@ class PostgresStore:
                     "scenario_id": scenario_id,
                     "story_id": record.story_id,
                     "requirement_id": record.requirement_id,
+                    "requirement_revision_id": record.requirement_revision_id,
                     "project": record.project,
                     "document_id": record.document_id,
                     "document_version_id": record.document_version_id,
                     "doc_version": record.doc_version,
+                    "origin_version": record.origin_version,
                     "title": record.title,
                     "scenario_type": record.scenario_type,
                     "priority": record.priority,
-                    "status": "active",
+                    "status": record.status,
                     "origin": record.origin,
                     "run_id": run_id,
                     "test_scenario": record.model_dump(mode="json"),
@@ -1061,6 +1132,255 @@ class PostgresStore:
             and _matches_version(row)
         ]
         return _compute_coverage(requirements, stories, scenario_story_ids)
+
+    def upsert_requirement(
+        self,
+        artifact: RequirementArtifact,
+        artifact_path: str,
+        run_id: str,
+    ) -> None:
+        self.persist_artifact(artifact, artifact_path, run_id)
+
+    def upsert_user_story(
+        self,
+        artifact: UserStoryArtifact,
+        artifact_path: str,
+        run_id: str,
+    ) -> None:
+        self.persist_user_story_artifact(artifact, artifact_path, run_id)
+
+    def upsert_test_scenario(
+        self,
+        artifact: TestScenarioArtifact,
+        artifact_path: str,
+        run_id: str,
+    ) -> None:
+        self.persist_test_scenario_artifact(artifact, artifact_path, run_id)
+
+    def mark_requirement_superseded(
+        self,
+        *,
+        requirement_id: str,
+        revision_id: str,
+        superseded_by_version: str,
+    ) -> None:
+        if self.settings.postgres.mode == "local_json":
+            self._update_local_revision_status(revision_id, "superseded")
+            return
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    update requirement_revisions
+                    set status = 'superseded',
+                        superseded_by_version = %s,
+                        superseded_at = now(),
+                        updated_at = now()
+                    where requirement_id = %s and revision_id = %s
+                    """,
+                    (superseded_by_version, requirement_id, revision_id),
+                )
+            connection.commit()
+
+    def hard_delete_requirement(self, requirement_id: str) -> None:
+        """
+        Delete strictly outdated requirement.
+        Child user stories and test scenarios are removed in the same transaction.
+        TODO: Add approval gate before destructive cascade delete.
+        """
+        if self.settings.postgres.mode == "local_json":
+            self._hard_delete_requirement_local(requirement_id)
+            return
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "delete from test_scenario_evidence where requirement_id = %s",
+                    (requirement_id,),
+                )
+                delete_tables = (
+                    "test_scenarios",
+                    "user_story_evidence",
+                    "user_stories",
+                    "requirement_fact_links",
+                    "requirement_evidence",
+                    "requirement_delta_events",
+                    "requirement_revisions",
+                    "requirements",
+                )
+                for table_name in delete_tables:
+                    cursor.execute(
+                        f"delete from {table_name} where requirement_id = %s",
+                        (requirement_id,),
+                    )
+            connection.commit()
+
+    def load_requirements_for_generation(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None = None,
+    ) -> list[RequirementInput]:
+        if self.settings.postgres.mode == "local_json":
+            return self._load_requirements_for_generation_local(
+                project=project,
+                document_version_id=document_version_id,
+            )
+        sql = """
+            select r.requirement_id,
+                   rr.revision_id,
+                   rr.statement,
+                   rr.requirement_type,
+                   rr.priority,
+                   coalesce(string_agg(distinct re.chunk_id, ','), '') as chunk_ids
+            from requirements r
+            join requirement_revisions rr on rr.revision_id = r.active_revision_id
+            left join requirement_evidence re on re.revision_id = rr.revision_id
+            where r.project = %s
+              and r.status = 'active'
+              and rr.status = 'active'
+        """
+        params: list[str] = [project]
+        if document_version_id is not None:
+            sql += " and rr.first_seen_document_version_id = %s"
+            params.append(document_version_id)
+        sql += """
+            group by r.requirement_id, rr.revision_id, rr.statement, rr.requirement_type,
+                     rr.priority
+            order by r.requirement_id
+        """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(sql, tuple(params))
+            rows = cursor.fetchall()
+        return [
+            RequirementInput(
+                requirement_id=str(row[0]),
+                revision_id=str(row[1]),
+                requirement_text=str(row[2]),
+                requirement_type=str(row[3]),
+                priority=normalize_priority_label(row[4]),
+                evidence_chunk_ids=[chunk for chunk in str(row[5]).split(",") if chunk],
+            )
+            for row in rows
+        ]
+
+    def load_user_stories_for_generation(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None = None,
+    ) -> list[UserStoryRecord]:
+        if self.settings.postgres.mode == "local_json":
+            return self._load_user_stories_for_generation_local(
+                project=project,
+                document_version_id=document_version_id,
+            )
+        sql = "select payload from user_stories where project = %s and status = 'active'"
+        params: list[str] = [project]
+        if document_version_id is not None:
+            sql += " and document_version_id = %s"
+            params.append(document_version_id)
+        sql += " order by story_id"
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(sql, tuple(params))
+            rows = cursor.fetchall()
+        return [UserStoryRecord.model_validate(_artifact_payload_from_row(row[0])) for row in rows]
+
+    def load_test_scenarios_for_generation(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None = None,
+    ) -> list[TestScenarioRecord]:
+        if self.settings.postgres.mode == "local_json":
+            return self._load_test_scenarios_for_generation_local(
+                project=project,
+                document_version_id=document_version_id,
+            )
+        sql = "select payload from test_scenarios where project = %s and status = 'active'"
+        params: list[str] = [project]
+        if document_version_id is not None:
+            sql += " and document_version_id = %s"
+            params.append(document_version_id)
+        sql += " order by scenario_id"
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(sql, tuple(params))
+            rows = cursor.fetchall()
+        return [
+            TestScenarioRecord.model_validate(_artifact_payload_from_row(row[0])) for row in rows
+        ]
+
+    def load_artifact_from_postgres(
+        self,
+        *,
+        artifact_kind: str,
+        artifact_path: str | None = None,
+        document_version_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if artifact_kind in {"requirements", "requirements_full"}:
+            return self.load_requirement_artifact_payload(
+                artifact_path=artifact_path,
+                document_version_id=document_version_id,
+            )
+        if artifact_kind == "user_stories":
+            return self.load_user_story_artifact_payload(
+                artifact_path=artifact_path,
+                document_version_id=document_version_id,
+            )
+        if artifact_kind == "test_scenarios":
+            return self.load_test_scenario_artifact_payload(
+                artifact_path=artifact_path,
+                document_version_id=document_version_id,
+            )
+        raise ValueError(f"unsupported artifact kind: {artifact_kind}")
+
+    def load_artifact_payloads_for_project(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.settings.postgres.mode == "local_json":
+            return self._load_artifact_payloads_for_project_local(
+                project=project,
+                document_version_id=document_version_id,
+            )
+        params: list[str] = [project]
+        version_filter = ""
+        if document_version_id is not None:
+            version_filter = " and a.document_version_id = %s"
+            params.append(document_version_id)
+        queries = [
+            (
+                "requirements_full",
+                "requirement_artifacts",
+            ),
+            ("user_stories", "user_story_artifacts"),
+            ("test_scenarios", "test_scenario_artifacts"),
+        ]
+        rows: list[dict[str, Any]] = []
+        with self._connect() as connection, connection.cursor() as cursor:
+            for kind, table in queries:
+                cursor.execute(
+                    f"""
+                    select %s as artifact_kind, a.artifact_path, a.document_version_id, a.payload
+                    from {table} a
+                    join document_versions dv
+                      on dv.document_version_id = a.document_version_id
+                    where dv.project = %s{version_filter}
+                    order by a.created_at desc
+                    """,
+                    (kind, *params),
+                )
+                for row in cursor.fetchall():
+                    rows.append(
+                        {
+                            "artifact_kind": str(row[0]),
+                            "artifact_path": str(row[1]),
+                            "document_version_id": str(row[2]),
+                            "payload": _artifact_payload_from_row(row[3]),
+                        }
+                    )
+        return rows
 
     def record_run(self, run_id: str, status: str, payload: dict[str, Any]) -> None:
         if self.settings.postgres.mode == "local_json":
@@ -1234,10 +1554,13 @@ class PostgresStore:
                 cursor.execute(
                     """
                     update requirement_revisions
-                    set status = 'superseded', updated_at = now()
+                    set status = 'superseded',
+                        superseded_by_version = %s,
+                        superseded_at = now(),
+                        updated_at = now()
                     where revision_id = %s
                     """,
-                    (event.revision_id,),
+                    (event.document_version_id, event.revision_id),
                 )
             cursor.execute(
                 """
@@ -1356,6 +1679,140 @@ class PostgresStore:
                     "event": event.model_dump(mode="json"),
                 },
             )
+
+    def _hard_delete_requirement_local(self, requirement_id: str) -> None:
+        rows = [
+            row
+            for row in self._read_local_rows()
+            if not _local_row_matches_requirement(row, requirement_id)
+        ]
+        self._write_local_rows(rows)
+
+    def _load_requirements_for_generation_local(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None,
+    ) -> list[RequirementInput]:
+        rows = self._read_local_rows()
+        active_revision_by_requirement = {
+            str(row["requirement_id"]): str(row["active_revision_id"])
+            for row in rows
+            if row.get("kind") == "requirement"
+            and row.get("project") == project
+            and row.get("status") == "active"
+        }
+        inputs: list[RequirementInput] = []
+        for row in rows:
+            if row.get("kind") != "requirement_revision" or row.get("project") != project:
+                continue
+            if row.get("status") != "active":
+                continue
+            if (
+                document_version_id is not None
+                and row.get("document_version_id") != document_version_id
+            ):
+                continue
+            requirement = row.get("requirement")
+            if not isinstance(requirement, dict):
+                continue
+            requirement_id = str(requirement["requirement_id"])
+            revision_id = str(requirement["revision_id"])
+            if active_revision_by_requirement.get(requirement_id) != revision_id:
+                continue
+            inputs.append(
+                RequirementInput(
+                    requirement_id=requirement_id,
+                    revision_id=revision_id,
+                    requirement_text=str(requirement["statement"]),
+                    requirement_type=str(requirement["requirement_type"]),
+                    priority=normalize_priority_label(requirement["priority"]),
+                    evidence_chunk_ids=[
+                        str(evidence["source_trace"]["chunk_id"])
+                        for evidence in requirement.get("evidence", [])
+                        if isinstance(evidence, dict)
+                        and isinstance(evidence.get("source_trace"), dict)
+                    ],
+                )
+            )
+        return inputs
+
+    def _load_user_stories_for_generation_local(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None,
+    ) -> list[UserStoryRecord]:
+        records: list[UserStoryRecord] = []
+        for row in self._read_local_rows():
+            if row.get("kind") != "user_story" or row.get("project") != project:
+                continue
+            if row.get("status", "active") != "active":
+                continue
+            if (
+                document_version_id is not None
+                and row.get("document_version_id") != document_version_id
+            ):
+                continue
+            payload = row.get("user_story")
+            if isinstance(payload, dict):
+                records.append(UserStoryRecord.model_validate(payload))
+        return records
+
+    def _load_test_scenarios_for_generation_local(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None,
+    ) -> list[TestScenarioRecord]:
+        records: list[TestScenarioRecord] = []
+        for row in self._read_local_rows():
+            if row.get("kind") != "test_scenario" or row.get("project") != project:
+                continue
+            if row.get("status", "active") != "active":
+                continue
+            if (
+                document_version_id is not None
+                and row.get("document_version_id") != document_version_id
+            ):
+                continue
+            payload = row.get("test_scenario")
+            if isinstance(payload, dict):
+                records.append(TestScenarioRecord.model_validate(payload))
+        return records
+
+    def _load_artifact_payloads_for_project_local(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for row in self._read_local_rows():
+            kind = row.get("kind")
+            if kind not in {
+                "requirement_artifact",
+                "user_story_artifact",
+                "test_scenario_artifact",
+            }:
+                continue
+            artifact = row.get("artifact")
+            if not isinstance(artifact, dict) or artifact.get("project") != project:
+                continue
+            if (
+                document_version_id is not None
+                and artifact.get("document_version_id") != document_version_id
+            ):
+                continue
+            rows.append(
+                {
+                    "artifact_kind": str(kind).replace("_artifact", ""),
+                    "artifact_path": str(row.get("artifact_path", "")),
+                    "document_version_id": str(artifact.get("document_version_id", "")),
+                    "payload": artifact,
+                }
+            )
+        return rows
 
     def _connect(self) -> Any:
         import psycopg
@@ -1539,6 +1996,18 @@ def _artifact_payload_from_row(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return dict(value)
+
+
+def _local_row_matches_requirement(row: dict[str, Any], requirement_id: str) -> bool:
+    if row.get("requirement_id") == requirement_id:
+        return True
+    if row.get("kind") == "requirement" and row.get("_local_key") == requirement_id:
+        return True
+    for key in ("requirement", "user_story", "test_scenario", "event"):
+        payload = row.get(key)
+        if isinstance(payload, dict) and payload.get("requirement_id") == requirement_id:
+            return True
+    return False
 
 
 def _compute_coverage(

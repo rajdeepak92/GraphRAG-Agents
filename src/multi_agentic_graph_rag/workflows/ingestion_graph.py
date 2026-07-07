@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, TypedDict
 
-from common_defs import ModeName, ProviderName, RuntimeCommand
 from langgraph.graph import END, StateGraph
 
+from common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.agents.requirement_discovery_agent import RequirementDiscoveryAgent
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
@@ -15,17 +15,24 @@ from multi_agentic_graph_rag.db.chroma_store import ChromaStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import ConfigurationError
-from multi_agentic_graph_rag.domain.identifiers import run_id
-from multi_agentic_graph_rag.domain.schemas import IngestionRequest, IngestionResult
+from multi_agentic_graph_rag.domain.identifiers import requirement_delta_event_id, run_id
+from multi_agentic_graph_rag.domain.schemas import (
+    IngestionRequest,
+    IngestionResult,
+    RequirementArtifact,
+    RequirementDeltaEvent,
+    RequirementRevisionSnapshot,
+    VerifiedRequirement,
+)
 from multi_agentic_graph_rag.llm_models.factory import (
     create_embedding_model,
     create_reasoning_model,
     create_reranker_model,
 )
 from multi_agentic_graph_rag.observability.session import RunSession, command_session
+from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.artifacts import (
     write_compact_requirement_artifact,
-    write_requirement_artifact,
 )
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
@@ -313,12 +320,31 @@ def _run_pipeline(
             prior_revisions=prior_revisions,
             logger=logger,
         )
-        full_artifact_path = write_requirement_artifact(
-            artifact,
-            run_dir,
-            logger=logger,
+        artifact = _apply_strictly_outdated_cascade(
+            artifact=artifact,
+            prior_revisions=prior_revisions,
+            postgres=postgres,
+            replace_version=request.replace_version,
         )
         compact_artifact = build_compact_requirement_artifact(artifact)
+        postgres.persist_manifest(manifest)
+        full_artifact_target = run_dir / "requirements_full.json"
+        if logger is not None:
+            logger.info(
+                "Persisting generated requirements_full.json payload and "
+                "requirement ledger to PostgreSQL",
+                step="persist_requirements_postgres",
+                document_version_id=artifact.document_version_id,
+                artifact_path=str(full_artifact_target),
+                fact_count=len(artifact.facts),
+                requirement_count=len(artifact.requirements),
+                store_responsibility="requirement_artifact_and_ledger_only",
+            )
+        full_artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
+            artifact=artifact,
+            artifact_path=full_artifact_target,
+            run_id=state["run_id"],
+        )
         artifact_path = write_compact_requirement_artifact(
             compact_artifact,
             run_dir,
@@ -328,26 +354,13 @@ def _run_pipeline(
             session.artifact_payload = compact_artifact.model_dump(mode="json")
         if logger is not None:
             logger.info(
-                "Requirement artifacts written to {path} and {full_path}",
+                "Requirement artifacts persisted/written to {path} and {full_path}",
                 step="write_requirement_artifact",
                 path=str(artifact_path),
                 full_path=str(full_artifact_path),
                 document_version_id=artifact.document_version_id,
                 status="completed",
             )
-        postgres.persist_manifest(manifest)
-        if logger is not None:
-            logger.info(
-                "Persisting generated requirements_full.json payload and "
-                "requirement ledger to PostgreSQL",
-                step="persist_requirements_postgres",
-                document_version_id=artifact.document_version_id,
-                artifact_path=str(full_artifact_path),
-                fact_count=len(artifact.facts),
-                requirement_count=len(artifact.requirements),
-                store_responsibility="requirement_artifact_and_ledger_only",
-            )
-        postgres.persist_artifact(artifact, str(full_artifact_path), state["run_id"])
         result_payload: IngestionState = {
             "run_id": state["run_id"],
             "checksum": checksum,
@@ -402,6 +415,80 @@ def _run_pipeline(
             logger=logger,
         )
         raise
+
+
+def _apply_strictly_outdated_cascade(
+    *,
+    artifact: RequirementArtifact,
+    prior_revisions: dict[str, RequirementRevisionSnapshot],
+    postgres: PostgresStore,
+    replace_version: bool,
+) -> RequirementArtifact:
+    if not replace_version:
+        return artifact
+    strictly_outdated: dict[str, VerifiedRequirement] = {}
+    strict_events: list[RequirementDeltaEvent] = []
+    for requirement in artifact.requirements:
+        prior = prior_revisions.get(requirement.requirement_id)
+        if prior is None or not _is_explicit_removal(prior.statement, requirement.statement):
+            continue
+        strictly_outdated[requirement.requirement_id] = requirement
+        postgres.hard_delete_requirement(requirement.requirement_id)
+        strict_events.append(
+            RequirementDeltaEvent(
+                event_id=requirement_delta_event_id(
+                    event_type="strictly_outdated",
+                    requirement_identifier=requirement.requirement_id,
+                    revision_identifier=requirement.revision_id,
+                    previous_revision_identifier=prior.revision_id,
+                    document_version_identifier=artifact.document_version_id,
+                ),
+                event_type="strictly_outdated",
+                requirement_id=requirement.requirement_id,
+                revision_id=requirement.revision_id,
+                previous_revision_id=prior.revision_id,
+                document_version_id=artifact.document_version_id,
+                evidence_ids=[evidence.evidence_id for evidence in requirement.evidence],
+                impacted_artifact_types=["user_story", "scenario", "test_case"],
+            )
+        )
+    if not strictly_outdated:
+        return artifact
+    filtered_requirements = [
+        requirement
+        for requirement in artifact.requirements
+        if requirement.requirement_id not in strictly_outdated
+    ]
+    filtered_events = [
+        event for event in artifact.delta_events if event.requirement_id not in strictly_outdated
+    ]
+    return artifact.model_copy(
+        update={
+            "requirements": filtered_requirements,
+            "delta_events": [*filtered_events, *strict_events],
+        }
+    )
+
+
+def _is_explicit_removal(prior: str, incoming: str) -> bool:
+    incoming_norm = incoming.lower()
+    markers = (
+        "does not support",
+        "do not support",
+        "no longer supports",
+        "must not",
+        "shall not",
+        "removed",
+        "disabled",
+        "not supported",
+    )
+    if not any(marker in incoming_norm for marker in markers):
+        return False
+    prior_tokens = {token for token in prior.lower().replace("-", " ").split() if len(token) > 3}
+    incoming_tokens = {token for token in incoming_norm.replace("-", " ").split() if len(token) > 3}
+    if not prior_tokens:
+        return False
+    return len(prior_tokens & incoming_tokens) / len(prior_tokens) >= 0.35
 
 
 def run_ingestion(

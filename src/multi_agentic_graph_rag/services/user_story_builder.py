@@ -88,10 +88,12 @@ def _to_record(
     return UserStoryRecord(
         story_id=story_id,
         requirement_id=requirement.requirement_id,
+        requirement_revision_id=requirement.revision_id,
         project=project,
         document_id=document_id,
         document_version_id=document_version_id,
         doc_version=doc_version,
+        origin_version=doc_version,
         title=story.title,
         epic=story.epic,
         priority=story.priority,

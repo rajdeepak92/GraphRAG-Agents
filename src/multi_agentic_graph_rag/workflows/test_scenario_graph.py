@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
-from common_defs import ModeName, ProviderName, RuntimeCommand
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
+from langgraph.types import Command
 from pydantic import ValidationError
 
+from common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGenerationAgent
 from multi_agentic_graph_rag.common_prompt_defs import PromptTestScenarioGeneration
 from multi_agentic_graph_rag.config.config_loader import load_config
@@ -25,12 +28,15 @@ from multi_agentic_graph_rag.domain.errors import (
 )
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
+    TestScenarioArtifact,
     TestScenarioModel,
+    TestScenarioRecord,
     TestScenarioRequest,
     TestScenarioResult,
     UserStoryArtifact,
     UserStoryRecord,
 )
+from multi_agentic_graph_rag.io.feedback_io import CLIFeedbackIO, FeedbackIO
 from multi_agentic_graph_rag.llm_models.factory import (
     create_embedding_model,
     create_reasoning_model,
@@ -42,6 +48,7 @@ from multi_agentic_graph_rag.observability.session import (
     command_run_id,
     command_session,
 )
+from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.artifacts import write_test_scenario_artifact
 from multi_agentic_graph_rag.services.generation_checkpoint import (
     STAGE_TEST_SCENARIO,
@@ -64,7 +71,16 @@ from multi_agentic_graph_rag.services.requirement_source import (
     load_requirement_source_local,
 )
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
+from multi_agentic_graph_rag.services.scenario_dedup import DedupConfig, DedupEngine
+from multi_agentic_graph_rag.services.semantic_matcher import SemanticMatcher
 from multi_agentic_graph_rag.services.test_scenario_builder import build_test_scenario_artifact
+from multi_agentic_graph_rag.workflows.hfil_node import (
+    HFILRuntime,
+    hfil_review_node,
+    hfil_scenarios_from_state,
+    initialize_hfil_state,
+    route_hfil,
+)
 
 
 class TestScenarioState(TypedDict, total=False):
@@ -81,6 +97,17 @@ class TestScenarioState(TypedDict, total=False):
     requirement_coverage: dict[str, list[str]]
     warnings: list[str]
     errors: list[str]
+    output_dir: str
+    artifact_payload: dict[str, Any]
+    evidence_by_requirement: dict[str, list[str]]
+    hfil_enabled: bool
+    hfil_done: bool
+    hfil_phase: str
+    hfil_pending_prompt: str
+    hfil_scenarios: list[dict[str, Any]]
+    hfil_user_stories: list[dict[str, Any]]
+    hfil_last_duplicate_groups: list[dict[str, Any]]
+    hfil_messages: list[str]
 
 
 @dataclass(frozen=True)
@@ -92,14 +119,50 @@ class _StorySource:
     stories: list[UserStoryRecord]
 
 
-def build_test_scenario_graph(session: RunSession | None = None) -> Any:
+def build_test_scenario_graph(
+    session: RunSession | None = None,
+    *,
+    settings: AppSettings | None = None,
+    hfil_enabled: bool | None = None,
+    hfil_runtime: HFILRuntime | None = None,
+    checkpointer: Any | None = None,
+) -> Any:
+    settings = settings or load_config()
+    enabled = settings.enable_hfil if hfil_enabled is None else hfil_enabled
     graph = StateGraph(TestScenarioState)
     graph.add_node("validate_request", lambda state: _validate_request(state, session=session))
-    graph.add_node("run_pipeline", lambda state: _run_pipeline(state, session=session))
+    graph.add_node("generate", lambda state: _generate(state, session=session, settings=settings))
+    graph.add_node("validate_and_assign_ids", _validate_and_assign_ids)
+    if enabled:
+        if hfil_runtime is None:
+            raise ConfigurationError("HFIL runtime is required when HFIL is enabled")
+        graph.add_node(
+            "hfil_review",
+            lambda state: hfil_review_node(dict(state), runtime=hfil_runtime),
+        )
+    graph.add_node("finalize", _finalize)
+    graph.add_node("persist", lambda state: _persist(state, session=session, settings=settings))
     graph.set_entry_point("validate_request")
-    graph.add_edge("validate_request", "run_pipeline")
-    graph.add_edge("run_pipeline", END)
-    return graph.compile()
+    graph.add_edge("validate_request", "generate")
+    graph.add_edge("generate", "validate_and_assign_ids")
+    # --- HFIL WIRING (optional).
+    # Comment out this block OR set settings.enable_hfil=False to disable.
+    if enabled:
+        graph.add_edge("validate_and_assign_ids", "hfil_review")
+        graph.add_conditional_edges(
+            "hfil_review",
+            route_hfil,
+            {
+                "loop": "hfil_review",
+                "done": "finalize",
+            },
+        )
+    else:
+        graph.add_edge("validate_and_assign_ids", "finalize")
+    # --- END HFIL WIRING ---
+    graph.add_edge("finalize", "persist")
+    graph.add_edge("persist", END)
+    return graph.compile(checkpointer=checkpointer)
 
 
 def _validate_request(
@@ -130,6 +193,239 @@ def _validate_request(
             run_id=rid,
         )
     return {"request": request.model_dump(mode="json"), "run_id": rid, "warnings": [], "errors": []}
+
+
+def _generate(
+    state: TestScenarioState,
+    *,
+    session: RunSession | None,
+    settings: AppSettings,
+) -> TestScenarioState:
+    request = TestScenarioRequest.model_validate(state["request"])
+    if session is not None:
+        session.set_log_level(settings.log_level)
+    _apply_overrides(settings, request)
+    logger = session.logger if session is not None else None
+    postgres = PostgresStore(settings)
+    neo4j = Neo4jStore(settings)
+    chroma = ChromaStore(settings)
+    run_dir = session.run_dir if session is not None else None
+
+    _validate_required_test_scenario_stack(settings)
+    if logger is not None:
+        logger.info(
+            "Beginning test-scenario generation pipeline",
+            step="generate",
+            run_id=state["run_id"],
+            hfil_enabled=settings.enable_hfil,
+            status="started",
+        )
+    _check_store(logger, "check_postgres", postgres.check)
+    _check_store(logger, "check_neo4j", neo4j.check)
+    _check_store(logger, "check_chroma", chroma.check)
+    postgres.ensure_schema()
+
+    reasoning_model = create_reasoning_model(settings, logger=logger, run_dir=run_dir)
+    embedding_model = create_embedding_model(settings)
+    reranker_model = create_reranker_model(settings)
+    _warmup_reasoning_model(reasoning_model)
+    _apply_test_scenario_system_message(reasoning_model)
+    neo4j.ensure_search_index()
+    if logger is not None:
+        logger.info(
+            "Model readiness checks completed",
+            step="check_models",
+            reasoning_provider=reasoning_model.provider_name,
+            embedding_provider=embedding_model.provider_name,
+            reranker_provider=reranker_model.provider_name,
+            status="PASS",
+        )
+
+    source = _load_story_source(request, postgres, logger)
+    warnings: list[str] = []
+    requirement_map = _load_requirement_map(request, source, postgres, logger, warnings)
+    if logger is not None:
+        logger.info(
+            "Loaded {story_count} user stories for test-scenario generation",
+            step="load_user_stories",
+            story_count=len(source.stories),
+            requirement_count=len(requirement_map),
+            document_version_id=source.document_version_id,
+            project=source.project,
+        )
+
+    retrieval = RetrievalService(
+        chroma=chroma,
+        neo4j=neo4j,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
+        settings=settings.test_scenario,
+        logger=logger,
+    )
+    agent = TestScenarioGenerationAgent(reasoning_model, logger=logger)
+    out_dir = _output_dir(request, settings, source, state["run_id"])
+    evidence_by_requirement: dict[str, list[str]] = {
+        story.requirement_id: (
+            list(requirement_map[story.requirement_id].evidence_chunk_ids)
+            if story.requirement_id in requirement_map
+            else []
+        )
+        for story in source.stories
+    }
+
+    entries = _build_or_load_context_map(
+        source=source,
+        requirement_map=requirement_map,
+        retrieval=retrieval,
+        out_dir=out_dir,
+        run_id=state["run_id"],
+        logger=logger,
+    )
+    generated = _generate_from_context_map(
+        source=source,
+        requirement_map=requirement_map,
+        entries=entries,
+        agent=agent,
+        neo4j=neo4j,
+        out_dir=out_dir,
+        run_id=state["run_id"],
+        logger=logger,
+    )
+
+    artifact = build_test_scenario_artifact(
+        project=source.project,
+        document_id=source.document_id,
+        document_version_id=source.document_version_id,
+        doc_version=source.doc_version,
+        generated=generated,
+    )
+    artifact = _preserve_existing_scenario_ids(
+        artifact,
+        postgres.load_test_scenarios_for_generation(project=source.project),
+    )
+    next_state: dict[str, Any] = {
+        **state,
+        "project": source.project,
+        "document_id": source.document_id,
+        "document_version_id": source.document_version_id,
+        "doc_version": source.doc_version,
+        "output_dir": str(out_dir),
+        "artifact_path": str(out_dir / "test_scenarios.json"),
+        "artifact_payload": artifact.model_dump(mode="json"),
+        "story_count": len(source.stories),
+        "scenario_ids": list(artifact.scenarios),
+        "coverage": artifact.coverage,
+        "requirement_coverage": artifact.requirement_coverage,
+        "evidence_by_requirement": evidence_by_requirement,
+        "warnings": warnings,
+        "errors": [],
+    }
+    initialized = initialize_hfil_state(
+        state=next_state,
+        scenarios=list(artifact.scenarios.values()),
+        user_stories=source.stories,
+        enabled=settings.enable_hfil,
+    )
+    return cast(TestScenarioState, initialized)
+
+
+def _validate_and_assign_ids(state: TestScenarioState) -> TestScenarioState:
+    TestScenarioArtifact.model_validate(state["artifact_payload"])
+    return state
+
+
+def _finalize(state: TestScenarioState) -> TestScenarioState:
+    artifact = TestScenarioArtifact.model_validate(state["artifact_payload"])
+    if state.get("hfil_enabled"):
+        scenarios = hfil_scenarios_from_state(dict(state))
+        artifact = artifact.model_copy(
+            update={
+                "scenarios": {scenario.scenario_id: scenario for scenario in scenarios},
+                "coverage": _coverage_by_story(scenarios),
+                "requirement_coverage": _coverage_by_requirement(scenarios),
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    payload = artifact.model_dump(mode="json")
+    return {
+        **state,
+        "artifact_payload": payload,
+        "scenario_ids": list(artifact.scenarios),
+        "coverage": artifact.coverage,
+        "requirement_coverage": artifact.requirement_coverage,
+    }
+
+
+def _persist(
+    state: TestScenarioState,
+    *,
+    session: RunSession | None,
+    settings: AppSettings,
+) -> TestScenarioState:
+    request = TestScenarioRequest.model_validate(state["request"])
+    _apply_overrides(settings, request)
+    logger = session.logger if session is not None else None
+    postgres = PostgresStore(settings)
+    neo4j = Neo4jStore(settings)
+    artifact = TestScenarioArtifact.model_validate(state["artifact_payload"])
+    artifact_path = Path(state["artifact_path"])
+    ArtifactMirror(postgres).persist_committed_artifact(
+        artifact=artifact,
+        artifact_path=artifact_path,
+        run_id=state["run_id"],
+    )
+    if settings.hfil_emit_md:
+        _write_test_scenario_markdown(artifact, artifact_path.with_suffix(".md"))
+    if session is not None:
+        session.artifact_payload = artifact.model_dump(mode="json")
+    if logger is not None:
+        logger.info(
+            "Test-scenario artifact persisted to PostgreSQL and mirrored to {path}",
+            step="persist",
+            path=str(artifact_path),
+            scenario_count=len(artifact.scenarios),
+            story_count=len(artifact.coverage),
+            requirement_count=len(artifact.requirement_coverage),
+            status="completed",
+        )
+        logger.info(
+            "Projecting test-scenario coverage into Neo4j",
+            step="project_test_scenario_coverage",
+            document_version_id=artifact.document_version_id,
+            scenario_count=len(artifact.scenarios),
+            store_responsibility="test_scenario_traceability_nodes",
+        )
+    neo4j.project_test_scenario_coverage(
+        artifact,
+        dict(state.get("evidence_by_requirement", {})),
+    )
+    result_payload: TestScenarioState = {
+        "run_id": state["run_id"],
+        "project": artifact.project,
+        "document_id": artifact.document_id,
+        "document_version_id": artifact.document_version_id,
+        "doc_version": artifact.doc_version,
+        "artifact_path": str(artifact_path),
+        "story_count": state["story_count"],
+        "scenario_ids": list(artifact.scenarios),
+        "coverage": artifact.coverage,
+        "requirement_coverage": artifact.requirement_coverage,
+        "warnings": state.get("warnings", []),
+        "errors": [],
+    }
+    if session is not None:
+        session.metadata.update(result_payload)
+    postgres.record_run(state["run_id"], "completed", dict(result_payload))
+    if logger is not None:
+        logger.info(
+            "Test-scenario generation pipeline completed",
+            step="run_pipeline",
+            run_id=state["run_id"],
+            scenario_count=len(artifact.scenarios),
+            story_count=state["story_count"],
+            status="completed",
+        )
+    return result_payload
 
 
 def _run_pipeline(
@@ -496,10 +792,29 @@ def run_test_scenario_generation(
         ) as managed_session:
             return run_test_scenario_generation(request, session=managed_session)
     session.request_payload = request.model_dump(mode="json")
-    graph = build_test_scenario_graph(session)
-    final_state = graph.invoke(
-        {"request": request.model_dump(mode="json"), "run_id": session.run_id}
-    )
+    settings = load_config()
+    session.set_log_level(settings.log_level)
+    _apply_overrides(settings, request)
+    initial_state = {"request": request.model_dump(mode="json"), "run_id": session.run_id}
+    if settings.enable_hfil:
+        final_state = _invoke_hfil_graph(
+            request=request,
+            session=session,
+            settings=settings,
+            initial_state=initial_state,
+            feedback_io=CLIFeedbackIO(),
+        )
+    else:
+        graph = build_test_scenario_graph(
+            session,
+            settings=settings,
+            hfil_enabled=False,
+        )
+        final_state = graph.invoke(initial_state)
+    return _result_from_state(final_state)
+
+
+def _result_from_state(final_state: dict[str, Any]) -> TestScenarioResult:
     return TestScenarioResult(
         run_id=final_state["run_id"],
         status="completed",
@@ -515,6 +830,112 @@ def run_test_scenario_generation(
         warnings=final_state.get("warnings", []),
         errors=final_state.get("errors", []),
     )
+
+
+def _invoke_hfil_graph(
+    *,
+    request: TestScenarioRequest,
+    session: RunSession,
+    settings: AppSettings,
+    initial_state: dict[str, Any],
+    feedback_io: FeedbackIO,
+) -> dict[str, Any]:
+    runtime = _build_hfil_runtime(settings, session)
+    thread_id = request.thread_id or f"{session.run_id}:hfil"
+    config = {"configurable": {"thread_id": thread_id}}
+    if (
+        settings.hfil_checkpointer == "postgres"
+        and settings.postgres.mode == ModeName.POSTGRES.value
+    ):
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        with PostgresSaver.from_conn_string(_checkpoint_dsn(settings)) as checkpointer:
+            checkpointer.setup()
+            graph = build_test_scenario_graph(
+                session,
+                settings=settings,
+                hfil_enabled=True,
+                hfil_runtime=runtime,
+                checkpointer=checkpointer,
+            )
+            return _drive_hfil_interrupts(graph, initial_state, config, feedback_io)
+
+    memory_checkpointer = InMemorySaver()
+    graph = build_test_scenario_graph(
+        session,
+        settings=settings,
+        hfil_enabled=True,
+        hfil_runtime=runtime,
+        checkpointer=memory_checkpointer,
+    )
+    return _drive_hfil_interrupts(graph, initial_state, config, feedback_io)
+
+
+def _build_hfil_runtime(settings: AppSettings, session: RunSession) -> HFILRuntime:
+    reasoning_model = create_reasoning_model(
+        settings,
+        logger=session.logger,
+        run_dir=session.run_dir,
+    )
+    embedding_model = create_embedding_model(settings)
+    reranker_model = create_reranker_model(settings)
+    _warmup_reasoning_model(reasoning_model)
+    _apply_test_scenario_system_message(reasoning_model)
+    matcher = SemanticMatcher(
+        embedding_model,
+        cos_floor=settings.hfil_cos_floor,
+        cos_ceil=settings.hfil_cos_ceil,
+    )
+    dedup = DedupEngine(
+        embedding_model,
+        reranker_model,
+        reasoning_model,
+        DedupConfig(recall_cosine=settings.dedup_recall_cosine),
+    )
+    return HFILRuntime(
+        settings=settings,
+        matcher=matcher,
+        dedup=dedup,
+        reasoner=reasoning_model,
+    )
+
+
+def _drive_hfil_interrupts(
+    graph: Any,
+    initial_state: dict[str, Any],
+    config: dict[str, Any],
+    feedback_io: FeedbackIO,
+) -> dict[str, Any]:
+    state = graph.invoke(initial_state, config=config)
+    while "__interrupt__" in state:
+        payload = state["__interrupt__"][0].value
+        _render_hfil_payload(payload, feedback_io)
+        user_line = feedback_io.prompt("> ")
+        state = graph.invoke(Command(resume=user_line), config=config)
+    return cast(dict[str, Any], state)
+
+
+def _render_hfil_payload(payload: object, feedback_io: FeedbackIO) -> None:
+    if not isinstance(payload, dict):
+        feedback_io.show(str(payload))
+        return
+    for message in payload.get("messages", []):
+        feedback_io.show(str(message))
+    scenarios = payload.get("scenarios", [])
+    if isinstance(scenarios, list):
+        feedback_io.show_scenarios([item for item in scenarios if isinstance(item, dict)])
+    duplicate_groups = payload.get("duplicate_groups", [])
+    if duplicate_groups:
+        feedback_io.show(json.dumps(duplicate_groups, indent=2))
+    feedback_io.show(str(payload.get("prompt", "")))
+
+
+def _checkpoint_dsn(settings: AppSettings) -> str:
+    dsn = settings.postgres.dsn
+    scheme, separator, remainder = dsn.partition("://")
+    if separator and "+" in scheme:
+        return f"{scheme.split('+', 1)[0]}://{remainder}"
+    return dsn
 
 
 def resolve_test_scenario_identity(request: TestScenarioRequest) -> tuple[str, str]:
@@ -544,6 +965,10 @@ def _apply_overrides(settings: AppSettings, request: TestScenarioRequest) -> Non
         settings.test_scenario.top_k = request.top_k
     if settings.test_scenario.max_new_tokens:
         settings.huggingface.max_new_tokens = settings.test_scenario.max_new_tokens
+    if request.hfil_enabled is not None:
+        settings.enable_hfil = request.hfil_enabled
+    if request.emit_md:
+        settings.hfil_emit_md = True
 
 
 def _load_story_source(
@@ -559,15 +984,27 @@ def _load_story_source(
                 path=str(request.user_stories_path),
                 source="local_json",
             )
-        payload = json.loads(request.user_stories_path.read_text(encoding="utf-8"))
+        local_payload = json.loads(request.user_stories_path.read_text(encoding="utf-8"))
+        project = request.project or str(local_payload.get("project", ""))
+        document_version_id = str(local_payload.get("document_version_id", ""))
+        payload = (
+            ArtifactMirror(postgres)
+            .read_preferring_local(
+                artifact_path=request.user_stories_path,
+                project=project,
+                run_id=None,
+                document_version_id=document_version_id,
+            )
+            .payload
+        )
         return _load_story_source_from_payload(payload)
 
     if not request.document_version_id:
         raise ConfigurationError("provide --user-stories or --document-version-id")
-    payload = postgres.load_user_story_artifact_payload(
+    postgres_payload = postgres.load_user_story_artifact_payload(
         document_version_id=request.document_version_id
     )
-    if payload is None:
+    if postgres_payload is None:
         raise ConfigurationError(
             "no user-story artifact found in postgres for "
             f"document_version_id={request.document_version_id}"
@@ -579,7 +1016,7 @@ def _load_story_source(
             document_version_id=request.document_version_id,
             source="postgres",
         )
-    return _load_story_source_from_payload(payload)
+    return _load_story_source_from_payload(postgres_payload)
 
 
 def _load_story_source_from_payload(payload: dict[str, Any]) -> _StorySource:
@@ -727,6 +1164,78 @@ def _story_query_text(story: UserStoryRecord, requirement_text: str | None) -> s
     if requirement_text:
         parts.append(requirement_text)
     return "\n".join(part.strip() for part in parts if part.strip())
+
+
+def _coverage_by_story(scenarios: list[TestScenarioRecord]) -> dict[str, list[str]]:
+    coverage: dict[str, list[str]] = {}
+    for scenario in scenarios:
+        coverage.setdefault(scenario.story_id, []).append(scenario.scenario_id)
+    return coverage
+
+
+def _preserve_existing_scenario_ids(
+    artifact: TestScenarioArtifact,
+    existing_scenarios: list[TestScenarioRecord],
+) -> TestScenarioArtifact:
+    existing_by_story: dict[str, list[TestScenarioRecord]] = {}
+    for scenario in existing_scenarios:
+        existing_by_story.setdefault(scenario.story_id, []).append(scenario)
+    for scenarios in existing_by_story.values():
+        scenarios.sort(key=lambda item: item.scenario_id)
+
+    rewritten: dict[str, TestScenarioRecord] = {}
+    ordinal_by_story: dict[str, int] = {}
+    for scenario in artifact.scenarios.values():
+        ordinal = ordinal_by_story.get(scenario.story_id, 0)
+        ordinal_by_story[scenario.story_id] = ordinal + 1
+        prior = existing_by_story.get(scenario.story_id, [])
+        stable_scenario_id = (
+            prior[ordinal].scenario_id if ordinal < len(prior) else scenario.scenario_id
+        )
+        record = scenario.model_copy(update={"scenario_id": stable_scenario_id})
+        rewritten[stable_scenario_id] = record
+    scenarios = list(rewritten.values())
+    return artifact.model_copy(
+        update={
+            "scenarios": rewritten,
+            "coverage": _coverage_by_story(scenarios),
+            "requirement_coverage": _coverage_by_requirement(scenarios),
+        }
+    )
+
+
+def _coverage_by_requirement(scenarios: list[TestScenarioRecord]) -> dict[str, list[str]]:
+    coverage: dict[str, list[str]] = {}
+    for scenario in scenarios:
+        coverage.setdefault(scenario.requirement_id, []).append(scenario.scenario_id)
+    return coverage
+
+
+def _write_test_scenario_markdown(artifact: TestScenarioArtifact, path: Path) -> None:
+    lines = [
+        f"# Test Scenarios - {artifact.project}",
+        "",
+        f"- document_version_id: `{artifact.document_version_id}`",
+        f"- scenario_count: {len(artifact.scenarios)}",
+        "",
+    ]
+    for scenario in artifact.scenarios.values():
+        lines.extend(
+            [
+                f"## {scenario.scenario_id}",
+                "",
+                f"- story_id: `{scenario.story_id}`",
+                f"- requirement_id: `{scenario.requirement_id}`",
+                f"- type: {scenario.scenario_type}",
+                f"- priority: {scenario.priority}",
+                "",
+                scenario.description,
+                "",
+                f"Expected result: {scenario.expected_result}",
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _output_dir(

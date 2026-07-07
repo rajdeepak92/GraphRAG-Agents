@@ -62,6 +62,7 @@ def load_requirement_source_from_full_payload(payload: dict[str, Any]) -> Requir
         requirements.append(
             RequirementInput(
                 requirement_id=requirement.requirement_id,
+                revision_id=requirement.revision_id,
                 requirement_text=requirement.statement,
                 requirement_type=requirement.requirement_type,
                 priority=normalize_priority_label(requirement.priority),

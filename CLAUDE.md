@@ -8,15 +8,17 @@ Pipeline target:
 
 `BRD/SRS ingest -> discover requirements -> user stories -> test scenarios -> test cases -> execute -> report`
 
-Implemented today: ingestion, requirement discovery, user stories, and test
-scenarios. Test cases, execution, and reporting are future work.
+Implemented today: ingestion, requirement discovery, user stories, test
+scenarios, optional HFIL review for test scenarios, and reconcile. Test cases,
+execution, and reporting are future work.
 
 ## Environment & Commands
 
 - Python 3.12 (`>=3.12,<3.13`), managed by `uv`. Package: `multi_agentic_graph_rag` under `src/`. Windows-first; use `uv run`, not generated launchers.
 - Install: `uv sync --dev --extra local-llm` for the Hugging Face stack, or add `--extra azure` for Azure OpenAI.
-- CLI (`typer`, name `marag`, entry `python -m multi_agentic_graph_rag`): `version`, `config-check`, `hf-check [--load-model]`, `doctor`, `db-check`, `postgres-reset --yes`, `ingest`, `generate-user-stories`, `generate-test-scenarios`, `coverage --project <P> [--document-version-id <DV>]`, `run status|resume <RUN-ID>`, `artifact verify <path>`, `artifact verify-user-stories <path>`, `artifact verify-test-scenarios <path>`.
+- CLI (`typer`, name `marag`, entry `python -m multi_agentic_graph_rag`): `version`, `config-check`, `hf-check [--load-model]`, `doctor`, `db-check`, `postgres-reset --yes`, `ingest`, `generate-user-stories`, `generate-test-scenarios`, `coverage --project <P> [--document-version-id <DV>]`, `reconcile --project <P> [--document-version <DV>]`, `run status|resume <RUN-ID>`, `artifact verify <path>`, `artifact verify-user-stories <path>`, `artifact verify-test-scenarios <path>`.
 - Ingest: `... ingest --project P --document PATH --version V [--logical-name N] [--replace-version] [--reasoning-provider ...] [--embedding-provider ...] --json-output`
+- Optional HFIL: `... generate-test-scenarios ... --hfil [--thread-id ID] [--emit-md]`; `--no-hfil` forces the existing non-interactive path.
 - Checks before commit: `uv run ruff check .`; `uv run python -m unittest discover -s tests`; `uv run mypy src/multi_agentic_graph_rag` (mypy strict); `uv run python -m compileall -q src`.
 - See `README.md` and `RUNBOOK.md` for setup; `commands.md` for command reference.
 
@@ -24,7 +26,8 @@ scenarios. Test cases, execution, and reporting are future work.
 
 - **Neo4j** - graph knowledge base. Today it holds the document/chunk graph plus validated user-story and test-scenario traceability claim-nodes linked back to evidence chunks. Nodes include `Project`, `Document`, `DocumentVersion`, `Chunk`, `Requirement`, `UserStory`, and `TestScenario`; rels include `OWNS_DOCUMENT`, `HAS_VERSION`, `HAS_CHUNK`, `COVERS_REQUIREMENT`, `VALIDATES_STORY`, `HAS_USER_STORY`, `HAS_TEST_SCENARIO`, and `EVIDENCED_BY_CHUNK`. `Neo4jStore.project_artifact` remains a no-op because PostgreSQL is the generated-artifact ledger.
 - **ChromaDB** - chunk embeddings, chunk text, and chunk/document metadata only, for semantic search.
-- **PostgreSQL** - all generated AI content and ledger rows: `requirements_full.json`, requirement ledger tables, user-story artifacts/rows, test-scenario artifacts/rows, and fallback retrieval when local JSON is absent. Managed tables in `db/postgres.py::_MANAGED_TABLES` include `test_scenarios`, `test_scenario_evidence`, `test_scenario_artifacts`, `user_stories`, `user_story_evidence`, `user_story_artifacts`, `canonical_facts`, `fact_occurrences`, `requirements`, `requirement_revisions`, `requirement_evidence`, `requirement_fact_links`, `requirement_delta_events`, `requirement_artifacts`, `document_versions`, and `ingestion_runs`. Schema self-validates against `_EXPECTED_COLUMNS`; mismatch -> `postgres-reset`.
+- **PostgreSQL** - all generated AI content and ledger rows: `requirements_full.json`, requirement ledger tables, user-story artifacts/rows, test-scenario artifacts/rows, and fallback retrieval when local JSON is absent or stale. Managed tables in `db/postgres.py::_MANAGED_TABLES` include `schema_migrations`, `test_scenarios`, `test_scenario_evidence`, `test_scenario_artifacts`, `user_stories`, `user_story_evidence`, `user_story_artifacts`, `canonical_facts`, `fact_occurrences`, `requirements`, `requirement_revisions`, `requirement_evidence`, `requirement_fact_links`, `requirement_delta_events`, `requirement_artifacts`, `document_versions`, and `ingestion_runs`. Schema self-validates against `_EXPECTED_COLUMNS`; mismatch -> `postgres-reset`.
+- Generated artifacts are committed to PostgreSQL first and then mirrored to local JSON. Valid local JSON is preferred on read only when metadata/payload checks match PostgreSQL; stale/missing JSON is repaired with `marag reconcile`.
 - Each store has a `local_json` fallback mode (`runtime/staging/*.jsonl`) for dry runs; real ingest requires `postgres` and `neo4j` modes.
 
 ## Orchestration & Ingestion Pipeline
@@ -39,6 +42,14 @@ scenarios. Test cases, execution, and reporting are future work.
 - Providers: reasoning and embedding = `huggingface` or `azure_openai`; reranker = `huggingface` only. Defaults: Qwen2.5-Coder-7B-Instruct, BGE-M3, bge-reranker-base.
 - LLM calls happen at embeddings (Chroma index), requirement discovery (reasoning), user-story generation (reasoning), and test-scenario generation (reasoning). The reranker is wired into the shared hybrid retrieval path used by user-story and test-scenario generation.
 - Config precedence: `config.json` -> `.env` -> defaults, loaded via `config/config_loader.py` into `config/settings.py::AppSettings` (`extra="forbid"`). Provider switches: `REASONING_MODEL_PROVIDER`, `EMBEDDING_MODEL_PROVIDER`, `RERANKER_MODEL_PROVIDER`.
+
+## HFIL Scope
+
+- HFIL is optional and scoped only to test-scenario review after permanent scenario IDs are assigned and before persistence.
+- The HFIL node uses LangGraph `interrupt()`/resume with a checkpointer and no DB/JSON writes inside review turns. Finalize/persist is the only commit boundary.
+- Semantic story matching uses calibrated embedding percentages (`hfil_cos_floor`/`hfil_cos_ceil`) because raw BGE cosine scores do not map directly to 0-100% business thresholds.
+- Duplicate removal uses canonicalization, embedding recall, optional reranking, and deterministic LLM bidirectional entailment. The user must approve scenario IDs before deletion.
+- MCP and broader HITL remain out of scope unless explicitly re-approved.
 
 ## Requirement Discovery
 
@@ -64,7 +75,7 @@ All runtime schemas live in `domain/schemas.py` as `StrictModel` extra=forbid.
 - Downstream input contract:
   - `RequirementArtifact` (schema `2.0`) -> `requirements_full.json`.
   - `CompactRequirementArtifact` (schema `3.0-compact`) -> `requirements.json`.
-- `UserStoryRecord` and `TestScenarioRecord` keep `origin="generation"` only; no retired provenance metadata is part of the current contract.
+- `UserStoryRecord` and `TestScenarioRecord` keep deterministic parent lineage. `TestScenarioRecord.origin` may be `generation` or `feedback`; feedback records are created only by optional stage-4 HFIL before final persistence.
 
 ## Adding the Next Agent
 

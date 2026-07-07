@@ -108,6 +108,35 @@ uv run python -m multi_agentic_graph_rag postgres-reset --yes
 uv run python -m multi_agentic_graph_rag db-check
 ```
 
+## Test-Scenario HFIL
+
+HFIL is disabled by default. Enable it only for interactive review of
+test-scenario generation:
+
+```powershell
+uv run python -m multi_agentic_graph_rag generate-test-scenarios `
+  --user-stories generated\<PROJECT>\req\<RUN_ID>\user_stories.json `
+  --project <PROJECT> `
+  --hfil
+```
+
+Use `--no-hfil` for the non-interactive regression path. `--emit-md` writes an
+optional Markdown report, but `test_scenarios.json` remains the canonical
+artifact. `--thread-id <ID>` can resume a stable LangGraph HFIL thread.
+
+HFIL supports `remove duplicates`, feedback comments, and `exit`. Review turns
+do not write PostgreSQL or JSON; final persistence happens after `exit`.
+
+## Reconcile
+
+Generated artifacts are committed to PostgreSQL first and mirrored to local
+JSON after the DB commit. Valid local JSON is preferred on read when it matches
+PostgreSQL metadata/payload checks. If local JSON is missing or stale, repair it:
+
+```powershell
+uv run python -m multi_agentic_graph_rag reconcile --project <PROJECT>
+```
+
 For Neo4j and Chroma resets:
 
 ```powershell

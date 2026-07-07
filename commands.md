@@ -301,6 +301,9 @@ Useful variations:
 ```powershell
 uv run marag generate-test-scenarios --user-stories .\path\to\user_stories.json --requirements .\path\to\requirements.json --project PROJECT_1 --top-k 4
 uv run marag generate-test-scenarios --user-stories .\path\to\user_stories.json --project PROJECT_1 --reasoning-provider azure_openai --embedding-provider azure_openai --reranker-provider huggingface
+uv run marag generate-test-scenarios --user-stories .\path\to\user_stories.json --project PROJECT_1 --hfil
+uv run marag generate-test-scenarios --user-stories .\path\to\user_stories.json --project PROJECT_1 --no-hfil
+uv run marag generate-test-scenarios --user-stories .\path\to\user_stories.json --project PROJECT_1 --hfil --thread-id RUN-123:hfil --emit-md
 uv run marag artifact verify-test-scenarios generated\SIIMCS\req\<RUN_ID>\test_scenarios.json
 ```
 
@@ -316,8 +319,22 @@ TEST_SCENARIO_MAX_NEW_TOKENS=
 
 `test_scenarios.json` is written beside the input user-story file, or under
 `generated/<PROJECT>/test_scenarios/<RUN_ID>/` when loaded from PostgreSQL.
+HFIL runs after permanent scenario IDs are assigned and before persistence.
+`test_scenarios.json` remains canonical; Markdown is emitted only with
+`--emit-md`.
 
-## 10. Observability
+## 10. Reconcile Local JSON
+
+Use reconcile to re-materialize local generated artifacts from PostgreSQL after
+a crash between DB commit and JSON write, or when local JSON is stale:
+
+```powershell
+uv run marag reconcile --project PROJECT_1
+uv run marag reconcile --project PROJECT_1 --document-version <DV-ID>
+uv run marag reconcile --project PROJECT_1 --json-output
+```
+
+## 11. Observability
 
 ### Run files
 
@@ -399,5 +416,5 @@ cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <password> "MATCH (n) RETURN c
 8. Run `uv run marag ingest ...`
 9. Run `uv run marag generate-user-stories --requirements ... --project ...`
 10. Run `uv run marag generate-test-scenarios --user-stories ... --project ...`
-11. Inspect `.generated/<PROJECT>/run/` and `runtime/staging/`
-
+11. Optional: run `uv run marag reconcile --project <PROJECT>` to repair local JSON mirrors.
+12. Inspect `.generated/<PROJECT>/run/` and `runtime/staging/`

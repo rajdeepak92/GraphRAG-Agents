@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from common_defs import ModeName, ProviderName
-from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelSection(BaseModel):
@@ -120,4 +121,19 @@ class AppSettings(BaseModel):
     test_scenario: TestScenarioSettings = Field(default_factory=TestScenarioSettings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
+    enable_hfil: bool = False
+    # CALIBRATION RATIONALE — DO NOT REMOVE:
+    # BGE-family embedding cosine similarities are compressed into a narrow band
+    # (roughly [0.6, 1.0] for related text per BAAI guidance); raw cosine does NOT
+    # map to an intuitive 0-100% match. cos_floor/cos_ceil linearly rescale the
+    # usable cosine band into a calibrated percentage so the 60% / 5% business
+    # thresholds behave as intended.
+    # RECALIBRATE cos_floor / cos_ceil IF THE EMBEDDING PROVIDER OR MODEL CHANGES.
+    hfil_match_threshold_pct: float = 60.0
+    hfil_out_of_context_pct: float = 5.0
+    hfil_cos_floor: float = 0.30
+    hfil_cos_ceil: float = 0.80
+    dedup_recall_cosine: float = 0.55
+    hfil_emit_md: bool = False
+    hfil_checkpointer: Literal["postgres", "memory"] = "postgres"
     raw_config: dict[str, Any] = Field(default_factory=dict)

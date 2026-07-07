@@ -44,6 +44,7 @@ from multi_agentic_graph_rag.observability.session import (
     command_session,
     find_run_jsonl,
 )
+from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.artifacts import (
     verify_requirement_artifact,
     verify_test_scenario_artifact,
@@ -122,6 +123,9 @@ def config_check(
             ("huggingface.max_new_tokens", str(settings.huggingface.max_new_tokens)),
             ("discovery.batch_size", str(settings.discovery.batch_size)),
             ("discovery.log_llm_responses", str(settings.discovery.log_llm_responses)),
+            ("enable_hfil", str(settings.enable_hfil)),
+            ("hfil.match_threshold_pct", str(settings.hfil_match_threshold_pct)),
+            ("hfil.out_of_context_pct", str(settings.hfil_out_of_context_pct)),
         ]
         _render_kv("Configuration", rows)
 
@@ -332,6 +336,47 @@ def coverage(
         console.print(table)
 
 
+@app.command("reconcile")
+def reconcile(
+    project: Annotated[str, typer.Option("--project", help="Project to reconcile.")],
+    document_version_id: Annotated[
+        str | None,
+        typer.Option("--document-version", help="Optional document version id scope."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
+) -> None:
+    """Re-materialize local JSON artifacts from PostgreSQL."""
+    with command_session(
+        project=project,
+        version=document_version_id or __version__,
+        command=RuntimeCommand.RECONCILE.value,
+        run_id=command_run_id(RuntimeCommand.RECONCILE.value),
+    ) as session:
+        settings = load_config()
+        session.set_log_level(settings.log_level)
+        report = ArtifactMirror(PostgresStore(settings)).reconcile(
+            project=project,
+            document_version_id=document_version_id,
+        )
+        session.logger.info(
+            "Reconciled local JSON artifacts from PostgreSQL",
+            step="reconcile",
+            project=project,
+            document_version_id=document_version_id,
+            repaired_count=len(report.repaired_paths),
+            status="completed",
+        )
+        if json_output:
+            console.print_json(json.dumps(report.model_dump(mode="json"), indent=2))
+            return
+        console.print(
+            "[green]PASS[/green] reconcile completed "
+            f"repaired={len(report.repaired_paths)} missing={len(report.missing_artifacts)}"
+        )
+        for path in report.repaired_paths:
+            console.print(path)
+
+
 @app.command("postgres-reset")
 def postgres_reset(
     yes: Annotated[bool, typer.Option("--yes", help="Confirm PostgreSQL schema reset.")] = False,
@@ -510,6 +555,21 @@ def generate_test_scenarios(
     embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
     reranker_provider: Annotated[str | None, typer.Option("--reranker-provider")] = None,
     top_k: Annotated[int | None, typer.Option("--top-k")] = None,
+    hfil: Annotated[
+        bool | None,
+        typer.Option(
+            "--hfil/--no-hfil",
+            help="Enable or disable the test-scenario human feedback loop.",
+        ),
+    ] = None,
+    emit_md: Annotated[
+        bool,
+        typer.Option("--emit-md", help="Also emit a human-readable Markdown report."),
+    ] = False,
+    thread_id: Annotated[
+        str | None,
+        typer.Option("--thread-id", help="Stable LangGraph thread id for HFIL resume."),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json-output")] = False,
 ) -> None:
     request = TestScenarioRequest(
@@ -521,6 +581,9 @@ def generate_test_scenarios(
         embedding_provider=embedding_provider,
         reranker_provider=reranker_provider,
         top_k=top_k,
+        hfil_enabled=hfil,
+        emit_md=emit_md,
+        thread_id=thread_id,
     )
     try:
         resolved_project, resolved_version = resolve_test_scenario_identity(request)
@@ -541,6 +604,9 @@ def generate_test_scenarios(
             requirements=str(requirements) if requirements else None,
             project=resolved_project,
             document_version_id=document_version_id,
+            hfil_enabled=hfil,
+            emit_md=emit_md,
+            thread_id=thread_id,
             status="started",
         )
         try:
