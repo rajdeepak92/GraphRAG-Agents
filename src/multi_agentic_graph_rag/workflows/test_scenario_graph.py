@@ -29,6 +29,7 @@ from multi_agentic_graph_rag.domain.errors import (
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
     TestScenarioArtifact,
+    TestScenarioBuildResult,
     TestScenarioModel,
     TestScenarioRecord,
     TestScenarioRequest,
@@ -49,7 +50,6 @@ from multi_agentic_graph_rag.observability.session import (
     command_session,
 )
 from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
-from multi_agentic_graph_rag.services.artifacts import write_test_scenario_artifact
 from multi_agentic_graph_rag.services.generation_checkpoint import (
     STAGE_TEST_SCENARIO,
     ContextMapEntry,
@@ -73,7 +73,10 @@ from multi_agentic_graph_rag.services.requirement_source import (
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
 from multi_agentic_graph_rag.services.scenario_dedup import DedupConfig, DedupEngine
 from multi_agentic_graph_rag.services.semantic_matcher import SemanticMatcher
-from multi_agentic_graph_rag.services.test_scenario_builder import build_test_scenario_artifact
+from multi_agentic_graph_rag.services.test_scenario_builder import (
+    build_test_scenario_artifact,
+    project_test_scenario_artifact,
+)
 from multi_agentic_graph_rag.workflows.hfil_node import (
     HFILRuntime,
     hfil_review_node,
@@ -99,6 +102,7 @@ class TestScenarioState(TypedDict, total=False):
     errors: list[str]
     output_dir: str
     artifact_payload: dict[str, Any]
+    scenario_record_payloads: dict[str, Any]
     evidence_by_requirement: dict[str, list[str]]
     hfil_enabled: bool
     hfil_done: bool
@@ -292,15 +296,15 @@ def _generate(
         logger=logger,
     )
 
-    artifact = build_test_scenario_artifact(
+    build_result = build_test_scenario_artifact(
         project=source.project,
         document_id=source.document_id,
         document_version_id=source.document_version_id,
         doc_version=source.doc_version,
         generated=generated,
     )
-    artifact = _preserve_existing_scenario_ids(
-        artifact,
+    build_result = _preserve_existing_scenario_ids(
+        build_result,
         postgres.load_test_scenarios_for_generation(project=source.project),
     )
     next_state: dict[str, Any] = {
@@ -311,18 +315,22 @@ def _generate(
         "doc_version": source.doc_version,
         "output_dir": str(out_dir),
         "artifact_path": str(out_dir / "test_scenarios.json"),
-        "artifact_payload": artifact.model_dump(mode="json"),
+        "artifact_payload": build_result.artifact.model_dump(mode="json"),
+        "scenario_record_payloads": {
+            scenario_id: record.model_dump(mode="json")
+            for scenario_id, record in build_result.records.items()
+        },
         "story_count": len(source.stories),
-        "scenario_ids": list(artifact.scenarios),
-        "coverage": artifact.coverage,
-        "requirement_coverage": artifact.requirement_coverage,
+        "scenario_ids": list(build_result.records),
+        "coverage": build_result.coverage,
+        "requirement_coverage": build_result.requirement_coverage,
         "evidence_by_requirement": evidence_by_requirement,
         "warnings": warnings,
         "errors": [],
     }
     initialized = initialize_hfil_state(
         state=next_state,
-        scenarios=list(artifact.scenarios.values()),
+        scenarios=list(build_result.records.values()),
         user_stories=source.stories,
         enabled=settings.enable_hfil,
     )
@@ -331,6 +339,7 @@ def _generate(
 
 def _validate_and_assign_ids(state: TestScenarioState) -> TestScenarioState:
     TestScenarioArtifact.model_validate(state["artifact_payload"])
+    _scenario_records_from_state(state)
     return state
 
 
@@ -338,21 +347,28 @@ def _finalize(state: TestScenarioState) -> TestScenarioState:
     artifact = TestScenarioArtifact.model_validate(state["artifact_payload"])
     if state.get("hfil_enabled"):
         scenarios = hfil_scenarios_from_state(dict(state))
-        artifact = artifact.model_copy(
-            update={
-                "scenarios": {scenario.scenario_id: scenario for scenario in scenarios},
-                "coverage": _coverage_by_story(scenarios),
-                "requirement_coverage": _coverage_by_requirement(scenarios),
-                "updated_at": datetime.now(UTC),
-            }
+        records = {scenario.scenario_id: scenario for scenario in scenarios}
+        artifact = project_test_scenario_artifact(
+            project=artifact.project,
+            document_id=artifact.document_id,
+            document_version_id=artifact.document_version_id,
+            doc_version=artifact.doc_version,
+            records=records,
+            scenario_display_ids={},
         )
+        artifact = artifact.model_copy(update={"updated_at": datetime.now(UTC)})
+    else:
+        records = _scenario_records_from_state(state)
     payload = artifact.model_dump(mode="json")
     return {
         **state,
         "artifact_payload": payload,
-        "scenario_ids": list(artifact.scenarios),
-        "coverage": artifact.coverage,
-        "requirement_coverage": artifact.requirement_coverage,
+        "scenario_record_payloads": {
+            scenario_id: record.model_dump(mode="json") for scenario_id, record in records.items()
+        },
+        "scenario_ids": list(records),
+        "coverage": _coverage_by_story(list(records.values())),
+        "requirement_coverage": _coverage_by_requirement(list(records.values())),
     }
 
 
@@ -368,48 +384,55 @@ def _persist(
     postgres = PostgresStore(settings)
     neo4j = Neo4jStore(settings)
     artifact = TestScenarioArtifact.model_validate(state["artifact_payload"])
+    records = _scenario_records_from_state(state)
+    build_result = TestScenarioBuildResult(
+        artifact=artifact,
+        records=records,
+        coverage=_coverage_by_story(list(records.values())),
+        requirement_coverage=_coverage_by_requirement(list(records.values())),
+    )
     artifact_path = Path(state["artifact_path"])
     ArtifactMirror(postgres).persist_committed_artifact(
-        artifact=artifact,
+        artifact=build_result,
         artifact_path=artifact_path,
         run_id=state["run_id"],
     )
     if settings.hfil_emit_md:
-        _write_test_scenario_markdown(artifact, artifact_path.with_suffix(".md"))
+        _write_test_scenario_markdown(build_result, artifact_path.with_suffix(".md"))
     if session is not None:
-        session.artifact_payload = artifact.model_dump(mode="json")
+        session.artifact_payload = build_result.artifact.model_dump(mode="json")
     if logger is not None:
         logger.info(
             "Test-scenario artifact persisted to PostgreSQL and mirrored to {path}",
             step="persist",
             path=str(artifact_path),
-            scenario_count=len(artifact.scenarios),
-            story_count=len(artifact.coverage),
-            requirement_count=len(artifact.requirement_coverage),
+            scenario_count=len(build_result.records),
+            story_count=len(build_result.coverage),
+            requirement_count=len(build_result.requirement_coverage),
             status="completed",
         )
         logger.info(
             "Projecting test-scenario coverage into Neo4j",
             step="project_test_scenario_coverage",
-            document_version_id=artifact.document_version_id,
-            scenario_count=len(artifact.scenarios),
+            document_version_id=build_result.artifact.document_version_id,
+            scenario_count=len(build_result.records),
             store_responsibility="test_scenario_traceability_nodes",
         )
     neo4j.project_test_scenario_coverage(
-        artifact,
+        build_result,
         dict(state.get("evidence_by_requirement", {})),
     )
     result_payload: TestScenarioState = {
         "run_id": state["run_id"],
-        "project": artifact.project,
-        "document_id": artifact.document_id,
-        "document_version_id": artifact.document_version_id,
-        "doc_version": artifact.doc_version,
+        "project": build_result.artifact.project,
+        "document_id": build_result.artifact.document_id,
+        "document_version_id": build_result.artifact.document_version_id,
+        "doc_version": build_result.artifact.doc_version,
         "artifact_path": str(artifact_path),
         "story_count": state["story_count"],
-        "scenario_ids": list(artifact.scenarios),
-        "coverage": artifact.coverage,
-        "requirement_coverage": artifact.requirement_coverage,
+        "scenario_ids": list(build_result.records),
+        "coverage": build_result.coverage,
+        "requirement_coverage": build_result.requirement_coverage,
         "warnings": state.get("warnings", []),
         "errors": [],
     }
@@ -421,7 +444,7 @@ def _persist(
             "Test-scenario generation pipeline completed",
             step="run_pipeline",
             run_id=state["run_id"],
-            scenario_count=len(artifact.scenarios),
+            scenario_count=len(build_result.records),
             story_count=state["story_count"],
             status="completed",
         )
@@ -527,36 +550,43 @@ def _run_pipeline(
             logger=logger,
         )
 
-        artifact = build_test_scenario_artifact(
+        build_result = build_test_scenario_artifact(
             project=source.project,
             document_id=source.document_id,
             document_version_id=source.document_version_id,
             doc_version=source.doc_version,
             generated=generated,
         )
-        artifact_path = write_test_scenario_artifact(artifact, out_dir, logger=logger)
+        build_result = _preserve_existing_scenario_ids(
+            build_result,
+            postgres.load_test_scenarios_for_generation(project=source.project),
+        )
+        artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
+            artifact=build_result,
+            artifact_path=out_dir / "test_scenarios.json",
+            run_id=state["run_id"],
+        )
         if session is not None:
-            session.artifact_payload = artifact.model_dump(mode="json")
+            session.artifact_payload = build_result.artifact.model_dump(mode="json")
         if logger is not None:
             logger.info(
                 "Test-scenario artifact written to {path}",
                 step="write_test_scenario_artifact",
                 path=str(artifact_path),
-                scenario_count=len(artifact.scenarios),
-                story_count=len(artifact.coverage),
-                requirement_count=len(artifact.requirement_coverage),
+                scenario_count=len(build_result.records),
+                story_count=len(build_result.coverage),
+                requirement_count=len(build_result.requirement_coverage),
                 status="completed",
             )
-        postgres.persist_test_scenario_artifact(artifact, str(artifact_path), state["run_id"])
         if logger is not None:
             logger.info(
                 "Projecting test-scenario coverage into Neo4j",
                 step="project_test_scenario_coverage",
                 document_version_id=source.document_version_id,
-                scenario_count=len(artifact.scenarios),
+                scenario_count=len(build_result.records),
                 store_responsibility="test_scenario_traceability_nodes",
             )
-        neo4j.project_test_scenario_coverage(artifact, evidence_by_requirement)
+        neo4j.project_test_scenario_coverage(build_result, evidence_by_requirement)
 
         result_payload: TestScenarioState = {
             "run_id": state["run_id"],
@@ -566,9 +596,9 @@ def _run_pipeline(
             "doc_version": source.doc_version,
             "artifact_path": str(artifact_path),
             "story_count": len(source.stories),
-            "scenario_ids": list(artifact.scenarios),
-            "coverage": artifact.coverage,
-            "requirement_coverage": artifact.requirement_coverage,
+            "scenario_ids": list(build_result.records),
+            "coverage": build_result.coverage,
+            "requirement_coverage": build_result.requirement_coverage,
             "warnings": warnings,
             "errors": [],
         }
@@ -580,7 +610,7 @@ def _run_pipeline(
                 "Test-scenario generation pipeline completed",
                 step="run_pipeline",
                 run_id=state["run_id"],
-                scenario_count=len(artifact.scenarios),
+                scenario_count=len(build_result.records),
                 story_count=len(source.stories),
                 status="completed",
             )
@@ -997,7 +1027,11 @@ def _load_story_source(
             )
             .payload
         )
-        return _load_story_source_from_payload(payload)
+        records = postgres.load_user_stories_for_generation(
+            project=project,
+            document_version_id=document_version_id,
+        )
+        return _load_story_source_from_payload(payload, records)
 
     if not request.document_version_id:
         raise ConfigurationError("provide --user-stories or --document-version-id")
@@ -1016,17 +1050,29 @@ def _load_story_source(
             document_version_id=request.document_version_id,
             source="postgres",
         )
-    return _load_story_source_from_payload(postgres_payload)
+    records = postgres.load_user_stories_for_generation(
+        project=str(postgres_payload.get("project", "")),
+        document_version_id=str(postgres_payload.get("document_version_id", "")),
+    )
+    return _load_story_source_from_payload(postgres_payload, records)
 
 
-def _load_story_source_from_payload(payload: dict[str, Any]) -> _StorySource:
+def _load_story_source_from_payload(
+    payload: dict[str, Any],
+    records: list[UserStoryRecord],
+) -> _StorySource:
     artifact = UserStoryArtifact.model_validate(payload)
+    if not records:
+        raise ConfigurationError(
+            "user-story artifact projection is valid, but internal user-story rows are "
+            "unavailable; run reconcile against PostgreSQL or regenerate user stories"
+        )
     return _StorySource(
         project=artifact.project,
         document_id=artifact.document_id,
         document_version_id=artifact.document_version_id,
         doc_version=artifact.doc_version,
-        stories=list(artifact.stories.values()),
+        stories=records,
     )
 
 
@@ -1156,11 +1202,7 @@ def _requirements_by_id(source: RequirementSource) -> dict[str, RequirementInput
 
 def _story_query_text(story: UserStoryRecord, requirement_text: str | None) -> str:
     parts = [story.title, story.user_story.i_want, story.user_story.so_that]
-    for criterion in story.acceptance_criteria:
-        parts.append(
-            f"{criterion.title}. Given {criterion.given}, when {criterion.when}, "
-            f"then {criterion.then}."
-        )
+    parts.extend(story.acceptance_criteria)
     if requirement_text:
         parts.append(requirement_text)
     return "\n".join(part.strip() for part in parts if part.strip())
@@ -1173,10 +1215,21 @@ def _coverage_by_story(scenarios: list[TestScenarioRecord]) -> dict[str, list[st
     return coverage
 
 
+def _scenario_records_from_state(state: TestScenarioState) -> dict[str, TestScenarioRecord]:
+    payloads = state.get("scenario_record_payloads", {})
+    if not isinstance(payloads, dict):
+        raise CheckpointError("scenario_record_payloads must be a JSON object")
+    return {
+        str(scenario_id): TestScenarioRecord.model_validate(payload)
+        for scenario_id, payload in payloads.items()
+        if isinstance(payload, dict)
+    }
+
+
 def _preserve_existing_scenario_ids(
-    artifact: TestScenarioArtifact,
+    artifact: TestScenarioBuildResult,
     existing_scenarios: list[TestScenarioRecord],
-) -> TestScenarioArtifact:
+) -> TestScenarioBuildResult:
     existing_by_story: dict[str, list[TestScenarioRecord]] = {}
     for scenario in existing_scenarios:
         existing_by_story.setdefault(scenario.story_id, []).append(scenario)
@@ -1185,7 +1238,7 @@ def _preserve_existing_scenario_ids(
 
     rewritten: dict[str, TestScenarioRecord] = {}
     ordinal_by_story: dict[str, int] = {}
-    for scenario in artifact.scenarios.values():
+    for scenario in artifact.records.values():
         ordinal = ordinal_by_story.get(scenario.story_id, 0)
         ordinal_by_story[scenario.story_id] = ordinal + 1
         prior = existing_by_story.get(scenario.story_id, [])
@@ -1195,13 +1248,18 @@ def _preserve_existing_scenario_ids(
         record = scenario.model_copy(update={"scenario_id": stable_scenario_id})
         rewritten[stable_scenario_id] = record
     scenarios = list(rewritten.values())
-    return artifact.model_copy(
-        update={
-            "scenarios": rewritten,
-            "coverage": _coverage_by_story(scenarios),
-            "requirement_coverage": _coverage_by_requirement(scenarios),
-        }
+    artifact.records = rewritten
+    artifact.coverage = _coverage_by_story(scenarios)
+    artifact.requirement_coverage = _coverage_by_requirement(scenarios)
+    artifact.artifact = project_test_scenario_artifact(
+        project=artifact.artifact.project,
+        document_id=artifact.artifact.document_id,
+        document_version_id=artifact.artifact.document_version_id,
+        doc_version=artifact.artifact.doc_version,
+        records=rewritten,
+        scenario_display_ids={},
     )
+    return artifact
 
 
 def _coverage_by_requirement(scenarios: list[TestScenarioRecord]) -> dict[str, list[str]]:
@@ -1211,15 +1269,15 @@ def _coverage_by_requirement(scenarios: list[TestScenarioRecord]) -> dict[str, l
     return coverage
 
 
-def _write_test_scenario_markdown(artifact: TestScenarioArtifact, path: Path) -> None:
+def _write_test_scenario_markdown(artifact: TestScenarioBuildResult, path: Path) -> None:
     lines = [
-        f"# Test Scenarios - {artifact.project}",
+        f"# Test Scenarios - {artifact.artifact.project}",
         "",
-        f"- document_version_id: `{artifact.document_version_id}`",
-        f"- scenario_count: {len(artifact.scenarios)}",
+        f"- document_version_id: `{artifact.artifact.document_version_id}`",
+        f"- scenario_count: {len(artifact.records)}",
         "",
     ]
-    for scenario in artifact.scenarios.values():
+    for scenario in artifact.records.values():
         lines.extend(
             [
                 f"## {scenario.scenario_id}",

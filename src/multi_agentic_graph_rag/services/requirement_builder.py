@@ -20,13 +20,17 @@ from multi_agentic_graph_rag.domain.schemas import (
     CompactRequirementArtifact,
     CompactRequirementOccurrence,
     RequirementArtifact,
+    RequirementCatalogEntry,
+    RequirementCatalogTraceability,
     RequirementDeltaEvent,
     RequirementDiscoveryOutput,
     RequirementEvidence,
     RequirementRevisionSnapshot,
+    RequirementsCatalogArtifact,
     SourceTrace,
     VerifiedFact,
     VerifiedRequirement,
+    normalize_source_req_id,
 )
 from multi_agentic_graph_rag.observability.logging import RunLogger
 
@@ -45,7 +49,11 @@ _CompactStatus = Literal["Active", "Superseded"]
 class _RequirementAccumulator:
     requirement_id: str
     revision_id: str
+    display_id: str
     requirement_key: str
+    source_req_id: str | None
+    id_generation_type: Literal["source", "generated"]
+    confidence: float
     statement: str
     normalized_statement: str
     requirement_type: str
@@ -121,11 +129,19 @@ def build_requirement_artifact(
                 revision_id = requirement_revision_id(lineage_id, normalized_statement)
                 accumulator_key = (lineage_id, revision_id)
                 accumulator = requirements.get(accumulator_key)
+                source_req_id = _validated_source_req_id(
+                    requirement_candidate.source_req_id,
+                    requirement_candidate.source_trace,
+                )
                 if accumulator is None:
                     accumulator = _RequirementAccumulator(
                         requirement_id=lineage_id,
                         revision_id=revision_id,
+                        display_id="",
                         requirement_key=requirement_key,
+                        source_req_id=source_req_id,
+                        id_generation_type="source" if source_req_id else "generated",
+                        confidence=requirement_candidate.confidence,
                         statement=requirement_candidate.statement.strip(),
                         normalized_statement=normalized_statement,
                         requirement_type=requirement_candidate.requirement_type,
@@ -134,6 +150,14 @@ def build_requirement_artifact(
                         first_ordinal=requirement_ordinal,
                     )
                     requirements[accumulator_key] = accumulator
+                else:
+                    if accumulator.source_req_id is None and source_req_id is not None:
+                        accumulator.source_req_id = source_req_id
+                        accumulator.id_generation_type = "source"
+                    accumulator.confidence = max(
+                        accumulator.confidence,
+                        requirement_candidate.confidence,
+                    )
 
                 accumulator.fact_ids.add(fact_occurrence.fact_id)
                 evidence_id = requirement_evidence_id(
@@ -223,6 +247,81 @@ def build_compact_requirement_artifact(
     )
 
 
+def build_requirements_catalog_artifact(
+    artifact: RequirementArtifact,
+) -> RequirementsCatalogArtifact:
+    superseded_revision_ids = {
+        event.revision_id
+        for event in artifact.delta_events
+        if event.event_type == "superseded" and event.revision_id
+    }
+    entries: list[RequirementCatalogEntry] = []
+    traceability_by_key: dict[tuple[str, str], RequirementCatalogTraceability] = {}
+    for requirement in artifact.requirements:
+        status: _CompactStatus = (
+            "Superseded" if requirement.revision_id in superseded_revision_ids else "Active"
+        )
+        display_id = requirement.display_id or requirement.requirement_id
+        fact_chunks = _fact_chunks_for_requirement(requirement)
+        for fact_id in requirement.fact_ids:
+            chunk_id = fact_chunks.get(fact_id, requirement.source_trace.chunk_id)
+            entries.append(
+                RequirementCatalogEntry(
+                    display_id=display_id,
+                    requirement_uid=requirement.requirement_id,
+                    revision_id=requirement.revision_id,
+                    source_req_id=requirement.source_req_id,
+                    id_generation_type=requirement.id_generation_type,
+                    confidence=requirement.confidence,
+                    chunk_id=chunk_id,
+                    fact_id=fact_id,
+                    requirement_text=requirement.statement,
+                    requirement_type=requirement.requirement_type,
+                    priority=_compact_priority(requirement.priority),
+                    status=status,
+                    doc_version=artifact.version,
+                )
+            )
+            trace_key = (display_id, chunk_id)
+            trace = traceability_by_key.get(trace_key)
+            if trace is None:
+                traceability_by_key[trace_key] = RequirementCatalogTraceability(
+                    req_id=display_id,
+                    requirement_uid=requirement.requirement_id,
+                    revision_id=requirement.revision_id,
+                    chunk_id=chunk_id,
+                    fact_ids=[fact_id],
+                )
+            elif fact_id not in trace.fact_ids:
+                trace.fact_ids.append(fact_id)
+
+    return RequirementsCatalogArtifact(
+        project=artifact.project,
+        document_id=artifact.document_id,
+        document_version_id=artifact.document_version_id,
+        doc_version=artifact.version,
+        generated_at=artifact.generated_at,
+        requirements=entries,
+        traceability=list(traceability_by_key.values()),
+    )
+
+
+def apply_requirement_display_ids(
+    artifact: RequirementArtifact,
+    display_ids: Mapping[str, str],
+) -> RequirementArtifact:
+    return artifact.model_copy(
+        update={
+            "requirements": [
+                requirement.model_copy(
+                    update={"display_id": display_ids.get(requirement.requirement_id, "")}
+                )
+                for requirement in artifact.requirements
+            ]
+        }
+    )
+
+
 def _compact_priority(priority: str) -> _CompactPriority:
     normalized = priority.strip().lower()
     if normalized == "high":
@@ -257,7 +356,11 @@ def _to_verified_requirement(accumulator: _RequirementAccumulator) -> VerifiedRe
     return VerifiedRequirement(
         requirement_id=accumulator.requirement_id,
         revision_id=accumulator.revision_id,
+        display_id=accumulator.display_id,
         requirement_key=accumulator.requirement_key,
+        source_req_id=accumulator.source_req_id,
+        id_generation_type=accumulator.id_generation_type,
+        confidence=accumulator.confidence,
         statement=accumulator.statement,
         normalized_statement=accumulator.normalized_statement,
         requirement_type=accumulator.requirement_type,
@@ -266,6 +369,24 @@ def _to_verified_requirement(accumulator: _RequirementAccumulator) -> VerifiedRe
         source_trace=accumulator.source_trace,
         evidence=list(accumulator.evidence.values()),
     )
+
+
+def _validated_source_req_id(source_req_id: str | None, trace: SourceTrace) -> str | None:
+    normalized = normalize_source_req_id(source_req_id)
+    if normalized is None:
+        return None
+    quote_source_id = normalize_source_req_id(trace.quote)
+    return normalized if quote_source_id == normalized else None
+
+
+def _fact_chunks_for_requirement(requirement: VerifiedRequirement) -> dict[str, str]:
+    chunks: dict[str, str] = {}
+    for evidence in requirement.evidence:
+        for fact_id in evidence.fact_ids:
+            chunks.setdefault(fact_id, evidence.source_trace.chunk_id)
+    for fact_id in requirement.fact_ids:
+        chunks.setdefault(fact_id, requirement.source_trace.chunk_id)
+    return chunks
 
 
 def _build_delta_events(

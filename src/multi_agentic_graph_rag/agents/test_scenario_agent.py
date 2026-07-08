@@ -210,16 +210,8 @@ def _build_test_scenario_prompt(
             "priority": story.priority,
             "persona": story.persona,
             "user_story": story.user_story.model_dump(mode="json"),
-            "business_value": story.business_value,
-            "scope": story.scope.model_dump(mode="json"),
-            "acceptance_criteria": [
-                criterion.model_dump(mode="json") for criterion in story.acceptance_criteria
-            ],
-            "business_rules": [rule.model_dump(mode="json") for rule in story.business_rules],
-            "test_scenario_hints": [
-                scenario.model_dump(mode="json") for scenario in story.test_scenarios
-            ],
-            "definition_of_done": list(story.definition_of_done),
+            "acceptance_criteria": list(story.acceptance_criteria),
+            "confidence": story.confidence,
         },
         ensure_ascii=False,
         indent=2,

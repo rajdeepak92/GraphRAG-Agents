@@ -9,6 +9,7 @@ from pathlib import Path
 from multi_agentic_graph_rag.domain.schemas import (
     CompactRequirementArtifact,
     RequirementArtifact,
+    RequirementsCatalogArtifact,
     TestScenarioArtifact,
     UserStoryArtifact,
 )
@@ -56,6 +57,25 @@ def write_compact_requirement_artifact(
     return path
 
 
+def write_requirements_catalog_artifact(
+    catalog_artifact: RequirementsCatalogArtifact,
+    run_dir: Path,
+    logger: RunLogger | None = None,
+) -> Path:
+    path = run_dir / "requirements.json"
+    if logger is not None:
+        logger.debug(
+            "Writing requirement catalog artifact for {document_version_id} to {path}",
+            step="write_requirements_catalog_artifact",
+            document_version_id=catalog_artifact.document_version_id,
+            path=str(path),
+            requirement_count=len(catalog_artifact.requirements),
+            traceability_count=len(catalog_artifact.traceability),
+        )
+    _atomic_write_json(path, catalog_artifact.model_dump(mode="json"))
+    return path
+
+
 def write_user_story_artifact(
     artifact: UserStoryArtifact,
     out_dir: Path,
@@ -69,7 +89,7 @@ def write_user_story_artifact(
             document_version_id=artifact.document_version_id,
             path=str(path),
             story_count=len(artifact.stories),
-            requirement_count=len(artifact.coverage),
+            requirement_count=len({row.req_id for row in artifact.traceability}),
         )
     _atomic_write_json(path, artifact.model_dump(mode="json"))
     return path
@@ -88,15 +108,17 @@ def write_test_scenario_artifact(
             document_version_id=artifact.document_version_id,
             path=str(path),
             scenario_count=len(artifact.scenarios),
-            story_count=len(artifact.coverage),
-            requirement_count=len(artifact.requirement_coverage),
+            story_count=len({row.us_id for row in artifact.traceability}),
+            requirement_count=len({row.req_id for row in artifact.traceability}),
         )
     _atomic_write_json(path, artifact.model_dump(mode="json"))
     return path
 
 
-def verify_requirement_artifact(path: Path) -> RequirementArtifact:
+def verify_requirement_artifact(path: Path) -> RequirementArtifact | RequirementsCatalogArtifact:
     data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and data.get("artifact_schema_version") == "4.0-catalog":
+        return RequirementsCatalogArtifact.model_validate(data)
     return RequirementArtifact.model_validate(data)
 
 

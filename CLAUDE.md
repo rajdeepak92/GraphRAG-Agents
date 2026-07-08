@@ -26,14 +26,14 @@ execution, and reporting are future work.
 
 - **Neo4j** - graph knowledge base. Today it holds the document/chunk graph plus validated user-story and test-scenario traceability claim-nodes linked back to evidence chunks. Nodes include `Project`, `Document`, `DocumentVersion`, `Chunk`, `Requirement`, `UserStory`, and `TestScenario`; rels include `OWNS_DOCUMENT`, `HAS_VERSION`, `HAS_CHUNK`, `COVERS_REQUIREMENT`, `VALIDATES_STORY`, `HAS_USER_STORY`, `HAS_TEST_SCENARIO`, and `EVIDENCED_BY_CHUNK`. `Neo4jStore.project_artifact` remains a no-op because PostgreSQL is the generated-artifact ledger.
 - **ChromaDB** - chunk embeddings, chunk text, and chunk/document metadata only, for semantic search.
-- **PostgreSQL** - all generated AI content and ledger rows: `requirements_full.json`, requirement ledger tables, user-story artifacts/rows, test-scenario artifacts/rows, and fallback retrieval when local JSON is absent or stale. Managed tables in `db/postgres.py::_MANAGED_TABLES` include `schema_migrations`, `test_scenarios`, `test_scenario_evidence`, `test_scenario_artifacts`, `user_stories`, `user_story_evidence`, `user_story_artifacts`, `canonical_facts`, `fact_occurrences`, `requirements`, `requirement_revisions`, `requirement_evidence`, `requirement_fact_links`, `requirement_delta_events`, `requirement_artifacts`, `document_versions`, and `ingestion_runs`. Schema self-validates against `_EXPECTED_COLUMNS`; mismatch -> `postgres-reset`.
+- **PostgreSQL** - all generated AI content and ledger rows: `requirements_full.json`, requirement ledger tables, user-story artifacts/rows, test-scenario artifacts/rows, per-project display-ID registry rows, and fallback retrieval when local JSON is absent or stale. Managed tables in `db/postgres.py::_MANAGED_TABLES` include `schema_migrations`, `artifact_display_ids`, `display_id_counters`, `test_scenarios`, `test_scenario_evidence`, `test_scenario_artifacts`, `user_stories`, `user_story_evidence`, `user_story_artifacts`, `canonical_facts`, `fact_occurrences`, `requirements`, `requirement_revisions`, `requirement_evidence`, `requirement_fact_links`, `requirement_delta_events`, `requirement_artifacts`, `document_versions`, and `ingestion_runs`. Schema self-validates against `_EXPECTED_COLUMNS`; mismatch -> `postgres-reset`.
 - Generated artifacts are committed to PostgreSQL first and then mirrored to local JSON. Valid local JSON is preferred on read only when metadata/payload checks match PostgreSQL; stale/missing JSON is repaired with `marag reconcile`.
 - Each store has a `local_json` fallback mode (`runtime/staging/*.jsonl`) for dry runs; real ingest requires `postgres` and `neo4j` modes.
 
 ## Orchestration & Ingestion Pipeline
 
 - `LangGraph` is the orchestrator. `workflows/ingestion_graph.py` compiles `validate_request -> run_pipeline -> END`. Add future stages as new agents/graphs following this pattern.
-- `_run_pipeline` order: db checks -> ensure pg schema -> build models (reasoning + embedding + reranker) + warmup -> read/checksum doc -> parse document -> build manifest -> chunk blocks -> final manifest -> `assert_version_allowed` -> write manifest -> `neo4j.project_manifest` -> `chroma.index_chunks` -> `RequirementDiscoveryAgent.run` -> load prior revisions from pg -> build requirement artifact -> write `requirements_full.json` + compact `requirements.json` -> persist artifact/ledger -> record run.
+- `_run_pipeline` order: db checks -> ensure pg schema -> build models (reasoning + embedding + reranker) + warmup -> read/checksum doc -> parse document -> build manifest -> chunk blocks -> final manifest -> `assert_version_allowed` -> write manifest -> `neo4j.project_manifest` -> `chroma.index_chunks` -> `RequirementDiscoveryAgent.run` -> load prior revisions from pg -> build requirement artifact -> persist/write `requirements_full.json` with display aliases -> write projected `requirements.json` catalog -> record run.
 - Output dir (gitignored): `generated/<PROJECT>/req/<RUN_ID>/` containing `requirements.json`, `requirements_full.json`, `run.log`, `run.jsonl`, `chunk_manifest.json`, and any saved `llm_response_*.txt` files.
 
 ## Models
@@ -58,6 +58,8 @@ execution, and reporting are future work.
 `services/requirement_builder.py` converts validated output into ledger records and assigns permanent deterministic IDs (`domain/identifiers.py`, sha256 `stable_token`):
 
 - `chunk_id` remembered per requirement/fact via `source_trace`.
+- `source_req_id` is preserved only when a normalized source identifier is present in the verified quote; otherwise it is nulled and `id_generation_type` remains `generated`.
+- LLM output must include `confidence`; the builder carries it into `VerifiedRequirement`, PostgreSQL rows, and projected artifacts.
 - Fact identity: `canonical_fact_id` (normalized text) + per-occurrence `fact_id`.
 - Requirement identity is two-level for supersede tracking:
   - `requirement_id` = lineage = `stable_token(project, document_id, requirement_key)` - stable across versions.
@@ -72,10 +74,15 @@ All runtime schemas live in `domain/schemas.py` as `StrictModel` extra=forbid.
 - Ingestion: `IngestionRequest`, `ParsedBlock`, `DocumentChunk`, `DocumentManifest`, `IngestionResult`.
 - LLM I/O: `RequirementDiscoveryChunkOutput` -> normalized to `RequirementDiscoveryOutput`.
 - Ledger: `CanonicalFact`, `VerifiedFact`, `VerifiedRequirement`, `RequirementEvidence`, `RequirementDeltaEvent`, `RequirementRevisionSnapshot`.
-- Downstream input contract:
-  - `RequirementArtifact` (schema `2.0`) -> `requirements_full.json`.
-  - `CompactRequirementArtifact` (schema `3.0-compact`) -> `requirements.json`.
-- `UserStoryRecord` and `TestScenarioRecord` keep deterministic parent lineage. `TestScenarioRecord.origin` may be `generation` or `feedback`; feedback records are created only by optional stage-4 HFIL before final persistence.
+- Requirement artifacts:
+  - `RequirementArtifact` (schema `2.1`) -> `requirements_full.json`, the internal audit/ledger payload with additive display/source/confidence fields.
+  - `RequirementsCatalogArtifact` (schema `4.0-catalog`) -> public `requirements.json`, one row per requirement occurrence plus deduped display-ID traceability.
+  - `CompactRequirementArtifact` (`3.0-compact`) is read-only compatibility input for one release; reconcile regenerates `4.0-catalog`.
+- Public projected artifacts:
+  - `UserStoryArtifact` (schema `2.0-user-stories`) exposes `display_id`, display parent `req_id`, flat `acceptance_criteria`, `source_req_id`, `confidence`, and traceability rows.
+  - `TestScenarioArtifact` (schema `2.0-test-scenarios`) exposes `display_id`, display parents `us_id`/`req_id`, `source_req_id`, `confidence`, and traceability rows.
+- Runtime rows (`VerifiedRequirement`, `UserStoryRecord`, `TestScenarioRecord`) keep internal hash IDs, parent lineage, evidence chunks, status/origin, and PostgreSQL/Neo4j compatibility. `TestScenarioRecord.origin` may be `generation` or `feedback`; feedback records are created only by optional stage-4 HFIL before final persistence.
+- Display aliases are allocated by `services/id_registry.py`: `REQ-001`, `US-001`, and `TS-001` are stable per project while internal hash IDs remain the system identities.
 
 ## Adding the Next Agent
 
@@ -91,7 +98,7 @@ All runtime schemas live in `domain/schemas.py` as `StrictModel` extra=forbid.
 - Chunks are immutable source truth. Requirements are validated generated claims. User stories and test scenarios are downstream generated claims linked back to source evidence.
 - Neo4j is not the primary generated-artifact store. It holds validated traceability nodes for user stories and test scenarios so later stages can retrieve graph context for content-quality validation.
 - PostgreSQL remains the generated-artifact ledger and source of truth for content plus status.
-- Coverage and dedup are answered from the local artifact first, then PostgreSQL as the trust anchor.
-- Artifact split: keep `requirements.json` scoped to requirement-text retrieval and traceback only.
+- Coverage, resume, HFIL, dedup, PostgreSQL, and Neo4j merges use internal hash IDs. Public JSON projections use display aliases only at artifact boundaries.
+- Artifact split: keep `requirements_full.json` as the audit/ledger payload and keep `requirements.json`, `user_stories.json`, and `test_scenarios.json` as projected display-ID artifacts.
 - Version continuity: users should keep `--logical-name` / `document_id` stable across versions so supersede tracking fires.
 - Future stages: test cases, execution, and reporting remain future work. The deterministic `canonical_fact_id` / lineage ID scheme already supports the idempotency those stages will need.

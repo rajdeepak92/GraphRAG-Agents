@@ -16,16 +16,17 @@ from multi_agentic_graph_rag.config.settings import (
 )
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore, _project_manifest_tx
 from multi_agentic_graph_rag.domain.schemas import (
-    AcceptanceCriterion,
     DocumentChunk,
     DocumentManifest,
     RequirementArtifact,
-    TestScenarioArtifact,
+    TestScenarioBuildResult,
     TestScenarioRecord,
-    UserStoryArtifact,
+    UserStoryBuildResult,
     UserStoryRecord,
     UserStoryStatement,
 )
+from multi_agentic_graph_rag.services.test_scenario_builder import project_test_scenario_artifact
+from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 
 
 class Neo4jStoreTests(unittest.TestCase):
@@ -219,7 +220,7 @@ def _artifact() -> RequirementArtifact:
     )
 
 
-def _user_story_artifact() -> UserStoryArtifact:
+def _user_story_artifact() -> UserStoryBuildResult:
     record = UserStoryRecord(
         story_id="US-STORY-1",
         requirement_id="REQ-1",
@@ -228,7 +229,6 @@ def _user_story_artifact() -> UserStoryArtifact:
         document_version_id="DOC-v1",
         doc_version="1.0",
         title="Import files reliably",
-        epic="Ingestion",
         priority="Medium",
         persona="Data Engineer",
         user_story=UserStoryStatement(
@@ -236,28 +236,28 @@ def _user_story_artifact() -> UserStoryArtifact:
             i_want="to import files",
             so_that="downstream reporting stays current",
         ),
-        business_value="Keeps operational reporting current",
         acceptance_criteria=[
-            AcceptanceCriterion(
-                id="AC-001",
-                title="valid file imports",
-                given="a valid source file",
-                when="the import runs",
-                then="records are available",
-            )
+            "Given a valid source file, when the import runs, then records are available."
         ],
+        confidence=0.85,
     )
-    return UserStoryArtifact(
+    artifact = project_user_story_artifact(
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
         doc_version="1.0",
-        stories={record.story_id: record},
+        records={record.story_id: record},
+        requirement_display_ids={},
+        story_display_ids={},
+    )
+    return UserStoryBuildResult(
+        artifact=artifact,
+        records={record.story_id: record},
         coverage={"REQ-1": [record.story_id]},
     )
 
 
-def _test_scenario_artifact() -> TestScenarioArtifact:
+def _test_scenario_artifact() -> TestScenarioBuildResult:
     record = TestScenarioRecord(
         scenario_id="SC-SCENARIO-1",
         story_id="US-STORY-1",
@@ -274,12 +274,17 @@ def _test_scenario_artifact() -> TestScenarioArtifact:
         priority="Medium",
         confidence=0.9,
     )
-    return TestScenarioArtifact(
+    artifact = project_test_scenario_artifact(
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
         doc_version="1.0",
-        scenarios={record.scenario_id: record},
+        records={record.scenario_id: record},
+        scenario_display_ids={},
+    )
+    return TestScenarioBuildResult(
+        artifact=artifact,
+        records={record.scenario_id: record},
         coverage={"US-STORY-1": [record.scenario_id]},
         requirement_coverage={"REQ-1": [record.scenario_id]},
     )

@@ -245,6 +245,8 @@ def _requirement(statement: str, *, key: str | None = None) -> LLMRequirementCan
         temp_id="R1",
         statement=statement,
         requirement_key=key,
+        source_req_id=None,
+        confidence=0.85,
         source_trace=_trace(),
     )
 

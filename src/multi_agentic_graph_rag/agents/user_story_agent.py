@@ -175,7 +175,6 @@ def _verify_user_stories(
             ("title", story.title),
             ("i_want", story.user_story.i_want),
             ("so_that", story.user_story.so_that),
-            ("business_value", story.business_value),
         ):
             if len(_WORD.findall(value)) < 2:
                 raise UserStoryValidationError(
@@ -188,6 +187,12 @@ def _verify_user_stories(
                 f"duplicate user story title ({story.title!r}) for {requirement.requirement_id}"
             )
         seen_titles.add(title_key)
+        for criterion in story.acceptance_criteria:
+            if len(_WORD.findall(criterion)) < 2:
+                raise UserStoryValidationError(
+                    "user story acceptance criterion is not descriptive enough "
+                    f"({criterion!r}) for {requirement.requirement_id}"
+                )
 
 
 def _build_user_story_prompt(
@@ -200,6 +205,8 @@ def _build_user_story_prompt(
             "requirement_text": requirement.requirement_text,
             "requirement_type": requirement.requirement_type,
             "priority": requirement.priority,
+            "source_req_id": requirement.source_req_id or "",
+            "confidence": requirement.confidence,
         },
         ensure_ascii=False,
         indent=2,
@@ -217,7 +224,7 @@ def _build_user_story_prompt(
     if validation_error:
         feedback = (
             f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
-            "Every title, i_want, so_that, and business_value must be a complete, "
+            "Every title, i_want, so_that, and acceptance criterion must be a complete, "
             "descriptive phrase of at least two words. Story titles must be unique.\n"
             f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )

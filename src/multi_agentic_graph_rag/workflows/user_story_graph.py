@@ -19,7 +19,7 @@ from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import CheckpointError, ConfigurationError
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
-    UserStoryArtifact,
+    UserStoryBuildResult,
     UserStoryModel,
     UserStoryRecord,
     UserStoryRequest,
@@ -58,7 +58,10 @@ from multi_agentic_graph_rag.services.requirement_source import (
     load_requirement_source_local,
 )
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
-from multi_agentic_graph_rag.services.user_story_builder import build_user_story_artifact
+from multi_agentic_graph_rag.services.user_story_builder import (
+    build_user_story_artifact,
+    project_user_story_artifact,
+)
 
 
 class UserStoryState(TypedDict, total=False):
@@ -201,22 +204,23 @@ def _run_pipeline(
             logger=logger,
         )
 
-        artifact = build_user_story_artifact(
+        build_result = build_user_story_artifact(
             project=source.project,
             document_id=source.document_id,
             document_version_id=source.document_version_id,
             doc_version=source.doc_version,
             generated=generated,
         )
-        artifact = _preserve_existing_story_ids(
-            artifact,
+        build_result = _preserve_existing_story_ids(
+            build_result,
             postgres.load_user_stories_for_generation(project=source.project),
         )
         artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
-            artifact=artifact,
+            artifact=build_result,
             artifact_path=out_dir / "user_stories.json",
             run_id=state["run_id"],
         )
+        artifact = build_result.artifact
         if session is not None:
             session.artifact_payload = artifact.model_dump(mode="json")
         if logger is not None:
@@ -224,8 +228,8 @@ def _run_pipeline(
                 "User-story artifact written to {path}",
                 step="write_user_story_artifact",
                 path=str(artifact_path),
-                story_count=len(artifact.stories),
-                requirement_count=len(artifact.coverage),
+                story_count=len(build_result.records),
+                requirement_count=len(build_result.coverage),
                 status="completed",
             )
         if logger is not None:
@@ -233,10 +237,10 @@ def _run_pipeline(
                 "Projecting user-story coverage into Neo4j and marking requirements covered",
                 step="project_user_story_coverage",
                 document_version_id=source.document_version_id,
-                story_count=len(artifact.stories),
+                story_count=len(build_result.records),
                 store_responsibility="user_story_traceability_nodes",
             )
-        neo4j.project_user_story_coverage(artifact, evidence_by_requirement)
+        neo4j.project_user_story_coverage(build_result, evidence_by_requirement)
 
         result_payload: UserStoryState = {
             "run_id": state["run_id"],
@@ -246,8 +250,8 @@ def _run_pipeline(
             "doc_version": source.doc_version,
             "artifact_path": str(artifact_path),
             "requirement_count": len(source.requirements),
-            "story_ids": list(artifact.stories),
-            "coverage": artifact.coverage,
+            "story_ids": list(build_result.records),
+            "coverage": build_result.coverage,
             "warnings": [],
             "errors": [],
         }
@@ -259,7 +263,7 @@ def _run_pipeline(
                 "User-story generation pipeline completed",
                 step="run_pipeline",
                 run_id=state["run_id"],
-                story_count=len(artifact.stories),
+                story_count=len(build_result.records),
                 requirement_count=len(source.requirements),
                 status="completed",
             )
@@ -436,9 +440,9 @@ def _stories_from_payload(payload: dict[str, Any], requirement_id: str) -> list[
 
 
 def _preserve_existing_story_ids(
-    artifact: UserStoryArtifact,
+    artifact: UserStoryBuildResult,
     existing_stories: list[UserStoryRecord],
-) -> UserStoryArtifact:
+) -> UserStoryBuildResult:
     existing_by_requirement: dict[str, list[UserStoryRecord]] = {}
     for story in existing_stories:
         existing_by_requirement.setdefault(story.requirement_id, []).append(story)
@@ -448,7 +452,7 @@ def _preserve_existing_story_ids(
     rewritten: dict[str, UserStoryRecord] = {}
     coverage: dict[str, list[str]] = {}
     ordinal_by_requirement: dict[str, int] = {}
-    for story in artifact.stories.values():
+    for story in artifact.records.values():
         ordinal = ordinal_by_requirement.get(story.requirement_id, 0)
         ordinal_by_requirement[story.requirement_id] = ordinal + 1
         prior = existing_by_requirement.get(story.requirement_id, [])
@@ -456,7 +460,18 @@ def _preserve_existing_story_ids(
         record = story.model_copy(update={"story_id": stable_story_id})
         rewritten[stable_story_id] = record
         coverage.setdefault(record.requirement_id, []).append(stable_story_id)
-    return artifact.model_copy(update={"stories": rewritten, "coverage": coverage})
+    artifact.records = rewritten
+    artifact.coverage = coverage
+    artifact.artifact = project_user_story_artifact(
+        project=artifact.artifact.project,
+        document_id=artifact.artifact.document_id,
+        document_version_id=artifact.artifact.document_version_id,
+        doc_version=artifact.artifact.doc_version,
+        records=rewritten,
+        requirement_display_ids={},
+        story_display_ids={},
+    )
+    return artifact
 
 
 def run_user_story_generation(

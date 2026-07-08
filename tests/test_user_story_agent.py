@@ -44,10 +44,10 @@ class UserStoryAgentTests(unittest.TestCase):
             generated=[(requirement, story) for story in output.user_stories],
         )
 
-        story_id = next(iter(artifact.stories))
+        story_id = next(iter(artifact.records))
         self.assertTrue(story_id.startswith("US-"))
         self.assertNotEqual(story_id, "US1")
-        self.assertEqual(artifact.stories[story_id].requirement_id, requirement.requirement_id)
+        self.assertEqual(artifact.records[story_id].requirement_id, requirement.requirement_id)
 
     def test_non_descriptive_story_is_retried_once(self) -> None:
         reasoner = _RetryStoryReasoner(
@@ -142,7 +142,6 @@ def _empty_context() -> RetrievedContext:
 def _story_payload(title: str) -> dict[str, Any]:
     return {
         "title": title,
-        "epic": "Threshold Management",
         "priority": "Medium",
         "persona": "Operations Engineer",
         "user_story": {
@@ -150,19 +149,10 @@ def _story_payload(title: str) -> dict[str, Any]:
             "i_want": "to configure warning thresholds",
             "so_that": "alerts fire before equipment is damaged",
         },
-        "business_value": "Reduces unplanned downtime through timely alerting",
         "acceptance_criteria": [
-            {
-                "id": "AC1",
-                "title": "threshold crossed",
-                "given": "a configured sensor",
-                "when": "a threshold is crossed",
-                "then": "an alert is raised",
-            }
+            "Given a configured sensor, when a threshold is crossed, then an alert is raised."
         ],
-        "business_rules": [{"id": "BR1", "rule": "only authorized users may configure"}],
-        "test_scenarios": [{"id": "TS1", "scenario": "cross a warning threshold"}],
-        "definition_of_done": ["code reviewed", "tests passing"],
+        "confidence": 0.85,
     }
 
 

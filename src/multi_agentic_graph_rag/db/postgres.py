@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.domain.errors import SchemaMismatchError, VersionConflictError
@@ -18,11 +18,17 @@ from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
     RequirementRevisionSnapshot,
     TestScenarioArtifact,
+    TestScenarioBuildResult,
     TestScenarioRecord,
     UserStoryArtifact,
+    UserStoryBuildResult,
     UserStoryRecord,
     normalize_priority_label,
 )
+from multi_agentic_graph_rag.services.id_registry import resolve_many
+from multi_agentic_graph_rag.services.requirement_builder import apply_requirement_display_ids
+from multi_agentic_graph_rag.services.test_scenario_builder import project_test_scenario_artifact
+from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 
 _MANAGED_TABLES = (
     "schema_migrations",
@@ -32,6 +38,8 @@ _MANAGED_TABLES = (
     "user_story_evidence",
     "user_stories",
     "user_story_artifacts",
+    "artifact_display_ids",
+    "display_id_counters",
     "requirement_fact_links",
     "requirement_evidence",
     "requirement_delta_events",
@@ -76,8 +84,11 @@ _EXPECTED_COLUMNS = {
     },
     "user_stories": {
         "story_id": _TEXT_TYPES,
+        "display_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_display_id": _TEXT_TYPES,
         "requirement_revision_id": _TEXT_TYPES,
+        "source_req_id": _TEXT_TYPES,
         "project": _TEXT_TYPES,
         "document_id": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
@@ -85,6 +96,7 @@ _EXPECTED_COLUMNS = {
         "origin_version": _TEXT_TYPES,
         "title": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
+        "confidence": {"double precision"},
         "status": _TEXT_TYPES,
         "origin": _TEXT_TYPES,
         "run_id": _TEXT_TYPES,
@@ -95,7 +107,9 @@ _EXPECTED_COLUMNS = {
     "user_story_evidence": {
         "evidence_id": _TEXT_TYPES,
         "story_id": _TEXT_TYPES,
+        "story_display_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_display_id": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
         "chunk_id": _TEXT_TYPES,
         "run_id": _TEXT_TYPES,
@@ -109,9 +123,13 @@ _EXPECTED_COLUMNS = {
     },
     "test_scenarios": {
         "scenario_id": _TEXT_TYPES,
+        "display_id": _TEXT_TYPES,
         "story_id": _TEXT_TYPES,
+        "story_display_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_display_id": _TEXT_TYPES,
         "requirement_revision_id": _TEXT_TYPES,
+        "source_req_id": _TEXT_TYPES,
         "project": _TEXT_TYPES,
         "document_id": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
@@ -120,6 +138,7 @@ _EXPECTED_COLUMNS = {
         "title": _TEXT_TYPES,
         "scenario_type": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
+        "confidence": {"double precision"},
         "status": _TEXT_TYPES,
         "origin": _TEXT_TYPES,
         "run_id": _TEXT_TYPES,
@@ -130,8 +149,11 @@ _EXPECTED_COLUMNS = {
     "test_scenario_evidence": {
         "evidence_id": _TEXT_TYPES,
         "scenario_id": _TEXT_TYPES,
+        "scenario_display_id": _TEXT_TYPES,
         "story_id": _TEXT_TYPES,
+        "story_display_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_display_id": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
         "chunk_id": _TEXT_TYPES,
         "run_id": _TEXT_TYPES,
@@ -163,9 +185,13 @@ _EXPECTED_COLUMNS = {
     },
     "requirements": {
         "requirement_id": _TEXT_TYPES,
+        "display_id": _TEXT_TYPES,
         "project": _TEXT_TYPES,
         "document_id": _TEXT_TYPES,
         "requirement_key": _TEXT_TYPES,
+        "source_req_id": _TEXT_TYPES,
+        "id_generation_type": _TEXT_TYPES,
+        "confidence": {"double precision"},
         "status": _TEXT_TYPES,
         "first_seen_document_version_id": _TEXT_TYPES,
         "active_revision_id": _TEXT_TYPES,
@@ -177,10 +203,14 @@ _EXPECTED_COLUMNS = {
     "requirement_revisions": {
         "revision_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "display_id": _TEXT_TYPES,
         "statement": _TEXT_TYPES,
         "normalized_statement": _TEXT_TYPES,
         "requirement_type": _TEXT_TYPES,
         "priority": _TEXT_TYPES,
+        "source_req_id": _TEXT_TYPES,
+        "id_generation_type": _TEXT_TYPES,
+        "confidence": {"double precision"},
         "status": _TEXT_TYPES,
         "first_seen_document_version_id": _TEXT_TYPES,
         "superseded_by_version": _TEXT_TYPES,
@@ -191,6 +221,7 @@ _EXPECTED_COLUMNS = {
     "requirement_evidence": {
         "evidence_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_display_id": _TEXT_TYPES,
         "revision_id": _TEXT_TYPES,
         "document_version_id": _TEXT_TYPES,
         "chunk_id": _TEXT_TYPES,
@@ -206,6 +237,7 @@ _EXPECTED_COLUMNS = {
         "evidence_id": _TEXT_TYPES,
         "fact_id": _TEXT_TYPES,
         "requirement_id": _TEXT_TYPES,
+        "requirement_display_id": _TEXT_TYPES,
         "revision_id": _TEXT_TYPES,
         "created_at": {"timestamp with time zone"},
     },
@@ -225,6 +257,19 @@ _EXPECTED_COLUMNS = {
     "schema_migrations": {
         "version": _TEXT_TYPES,
         "applied_at": {"timestamp with time zone"},
+    },
+    "artifact_display_ids": {
+        "project": _TEXT_TYPES,
+        "kind": _TEXT_TYPES,
+        "internal_id": _TEXT_TYPES,
+        "display_id": _TEXT_TYPES,
+        "created_at": {"timestamp with time zone"},
+    },
+    "display_id_counters": {
+        "project": _TEXT_TYPES,
+        "kind": _TEXT_TYPES,
+        "next_value": {"integer"},
+        "updated_at": {"timestamp with time zone"},
     },
 }
 
@@ -289,10 +334,28 @@ class PostgresStore:
                       payload jsonb not null,
                       created_at timestamptz not null default now()
                     );
+                    create table if not exists artifact_display_ids (
+                      project text not null,
+                      kind text not null,
+                      internal_id text primary key,
+                      display_id text not null,
+                      created_at timestamptz not null default now(),
+                      unique(project, display_id)
+                    );
+                    create table if not exists display_id_counters (
+                      project text not null,
+                      kind text not null,
+                      next_value integer not null,
+                      updated_at timestamptz not null default now(),
+                      primary key(project, kind)
+                    );
                     create table if not exists user_stories (
                       story_id text primary key,
+                      display_id text not null default '',
                       requirement_id text not null,
+                      requirement_display_id text not null default '',
                       requirement_revision_id text not null default '',
+                      source_req_id text,
                       project text not null,
                       document_id text not null,
                       document_version_id text not null,
@@ -300,6 +363,7 @@ class PostgresStore:
                       origin_version text not null default '',
                       title text not null,
                       priority text not null,
+                      confidence double precision not null default 0,
                       status text not null,
                       origin text not null default 'generation',
                       run_id text not null default '',
@@ -310,7 +374,9 @@ class PostgresStore:
                     create table if not exists user_story_evidence (
                       evidence_id text primary key,
                       story_id text not null,
+                      story_display_id text not null default '',
                       requirement_id text not null,
+                      requirement_display_id text not null default '',
                       document_version_id text not null,
                       chunk_id text not null,
                       run_id text not null default '',
@@ -318,9 +384,13 @@ class PostgresStore:
                     );
                     create table if not exists test_scenarios (
                       scenario_id text primary key,
+                      display_id text not null default '',
                       story_id text not null,
+                      story_display_id text not null default '',
                       requirement_id text not null,
+                      requirement_display_id text not null default '',
                       requirement_revision_id text not null default '',
+                      source_req_id text,
                       project text not null,
                       document_id text not null,
                       document_version_id text not null,
@@ -329,6 +399,7 @@ class PostgresStore:
                       title text not null,
                       scenario_type text not null,
                       priority text not null,
+                      confidence double precision not null default 0,
                       status text not null,
                       origin text not null default 'generation',
                       run_id text not null default '',
@@ -339,8 +410,11 @@ class PostgresStore:
                     create table if not exists test_scenario_evidence (
                       evidence_id text primary key,
                       scenario_id text not null,
+                      scenario_display_id text not null default '',
                       story_id text not null,
+                      story_display_id text not null default '',
                       requirement_id text not null,
+                      requirement_display_id text not null default '',
                       document_version_id text not null,
                       chunk_id text not null,
                       run_id text not null default '',
@@ -372,9 +446,13 @@ class PostgresStore:
                     );
                     create table if not exists requirements (
                       requirement_id text primary key,
+                      display_id text not null default '',
                       project text not null,
                       document_id text not null,
                       requirement_key text not null,
+                      source_req_id text,
+                      id_generation_type text not null default 'generated',
+                      confidence double precision not null default 0,
                       status text not null,
                       first_seen_document_version_id text not null,
                       active_revision_id text,
@@ -387,10 +465,14 @@ class PostgresStore:
                     create table if not exists requirement_revisions (
                       revision_id text primary key,
                       requirement_id text not null,
+                      display_id text not null default '',
                       statement text not null,
                       normalized_statement text not null,
                       requirement_type text not null,
                       priority text not null,
+                      source_req_id text,
+                      id_generation_type text not null default 'generated',
+                      confidence double precision not null default 0,
                       status text not null,
                       first_seen_document_version_id text not null,
                       superseded_by_version text,
@@ -401,6 +483,7 @@ class PostgresStore:
                     create table if not exists requirement_evidence (
                       evidence_id text primary key,
                       requirement_id text not null,
+                      requirement_display_id text not null default '',
                       revision_id text not null,
                       document_version_id text not null,
                       chunk_id text not null,
@@ -416,6 +499,7 @@ class PostgresStore:
                       evidence_id text not null,
                       fact_id text not null,
                       requirement_id text not null,
+                      requirement_display_id text not null default '',
                       revision_id text not null,
                       created_at timestamptz not null default now(),
                       primary key(evidence_id, fact_id)
@@ -449,6 +533,8 @@ class PostgresStore:
                       on test_scenarios(requirement_id);
                     create index if not exists test_scenarios_document_version_idx
                       on test_scenarios(document_version_id);
+                    create index if not exists artifact_display_ids_project_kind_idx
+                      on artifact_display_ids(project, kind);
                     create index if not exists user_story_evidence_story_idx
                       on user_story_evidence(story_id);
                     create index if not exists user_story_evidence_chunk_idx
@@ -462,19 +548,47 @@ class PostgresStore:
                     create index if not exists test_scenario_evidence_document_version_idx
                       on test_scenario_evidence(document_version_id);
                     alter table user_stories
+                      add column if not exists display_id text not null default '',
+                      add column if not exists requirement_display_id text not null default '',
                       add column if not exists requirement_revision_id text not null default '',
+                      add column if not exists source_req_id text,
                       add column if not exists origin_version text not null default '',
+                      add column if not exists confidence double precision not null default 0,
                       add column if not exists updated_at timestamptz not null default now();
+                    alter table user_story_evidence
+                      add column if not exists story_display_id text not null default '',
+                      add column if not exists requirement_display_id text not null default '';
                     alter table test_scenarios
+                      add column if not exists display_id text not null default '',
+                      add column if not exists story_display_id text not null default '',
+                      add column if not exists requirement_display_id text not null default '',
                       add column if not exists requirement_revision_id text not null default '',
+                      add column if not exists source_req_id text,
                       add column if not exists origin_version text not null default '',
+                      add column if not exists confidence double precision not null default 0,
                       add column if not exists updated_at timestamptz not null default now();
+                    alter table test_scenario_evidence
+                      add column if not exists scenario_display_id text not null default '',
+                      add column if not exists story_display_id text not null default '',
+                      add column if not exists requirement_display_id text not null default '';
                     alter table requirements
+                      add column if not exists display_id text not null default '',
+                      add column if not exists source_req_id text,
+                      add column if not exists id_generation_type text not null default 'generated',
+                      add column if not exists confidence double precision not null default 0,
                       add column if not exists superseded_by_version text,
                       add column if not exists superseded_at timestamptz;
                     alter table requirement_revisions
+                      add column if not exists display_id text not null default '',
+                      add column if not exists source_req_id text,
+                      add column if not exists id_generation_type text not null default 'generated',
+                      add column if not exists confidence double precision not null default 0,
                       add column if not exists superseded_by_version text,
                       add column if not exists superseded_at timestamptz;
+                    alter table requirement_evidence
+                      add column if not exists requirement_display_id text not null default '';
+                    alter table requirement_fact_links
+                      add column if not exists requirement_display_id text not null default '';
                     insert into schema_migrations(version)
                     values ('0001_version_lineage_inline')
                     on conflict (version) do nothing;
@@ -584,9 +698,14 @@ class PostgresStore:
 
     def persist_artifact(
         self, artifact: RequirementArtifact, artifact_path: str, run_id: str
-    ) -> None:
-        payload = artifact.model_dump(mode="json")
+    ) -> RequirementArtifact:
+        internal_ids = [requirement.requirement_id for requirement in artifact.requirements]
         if self.settings.postgres.mode == "local_json":
+            artifact = apply_requirement_display_ids(
+                artifact,
+                resolve_many(artifact.project, "requirement", internal_ids),
+            )
+            payload = artifact.model_dump(mode="json")
             self._upsert_local(
                 "requirement_artifact",
                 artifact.document_version_id,
@@ -598,9 +717,14 @@ class PostgresStore:
                 },
             )
             self._persist_requirement_ledger_local(artifact)
-            return
+            return artifact
         with self._connect() as connection:
             with connection.cursor() as cursor:
+                artifact = apply_requirement_display_ids(
+                    artifact,
+                    resolve_many(artifact.project, "requirement", internal_ids, cursor=cursor),
+                )
+                payload = artifact.model_dump(mode="json")
                 cursor.execute(
                     """
                     insert into requirement_artifacts
@@ -612,6 +736,7 @@ class PostgresStore:
                 )
                 self._persist_requirement_ledger_postgres(cursor, artifact)
             connection.commit()
+        return artifact
 
     def load_requirement_artifact_payload(
         self,
@@ -655,15 +780,29 @@ class PostgresStore:
 
     def persist_user_story_artifact(
         self,
-        artifact: UserStoryArtifact,
+        artifact: UserStoryArtifact | UserStoryBuildResult,
         artifact_path: str,
         run_id: str,
-    ) -> None:
-        payload = artifact.model_dump(mode="json")
+    ) -> UserStoryBuildResult:
+        result = _coerce_user_story_build_result(artifact)
         if self.settings.postgres.mode == "local_json":
+            _apply_user_story_display_ids(
+                result,
+                story_display_ids=resolve_many(
+                    result.artifact.project,
+                    "user_story",
+                    list(result.records),
+                ),
+                requirement_display_ids=resolve_many(
+                    result.artifact.project,
+                    "requirement",
+                    [record.requirement_id for record in result.records.values()],
+                ),
+            )
+            payload = result.artifact.model_dump(mode="json")
             self._upsert_local(
                 "user_story_artifact",
-                artifact.document_version_id,
+                result.artifact.document_version_id,
                 {
                     "kind": "user_story_artifact",
                     "run_id": run_id,
@@ -671,10 +810,26 @@ class PostgresStore:
                     "artifact": payload,
                 },
             )
-            self._persist_user_stories_local(artifact, run_id)
-            return
+            self._persist_user_stories_local(result, run_id)
+            return result
         with self._connect() as connection:
             with connection.cursor() as cursor:
+                _apply_user_story_display_ids(
+                    result,
+                    story_display_ids=resolve_many(
+                        result.artifact.project,
+                        "user_story",
+                        list(result.records),
+                        cursor=cursor,
+                    ),
+                    requirement_display_ids=resolve_many(
+                        result.artifact.project,
+                        "requirement",
+                        [record.requirement_id for record in result.records.values()],
+                        cursor=cursor,
+                    ),
+                )
+                payload = result.artifact.model_dump(mode="json")
                 cursor.execute(
                     """
                     insert into user_story_artifacts
@@ -682,10 +837,11 @@ class PostgresStore:
                     values (%s, %s, %s)
                     on conflict (artifact_path) do update set payload=excluded.payload
                     """,
-                    (artifact_path, artifact.document_version_id, json.dumps(payload)),
+                    (artifact_path, result.artifact.document_version_id, json.dumps(payload)),
                 )
-                self._persist_user_stories_postgres(cursor, artifact, run_id)
+                self._persist_user_stories_postgres(cursor, result, run_id)
             connection.commit()
+        return result
 
     def load_user_story_artifact_payload(
         self,
@@ -724,23 +880,28 @@ class PostgresStore:
         return None
 
     def _persist_user_stories_postgres(
-        self, cursor: Any, artifact: UserStoryArtifact, run_id: str
+        self, cursor: Any, artifact: UserStoryBuildResult, run_id: str
     ) -> None:
-        for story_id, record in artifact.stories.items():
+        for story_id, record in artifact.records.items():
             cursor.execute(
                 """
                 insert into user_stories
-                  (story_id, requirement_id, requirement_revision_id, project, document_id,
-                   document_version_id, doc_version, origin_version, title, priority, status,
-                   origin, run_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  (story_id, display_id, requirement_id, requirement_display_id,
+                   requirement_revision_id, source_req_id, project, document_id,
+                   document_version_id, doc_version, origin_version, title, priority,
+                   confidence, status, origin, run_id, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (story_id) do update
-                set requirement_revision_id = excluded.requirement_revision_id,
+                set display_id = excluded.display_id,
+                    requirement_display_id = excluded.requirement_display_id,
+                    requirement_revision_id = excluded.requirement_revision_id,
+                    source_req_id = excluded.source_req_id,
                     document_version_id = excluded.document_version_id,
                     doc_version = excluded.doc_version,
                     origin_version = excluded.origin_version,
                     title = excluded.title,
                     priority = excluded.priority,
+                    confidence = excluded.confidence,
                     status = excluded.status,
                     origin = excluded.origin,
                     run_id = excluded.run_id,
@@ -749,8 +910,11 @@ class PostgresStore:
                 """,
                 (
                     story_id,
+                    record.display_id,
                     record.requirement_id,
+                    record.requirement_display_id,
                     record.requirement_revision_id,
+                    record.source_req_id,
                     record.project,
                     record.document_id,
                     record.document_version_id,
@@ -758,6 +922,7 @@ class PostgresStore:
                     record.origin_version,
                     record.title,
                     record.priority,
+                    record.confidence,
                     record.status,
                     record.origin,
                     run_id,
@@ -768,9 +933,9 @@ class PostgresStore:
                 cursor.execute(
                     """
                     insert into user_story_evidence
-                      (evidence_id, story_id, requirement_id, document_version_id,
-                       chunk_id, run_id)
-                    values (%s, %s, %s, %s, %s, %s)
+                      (evidence_id, story_id, story_display_id, requirement_id,
+                       requirement_display_id, document_version_id, chunk_id, run_id)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s)
                     on conflict (evidence_id) do nothing
                     """,
                     (
@@ -780,23 +945,28 @@ class PostgresStore:
                             chunk_identifier=chunk_id,
                         ),
                         story_id,
+                        record.display_id,
                         record.requirement_id,
+                        record.requirement_display_id,
                         record.document_version_id,
                         chunk_id,
                         run_id,
                     ),
                 )
 
-    def _persist_user_stories_local(self, artifact: UserStoryArtifact, run_id: str) -> None:
-        for story_id, record in artifact.stories.items():
+    def _persist_user_stories_local(self, artifact: UserStoryBuildResult, run_id: str) -> None:
+        for story_id, record in artifact.records.items():
             self._upsert_local(
                 "user_story",
                 story_id,
                 {
                     "kind": "user_story",
                     "story_id": story_id,
+                    "display_id": record.display_id,
                     "requirement_id": record.requirement_id,
+                    "requirement_display_id": record.requirement_display_id,
                     "requirement_revision_id": record.requirement_revision_id,
+                    "source_req_id": record.source_req_id,
                     "project": record.project,
                     "document_id": record.document_id,
                     "document_version_id": record.document_version_id,
@@ -804,6 +974,7 @@ class PostgresStore:
                     "origin_version": record.origin_version,
                     "title": record.title,
                     "priority": record.priority,
+                    "confidence": record.confidence,
                     "status": record.status,
                     "origin": record.origin,
                     "run_id": run_id,
@@ -821,7 +992,9 @@ class PostgresStore:
                     {
                         "kind": "user_story_evidence",
                         "story_id": story_id,
+                        "story_display_id": record.display_id,
                         "requirement_id": record.requirement_id,
+                        "requirement_display_id": record.requirement_display_id,
                         "document_version_id": record.document_version_id,
                         "chunk_id": chunk_id,
                         "run_id": run_id,
@@ -849,15 +1022,34 @@ class PostgresStore:
 
     def persist_test_scenario_artifact(
         self,
-        artifact: TestScenarioArtifact,
+        artifact: TestScenarioArtifact | TestScenarioBuildResult,
         artifact_path: str,
         run_id: str,
-    ) -> None:
-        payload = artifact.model_dump(mode="json")
+    ) -> TestScenarioBuildResult:
+        result = _coerce_test_scenario_build_result(artifact)
         if self.settings.postgres.mode == "local_json":
+            _apply_test_scenario_display_ids(
+                result,
+                scenario_display_ids=resolve_many(
+                    result.artifact.project,
+                    "test_scenario",
+                    list(result.records),
+                ),
+                story_display_ids=resolve_many(
+                    result.artifact.project,
+                    "user_story",
+                    [record.story_id for record in result.records.values()],
+                ),
+                requirement_display_ids=resolve_many(
+                    result.artifact.project,
+                    "requirement",
+                    [record.requirement_id for record in result.records.values()],
+                ),
+            )
+            payload = result.artifact.model_dump(mode="json")
             self._upsert_local(
                 "test_scenario_artifact",
-                artifact.document_version_id,
+                result.artifact.document_version_id,
                 {
                     "kind": "test_scenario_artifact",
                     "run_id": run_id,
@@ -865,10 +1057,32 @@ class PostgresStore:
                     "artifact": payload,
                 },
             )
-            self._persist_test_scenarios_local(artifact, run_id)
-            return
+            self._persist_test_scenarios_local(result, run_id)
+            return result
         with self._connect() as connection:
             with connection.cursor() as cursor:
+                _apply_test_scenario_display_ids(
+                    result,
+                    scenario_display_ids=resolve_many(
+                        result.artifact.project,
+                        "test_scenario",
+                        list(result.records),
+                        cursor=cursor,
+                    ),
+                    story_display_ids=resolve_many(
+                        result.artifact.project,
+                        "user_story",
+                        [record.story_id for record in result.records.values()],
+                        cursor=cursor,
+                    ),
+                    requirement_display_ids=resolve_many(
+                        result.artifact.project,
+                        "requirement",
+                        [record.requirement_id for record in result.records.values()],
+                        cursor=cursor,
+                    ),
+                )
+                payload = result.artifact.model_dump(mode="json")
                 cursor.execute(
                     """
                     insert into test_scenario_artifacts
@@ -876,10 +1090,11 @@ class PostgresStore:
                     values (%s, %s, %s)
                     on conflict (artifact_path) do update set payload=excluded.payload
                     """,
-                    (artifact_path, artifact.document_version_id, json.dumps(payload)),
+                    (artifact_path, result.artifact.document_version_id, json.dumps(payload)),
                 )
-                self._persist_test_scenarios_postgres(cursor, artifact, run_id)
+                self._persist_test_scenarios_postgres(cursor, result, run_id)
             connection.commit()
+        return result
 
     def load_test_scenario_artifact_payload(
         self,
@@ -920,25 +1135,32 @@ class PostgresStore:
     def _persist_test_scenarios_postgres(
         self,
         cursor: Any,
-        artifact: TestScenarioArtifact,
+        artifact: TestScenarioBuildResult,
         run_id: str,
     ) -> None:
-        for scenario_id, record in artifact.scenarios.items():
+        for scenario_id, record in artifact.records.items():
             cursor.execute(
                 """
                 insert into test_scenarios
-                  (scenario_id, story_id, requirement_id, project, document_id,
-                   document_version_id, doc_version, requirement_revision_id, origin_version,
-                   title, scenario_type, priority, status, origin, run_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  (scenario_id, display_id, story_id, story_display_id, requirement_id,
+                   requirement_display_id, project, document_id, document_version_id,
+                   doc_version, requirement_revision_id, source_req_id, origin_version,
+                   title, scenario_type, priority, confidence, status, origin, run_id, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s)
                 on conflict (scenario_id) do update
-                set requirement_revision_id = excluded.requirement_revision_id,
+                set display_id = excluded.display_id,
+                    story_display_id = excluded.story_display_id,
+                    requirement_display_id = excluded.requirement_display_id,
+                    requirement_revision_id = excluded.requirement_revision_id,
+                    source_req_id = excluded.source_req_id,
                     document_version_id = excluded.document_version_id,
                     doc_version = excluded.doc_version,
                     origin_version = excluded.origin_version,
                     title = excluded.title,
                     scenario_type = excluded.scenario_type,
                     priority = excluded.priority,
+                    confidence = excluded.confidence,
                     status = excluded.status,
                     origin = excluded.origin,
                     run_id = excluded.run_id,
@@ -947,17 +1169,22 @@ class PostgresStore:
                 """,
                 (
                     scenario_id,
+                    record.display_id,
                     record.story_id,
+                    record.story_display_id,
                     record.requirement_id,
+                    record.requirement_display_id,
                     record.project,
                     record.document_id,
                     record.document_version_id,
                     record.doc_version,
                     record.requirement_revision_id,
+                    record.source_req_id,
                     record.origin_version,
                     record.title,
                     record.scenario_type,
                     record.priority,
+                    record.confidence,
                     record.status,
                     record.origin,
                     run_id,
@@ -968,9 +1195,10 @@ class PostgresStore:
                 cursor.execute(
                     """
                     insert into test_scenario_evidence
-                      (evidence_id, scenario_id, story_id, requirement_id,
+                      (evidence_id, scenario_id, scenario_display_id, story_id,
+                       story_display_id, requirement_id, requirement_display_id,
                        document_version_id, chunk_id, run_id)
-                    values (%s, %s, %s, %s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     on conflict (evidence_id) do nothing
                     """,
                     (
@@ -980,25 +1208,32 @@ class PostgresStore:
                             chunk_identifier=chunk_id,
                         ),
                         scenario_id,
+                        record.display_id,
                         record.story_id,
+                        record.story_display_id,
                         record.requirement_id,
+                        record.requirement_display_id,
                         record.document_version_id,
                         chunk_id,
                         run_id,
                     ),
                 )
 
-    def _persist_test_scenarios_local(self, artifact: TestScenarioArtifact, run_id: str) -> None:
-        for scenario_id, record in artifact.scenarios.items():
+    def _persist_test_scenarios_local(self, artifact: TestScenarioBuildResult, run_id: str) -> None:
+        for scenario_id, record in artifact.records.items():
             self._upsert_local(
                 "test_scenario",
                 scenario_id,
                 {
                     "kind": "test_scenario",
                     "scenario_id": scenario_id,
+                    "display_id": record.display_id,
                     "story_id": record.story_id,
+                    "story_display_id": record.story_display_id,
                     "requirement_id": record.requirement_id,
+                    "requirement_display_id": record.requirement_display_id,
                     "requirement_revision_id": record.requirement_revision_id,
+                    "source_req_id": record.source_req_id,
                     "project": record.project,
                     "document_id": record.document_id,
                     "document_version_id": record.document_version_id,
@@ -1007,6 +1242,7 @@ class PostgresStore:
                     "title": record.title,
                     "scenario_type": record.scenario_type,
                     "priority": record.priority,
+                    "confidence": record.confidence,
                     "status": record.status,
                     "origin": record.origin,
                     "run_id": run_id,
@@ -1024,8 +1260,11 @@ class PostgresStore:
                     {
                         "kind": "test_scenario_evidence",
                         "scenario_id": scenario_id,
+                        "scenario_display_id": record.display_id,
                         "story_id": record.story_id,
+                        "story_display_id": record.story_display_id,
                         "requirement_id": record.requirement_id,
+                        "requirement_display_id": record.requirement_display_id,
                         "document_version_id": record.document_version_id,
                         "chunk_id": chunk_id,
                         "run_id": run_id,
@@ -1228,6 +1467,10 @@ class PostgresStore:
         sql = """
             select r.requirement_id,
                    rr.revision_id,
+                   rr.display_id,
+                   rr.source_req_id,
+                   rr.id_generation_type,
+                   rr.confidence,
                    rr.statement,
                    rr.requirement_type,
                    rr.priority,
@@ -1244,7 +1487,8 @@ class PostgresStore:
             sql += " and rr.first_seen_document_version_id = %s"
             params.append(document_version_id)
         sql += """
-            group by r.requirement_id, rr.revision_id, rr.statement, rr.requirement_type,
+            group by r.requirement_id, rr.revision_id, rr.display_id, rr.source_req_id,
+                     rr.id_generation_type, rr.confidence, rr.statement, rr.requirement_type,
                      rr.priority
             order by r.requirement_id
         """
@@ -1255,10 +1499,14 @@ class PostgresStore:
             RequirementInput(
                 requirement_id=str(row[0]),
                 revision_id=str(row[1]),
-                requirement_text=str(row[2]),
-                requirement_type=str(row[3]),
-                priority=normalize_priority_label(row[4]),
-                evidence_chunk_ids=[chunk for chunk in str(row[5]).split(",") if chunk],
+                display_id=str(row[2]),
+                source_req_id=str(row[3]) if row[3] is not None else None,
+                id_generation_type=_id_generation_type(row[4]),
+                confidence=float(row[5]),
+                requirement_text=str(row[6]),
+                requirement_type=str(row[7]),
+                priority=normalize_priority_label(row[8]),
+                evidence_chunk_ids=[chunk for chunk in str(row[9]).split(",") if chunk],
             )
             for row in rows
         ]
@@ -1465,19 +1713,28 @@ class PostgresStore:
             cursor.execute(
                 """
                 insert into requirements
-                  (requirement_id, project, document_id, requirement_key, status,
+                  (requirement_id, display_id, project, document_id, requirement_key,
+                   source_req_id, id_generation_type, confidence, status,
                    first_seen_document_version_id, active_revision_id)
-                values (%s, %s, %s, %s, 'active', %s, %s)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s)
                 on conflict (requirement_id) do update
-                set status = 'active',
+                set display_id = excluded.display_id,
+                    source_req_id = excluded.source_req_id,
+                    id_generation_type = excluded.id_generation_type,
+                    confidence = excluded.confidence,
+                    status = 'active',
                     active_revision_id = excluded.active_revision_id,
                     updated_at = now()
                 """,
                 (
                     requirement.requirement_id,
+                    requirement.display_id,
                     artifact.project,
                     artifact.document_id,
                     requirement.requirement_key,
+                    requirement.source_req_id,
+                    requirement.id_generation_type,
+                    requirement.confidence,
                     artifact.document_version_id,
                     requirement.revision_id,
                 ),
@@ -1485,24 +1742,33 @@ class PostgresStore:
             cursor.execute(
                 """
                 insert into requirement_revisions
-                  (revision_id, requirement_id, statement, normalized_statement,
-                   requirement_type, priority, status, first_seen_document_version_id)
-                values (%s, %s, %s, %s, %s, %s, 'active', %s)
+                  (revision_id, requirement_id, display_id, statement, normalized_statement,
+                   requirement_type, priority, source_req_id, id_generation_type, confidence,
+                   status, first_seen_document_version_id)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
                 on conflict (revision_id) do update
-                set statement = excluded.statement,
+                set display_id = excluded.display_id,
+                    statement = excluded.statement,
                     normalized_statement = excluded.normalized_statement,
                     requirement_type = excluded.requirement_type,
                     priority = excluded.priority,
+                    source_req_id = excluded.source_req_id,
+                    id_generation_type = excluded.id_generation_type,
+                    confidence = excluded.confidence,
                     status = 'active',
                     updated_at = now()
                 """,
                 (
                     requirement.revision_id,
                     requirement.requirement_id,
+                    requirement.display_id,
                     requirement.statement,
                     requirement.normalized_statement,
                     requirement.requirement_type,
                     requirement.priority,
+                    requirement.source_req_id,
+                    requirement.id_generation_type,
+                    requirement.confidence,
                     artifact.document_version_id,
                 ),
             )
@@ -1511,17 +1777,20 @@ class PostgresStore:
                 cursor.execute(
                     """
                     insert into requirement_evidence
-                      (evidence_id, requirement_id, revision_id, document_version_id, chunk_id,
-                       page, section, quote, start_char, end_char, source_path)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      (evidence_id, requirement_id, requirement_display_id, revision_id,
+                       document_version_id, chunk_id, page, section, quote, start_char,
+                       end_char, source_path)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     on conflict (evidence_id) do update
-                    set quote = excluded.quote,
+                    set requirement_display_id = excluded.requirement_display_id,
+                        quote = excluded.quote,
                         page = excluded.page,
                         section = excluded.section
                     """,
                     (
                         evidence.evidence_id,
                         requirement.requirement_id,
+                        requirement.display_id,
                         requirement.revision_id,
                         artifact.document_version_id,
                         trace.chunk_id,
@@ -1537,14 +1806,16 @@ class PostgresStore:
                     cursor.execute(
                         """
                         insert into requirement_fact_links
-                          (evidence_id, fact_id, requirement_id, revision_id)
-                        values (%s, %s, %s, %s)
+                          (evidence_id, fact_id, requirement_id, requirement_display_id,
+                           revision_id)
+                        values (%s, %s, %s, %s, %s)
                         on conflict (evidence_id, fact_id) do nothing
                         """,
                         (
                             evidence.evidence_id,
                             fact_id,
                             requirement.requirement_id,
+                            requirement.display_id,
                             requirement.revision_id,
                         ),
                     )
@@ -1622,7 +1893,11 @@ class PostgresStore:
                     "project": artifact.project,
                     "document_id": artifact.document_id,
                     "requirement_id": requirement.requirement_id,
+                    "display_id": requirement.display_id,
                     "requirement_key": requirement.requirement_key,
+                    "source_req_id": requirement.source_req_id,
+                    "id_generation_type": requirement.id_generation_type,
+                    "confidence": requirement.confidence,
                     "status": "active",
                     "active_revision_id": requirement.revision_id,
                     "first_seen_document_version_id": artifact.document_version_id,
@@ -1650,6 +1925,7 @@ class PostgresStore:
                         "document_id": artifact.document_id,
                         "document_version_id": artifact.document_version_id,
                         "requirement_id": requirement.requirement_id,
+                        "requirement_display_id": requirement.display_id,
                         "revision_id": requirement.revision_id,
                         "source_path": artifact.source_path,
                         "evidence": evidence.model_dump(mode="json"),
@@ -1664,6 +1940,7 @@ class PostgresStore:
                             "evidence_id": evidence.evidence_id,
                             "fact_id": fact_id,
                             "requirement_id": requirement.requirement_id,
+                            "requirement_display_id": requirement.display_id,
                             "revision_id": requirement.revision_id,
                         },
                     )
@@ -1724,6 +2001,16 @@ class PostgresStore:
                 RequirementInput(
                     requirement_id=requirement_id,
                     revision_id=revision_id,
+                    display_id=str(requirement.get("display_id", "")),
+                    source_req_id=(
+                        str(requirement.get("source_req_id"))
+                        if requirement.get("source_req_id") is not None
+                        else None
+                    ),
+                    id_generation_type=_id_generation_type(
+                        requirement.get("id_generation_type", "generated")
+                    ),
+                    confidence=float(requirement.get("confidence", 0.0)),
                     requirement_text=str(requirement["statement"]),
                     requirement_type=str(requirement["requirement_type"]),
                     priority=normalize_priority_label(requirement["priority"]),
@@ -1806,7 +2093,7 @@ class PostgresStore:
                 continue
             rows.append(
                 {
-                    "artifact_kind": str(kind).replace("_artifact", ""),
+                    "artifact_kind": _local_artifact_kind(str(kind)),
                     "artifact_path": str(row.get("artifact_path", "")),
                     "document_version_id": str(artifact.get("document_version_id", "")),
                     "payload": artifact,
@@ -1996,6 +2283,109 @@ def _artifact_payload_from_row(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return dict(value)
+
+
+def _local_artifact_kind(kind: str) -> str:
+    if kind == "requirement_artifact":
+        return "requirements_full"
+    if kind == "user_story_artifact":
+        return "user_stories"
+    if kind == "test_scenario_artifact":
+        return "test_scenarios"
+    return kind
+
+
+def _id_generation_type(value: object) -> Literal["source", "generated"]:
+    return "source" if str(value).strip().lower() == "source" else "generated"
+
+
+def _coerce_user_story_build_result(
+    artifact: UserStoryArtifact | UserStoryBuildResult,
+) -> UserStoryBuildResult:
+    if isinstance(artifact, UserStoryBuildResult):
+        return artifact
+    raise ValueError("persisting user stories requires internal UserStoryBuildResult records")
+
+
+def _coerce_test_scenario_build_result(
+    artifact: TestScenarioArtifact | TestScenarioBuildResult,
+) -> TestScenarioBuildResult:
+    if isinstance(artifact, TestScenarioBuildResult):
+        return artifact
+    raise ValueError("persisting test scenarios requires internal TestScenarioBuildResult records")
+
+
+def _apply_user_story_display_ids(
+    result: UserStoryBuildResult,
+    *,
+    story_display_ids: dict[str, str],
+    requirement_display_ids: dict[str, str],
+) -> None:
+    records: dict[str, UserStoryRecord] = {}
+    coverage: dict[str, list[str]] = {}
+    for story_id, record in result.records.items():
+        updated = record.model_copy(
+            update={
+                "display_id": story_display_ids.get(story_id, record.display_id),
+                "requirement_display_id": requirement_display_ids.get(
+                    record.requirement_id,
+                    record.requirement_display_id,
+                ),
+            }
+        )
+        records[story_id] = updated
+        coverage.setdefault(updated.requirement_id, []).append(story_id)
+    result.records = records
+    result.coverage = coverage
+    result.artifact = project_user_story_artifact(
+        project=result.artifact.project,
+        document_id=result.artifact.document_id,
+        document_version_id=result.artifact.document_version_id,
+        doc_version=result.artifact.doc_version,
+        records=records,
+        requirement_display_ids=requirement_display_ids,
+        story_display_ids=story_display_ids,
+    )
+
+
+def _apply_test_scenario_display_ids(
+    result: TestScenarioBuildResult,
+    *,
+    scenario_display_ids: dict[str, str],
+    story_display_ids: dict[str, str],
+    requirement_display_ids: dict[str, str],
+) -> None:
+    records: dict[str, TestScenarioRecord] = {}
+    coverage: dict[str, list[str]] = {}
+    requirement_coverage: dict[str, list[str]] = {}
+    for scenario_id, record in result.records.items():
+        updated = record.model_copy(
+            update={
+                "display_id": scenario_display_ids.get(scenario_id, record.display_id),
+                "story_display_id": story_display_ids.get(
+                    record.story_id,
+                    record.story_display_id,
+                ),
+                "requirement_display_id": requirement_display_ids.get(
+                    record.requirement_id,
+                    record.requirement_display_id,
+                ),
+            }
+        )
+        records[scenario_id] = updated
+        coverage.setdefault(updated.story_id, []).append(scenario_id)
+        requirement_coverage.setdefault(updated.requirement_id, []).append(scenario_id)
+    result.records = records
+    result.coverage = coverage
+    result.requirement_coverage = requirement_coverage
+    result.artifact = project_test_scenario_artifact(
+        project=result.artifact.project,
+        document_id=result.artifact.document_id,
+        document_version_id=result.artifact.document_version_id,
+        doc_version=result.artifact.doc_version,
+        records=records,
+        scenario_display_ids=scenario_display_ids,
+    )
 
 
 def _local_row_matches_requirement(row: dict[str, Any], requirement_id: str) -> bool:

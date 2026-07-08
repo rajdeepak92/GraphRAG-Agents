@@ -63,14 +63,8 @@ def _story_text(story: UserStoryRecord) -> str:
         story.user_story.as_a,
         story.user_story.i_want,
         story.user_story.so_that,
-        story.business_value,
     ]
-    parts.extend(
-        f"Given {criterion.given}, when {criterion.when}, then {criterion.then}."
-        for criterion in story.acceptance_criteria
-    )
-    parts.extend(rule.rule for rule in story.business_rules)
-    parts.extend(scenario.scenario for scenario in story.test_scenarios)
+    parts.extend(story.acceptance_criteria)
     return "\n".join(part.strip() for part in parts if part.strip())
 
 

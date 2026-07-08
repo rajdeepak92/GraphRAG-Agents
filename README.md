@@ -48,9 +48,19 @@ Generated requirement artifacts and logs are written under:
 generated/<PROJECT>/req/<RUN_ID>/
 ```
 
-That directory is local-only and gitignored. It contains compact
+That directory is local-only and gitignored. It contains public catalog
 `requirements.json`, full audit `requirements_full.json`, `run.log`,
 `run.jsonl`, `chunk_manifest.json`, and any saved `llm_response_*.txt` files.
+
+`requirements_full.json` is the internal audit payload (`RequirementArtifact`
+schema `2.1`). The public `requirements.json` mirror is a display-ID catalog
+(`4.0-catalog`) using aliases such as `REQ-001`; old `3.0-compact`
+requirements files remain readable for generation compatibility. Downstream
+public artifacts use the same alias boundary: `user_stories.json` is
+`2.0-user-stories` with `US-###` IDs and display parent `req_id`, and
+`test_scenarios.json` is `2.0-test-scenarios` with `TS-###` IDs and display
+parents `us_id`/`req_id`. Internal PostgreSQL rows, workflow results, resume,
+HFIL, dedup, and Neo4j merges continue to use the internal hash IDs.
 
 When requirement discovery parsing or source-trace validation fails, the full
 raw model response is saved beside the run artifacts. Set
@@ -67,7 +77,8 @@ For a real ingest run, all three services must be configured and reachable:
 - ChromaDB for chunk text embeddings and chunk/document metadata used in
   semantic vector search only.
 - PostgreSQL for generated artifacts and ledger rows: requirements, user
-  stories, test scenarios, document-version manifests, and run records.
+  stories, test scenarios, per-project display-ID aliases, document-version
+  manifests, and run records.
 
 Use a libpq/psycopg-style PostgreSQL URL, for example:
 
@@ -104,6 +115,7 @@ stateless behavior.
 
 ```powershell
 uv run ruff check .
+uv run ruff format --check .
 uv run python -m unittest discover -s tests
 uv run python -m compileall -q src
 uv run mypy src/multi_agentic_graph_rag
@@ -158,6 +170,7 @@ Remove-Item -Recurse -Force runtime\databases\chroma -ErrorAction SilentlyContin
 
 ```powershell
 uv run python -m multi_agentic_graph_rag run status <RUN-ID>
+uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements.json
 uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements_full.json
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.log -Tail 200
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.jsonl -Tail 200

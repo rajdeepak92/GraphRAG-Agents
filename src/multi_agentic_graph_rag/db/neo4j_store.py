@@ -13,7 +13,9 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementArtifact,
     TestScenarioArtifact,
+    TestScenarioBuildResult,
     UserStoryArtifact,
+    UserStoryBuildResult,
 )
 
 _LUCENE_TOKEN = re.compile(r"[A-Za-z0-9]+")
@@ -157,7 +159,7 @@ class Neo4jStore:
 
     def project_user_story_coverage(
         self,
-        artifact: UserStoryArtifact,
+        artifact: UserStoryArtifact | UserStoryBuildResult,
         evidence_chunk_ids: Mapping[str, list[str]],
     ) -> None:
         """Project validated user-story coverage claim-nodes back into the graph.
@@ -166,15 +168,19 @@ class Neo4jStore:
         retrieve graph context, and marks each covered requirement.
         """
         evidence = {key: list(value) for key, value in evidence_chunk_ids.items()}
+        records = _user_story_records(artifact)
         if self.settings.neo4j.mode == "local_json":
-            for story_id, record in artifact.stories.items():
+            for story_id, record in records.items():
                 self._upsert_local(
                     "user_story_projection",
                     story_id,
                     {
                         "kind": "user_story_projection",
                         "story_id": story_id,
+                        "display_id": record.display_id,
                         "requirement_id": record.requirement_id,
+                        "requirement_display_id": record.requirement_display_id,
+                        "source_req_id": record.source_req_id,
                         "project": record.project,
                         "document_version_id": record.document_version_id,
                         "title": record.title,
@@ -189,27 +195,32 @@ class Neo4jStore:
         ):
             session.execute_write(
                 _project_user_story_coverage_tx,
-                artifact.model_dump(mode="json"),
+                {"stories": {key: value.model_dump(mode="json") for key, value in records.items()}},
                 evidence,
             )
 
     def project_test_scenario_coverage(
         self,
-        artifact: TestScenarioArtifact,
+        artifact: TestScenarioArtifact | TestScenarioBuildResult,
         evidence_chunk_ids: Mapping[str, list[str]],
     ) -> None:
         """Project validated test-scenario claim-nodes back into the graph."""
         evidence = {key: list(value) for key, value in evidence_chunk_ids.items()}
+        records = _test_scenario_records(artifact)
         if self.settings.neo4j.mode == "local_json":
-            for scenario_id, record in artifact.scenarios.items():
+            for scenario_id, record in records.items():
                 self._upsert_local(
                     "test_scenario_projection",
                     scenario_id,
                     {
                         "kind": "test_scenario_projection",
                         "scenario_id": scenario_id,
+                        "display_id": record.display_id,
                         "story_id": record.story_id,
+                        "story_display_id": record.story_display_id,
                         "requirement_id": record.requirement_id,
+                        "requirement_display_id": record.requirement_display_id,
+                        "source_req_id": record.source_req_id,
                         "project": record.project,
                         "document_version_id": record.document_version_id,
                         "title": record.title,
@@ -226,7 +237,11 @@ class Neo4jStore:
         ):
             session.execute_write(
                 _project_test_scenario_coverage_tx,
-                artifact.model_dump(mode="json"),
+                {
+                    "scenarios": {
+                        key: value.model_dump(mode="json") for key, value in records.items()
+                    }
+                },
                 evidence,
             )
 
@@ -377,21 +392,25 @@ def _project_user_story_coverage_tx(
                 r.document_version_id = $document_version_id
             MERGE (s:UserStory {story_id: $story_id})
             SET s.title = $title,
+                s.display_id = $display_id,
                 s.requirement_id = $requirement_id,
+                s.requirement_display_id = $requirement_display_id,
+                s.source_req_id = $source_req_id,
                 s.project = $project,
-                s.epic = $epic,
                 s.persona = $persona,
                 s.priority = $priority,
                 s.document_version_id = $document_version_id
             MERGE (s)-[:COVERS_REQUIREMENT]->(r)
             """,
             story_id=story_id,
+            display_id=record.get("display_id", ""),
             requirement_id=requirement_id,
+            requirement_display_id=record.get("requirement_display_id", ""),
+            source_req_id=record.get("source_req_id"),
             project=record["project"],
             document_id=record["document_id"],
             document_version_id=record["document_version_id"],
             title=record["title"],
-            epic=record["epic"],
             persona=record["persona"],
             priority=record["priority"],
         )
@@ -427,11 +446,15 @@ def _project_test_scenario_coverage_tx(
             """
             MERGE (t:TestScenario {scenario_id: $scenario_id})
             SET t.title = $title,
+                t.display_id = $display_id,
                 t.scenario_type = $scenario_type,
                 t.priority = $priority,
                 t.confidence = $confidence,
                 t.story_id = $story_id,
+                t.story_display_id = $story_display_id,
                 t.requirement_id = $requirement_id,
+                t.requirement_display_id = $requirement_display_id,
+                t.source_req_id = $source_req_id,
                 t.project = $project,
                 t.document_version_id = $document_version_id
             MERGE (s:UserStory {story_id: $story_id})
@@ -440,8 +463,12 @@ def _project_test_scenario_coverage_tx(
             MERGE (t)-[:COVERS_REQUIREMENT]->(r)
             """,
             scenario_id=scenario_id,
+            display_id=record.get("display_id", ""),
             story_id=record["story_id"],
+            story_display_id=record.get("story_display_id", ""),
             requirement_id=requirement_id,
+            requirement_display_id=record.get("requirement_display_id", ""),
+            source_req_id=record.get("source_req_id"),
             project=record["project"],
             document_version_id=record["document_version_id"],
             title=record["title"],
@@ -468,6 +495,22 @@ def _project_test_scenario_coverage_tx(
                 requirement_id=requirement_id,
                 chunk_id=chunk_id,
             )
+
+
+def _user_story_records(
+    artifact: UserStoryArtifact | UserStoryBuildResult,
+) -> dict[str, Any]:
+    if isinstance(artifact, UserStoryBuildResult):
+        return dict(artifact.records)
+    raise ValueError("projecting user-story coverage requires internal build records")
+
+
+def _test_scenario_records(
+    artifact: TestScenarioArtifact | TestScenarioBuildResult,
+) -> dict[str, Any]:
+    if isinstance(artifact, TestScenarioBuildResult):
+        return dict(artifact.records)
+    raise ValueError("projecting test-scenario coverage requires internal build records")
 
 
 def _project_manifest_tx(tx: Any, manifest: dict[str, Any]) -> None:

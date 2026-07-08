@@ -33,7 +33,9 @@ class PromptRequirementDiscovery(StrEnum):
         '          "req_text": "...",\n'
         '          "requirement_type": "...",\n'
         '          "priority": "Medium",\n'
-        '          "requirement_key": "..."\n'
+        '          "requirement_key": "...",\n'
+        '          "source_req_id": "BR-SEN-001",\n'
+        '          "confidence": 0.85\n'
         "        }\n"
         "      ]\n"
         "    }\n"
@@ -42,11 +44,12 @@ class PromptRequirementDiscovery(StrEnum):
         "Required root field: facts.\n"
         "Each fact entry must contain exactly these fields: fact_text, quote, requirements.\n"
         "Each requirement entry must contain exactly these fields: req_text, requirement_type, "
-        "priority, requirement_key.\n"
+        "priority, requirement_key, source_req_id, confidence.\n"
         "All returned field values must be JSON strings except facts and requirements, which "
         "must be JSON arrays.\n"
         "Never return null for fact_text, quote, requirements, req_text, requirement_type, "
-        "priority, or requirement_key.\n"
+        "priority, requirement_key, or confidence. Use an empty string for source_req_id when "
+        "the source row has no explicit identifier.\n"
         "Do not return any id fields. Return facts and requirements as lists; Python assigns all "
         "permanent IDs from list position.\n\n"
         "Primary task:\n"
@@ -56,7 +59,7 @@ class PromptRequirementDiscovery(StrEnum):
         "For example, if chunk_id is CHUNK-07, use CHUNK-07 only to scope analysis; never "
         "return it as a generated identifier or requirement text.\n\n"
         "Relevant source items include requirements, constraints, business rules, acceptance "
-        "criteria, non-functional requirements, scope items, out-of-scope items, capabilities, "
+        "criteria, non-functional requirements, capabilities, "
         "system behavior, configuration rules, validation rules, alerting rules, health rules, "
         "data-quality rules, offline behavior, and application behavior.\n\n"
         "Hard traceability rule for quote:\n"
@@ -129,14 +132,13 @@ class PromptRequirementDiscovery(StrEnum):
         "Use exactly one JSON string. Allowed values include: Functional Requirement, Business "
         "Requirement, Acceptance Criteria, Non-Functional Requirement, Security Requirement, "
         "Configuration Requirement, Validation Requirement, Alerting Requirement, Health "
-        "Requirement, Data Quality Requirement, Application Requirement, Offline Requirement, "
-        "Scope Requirement, or Out-of-Scope Requirement.\n"
+        "Requirement, Data Quality Requirement, Application Requirement, or Offline Requirement.\n"
         "If unclear, use Functional Requirement.\n\n"
         "priority rules:\n"
         "priority must always be exactly one of: High, Medium, Low.\n"
         "Use High only for explicit critical, mandatory, safety, security, reliability, or "
         "data-loss language.\n"
-        "Use Low only for explicit optional, future, nice-to-have, or out-of-scope language.\n"
+        "Use Low only for explicit optional, future, or nice-to-have language.\n"
         "Otherwise use Medium.\n\n"
         "requirement_key rules:\n"
         "requirement_key must be a stable functional identity.\n"
@@ -145,8 +147,14 @@ class PromptRequirementDiscovery(StrEnum):
         "Exclude revision values such as thresholds, dates, amounts, counts, and temperatures "
         "when possible.\n"
         "Use lowercase snake_case when possible.\n\n"
+        "source_req_id and confidence rules:\n"
+        "source_req_id must contain only an explicit source row identifier copied from the "
+        "same quote, such as BR-SEN-001, AC-001, FR-001, NFR-001, or SYS_REQ_001. If no "
+        "source identifier appears in the quote, return an empty string.\n"
+        "confidence must be a number from 0.0 to 1.0 representing how directly the quote "
+        "supports the extracted requirement.\n\n"
         "Return facts as an empty list only when the chunk has no relevant facts, requirements, "
-        "constraints, business rules, acceptance criteria, scope items, out-of-scope items, "
+        "constraints, business rules, acceptance criteria, "
         "capabilities, system behaviors, or non-functional requirements.\n\n"
     )
     LEDGER_SECTION_HEADER = (
@@ -187,34 +195,27 @@ class PromptUserStoryGeneration(StrEnum):
         '  "user_stories": [\n'
         "    {\n"
         '      "title": "...",\n'
-        '      "epic": "...",\n'
         '      "priority": "High | Medium | Low",\n'
         '      "persona": "...",\n'
         '      "user_story": {"as_a": "...", "i_want": "...", "so_that": "..."},\n'
-        '      "business_value": "...",\n'
-        '      "scope": {"in_scope": ["..."], "out_of_scope": ["..."]},\n'
-        '      "acceptance_criteria": [\n'
-        '        {"title": "...", "given": "...", "when": "...", "then": "..."}\n'
-        "      ],\n"
-        '      "business_rules": [{"rule": "..."}],\n'
-        '      "test_scenarios": [{"scenario": "..."}],\n'
-        '      "definition_of_done": ["..."]\n'
+        '      "acceptance_criteria": ["..."],\n'
+        '      "confidence": 0.85\n'
         "    }\n"
         "  ]\n"
         "}\n\n"
         "Rules:\n"
         "Return one to many user stories for the requirement. Emit more than one only when the "
         "requirement clearly contains separable capabilities.\n"
-        "Do not return any id fields. Return user_stories, acceptance_criteria, business_rules, "
-        "and test_scenarios as lists; Python assigns all permanent ids from list position.\n"
+        "Do not return any id fields. Return user_stories and acceptance_criteria as lists; "
+        "Python assigns all permanent ids from list position.\n"
         "priority must be exactly one of High, Medium, or Low.\n"
-        "Every user story must include at least one acceptance criterion, each with a non-empty "
-        "given, when, and then.\n"
-        "Derive persona, scope, acceptance criteria, business rules, test scenarios, and "
-        "definition of done ONLY from the requirement statement and the retrieved context below. "
+        "Every user story must include at least one flat acceptance criterion string.\n"
+        "confidence must be a number from 0.0 to 1.0.\n"
+        "Derive persona and acceptance criteria ONLY from the requirement statement and the "
+        "retrieved context below. "
         "Do not invent domain facts, thresholds, integrations, or actors that are not supported "
         "by that text.\n"
-        "title, business_value, and each user_story field must be complete, descriptive phrases, "
+        "title and each user_story field must be complete, descriptive phrases, "
         "never placeholders or single words.\n"
         "Prefer the requirement's own numbers, limits, and terminology verbatim when they "
         "appear.\n\n"
@@ -248,8 +249,6 @@ class PromptTestScenarioGeneration(StrEnum):
         "}\n\n"
         "Rules:\n"
         "Cover every acceptance criterion in the user story with one or more scenarios.\n"
-        "Expand each seed hint from test_scenario_hints into a full scenario when it is "
-        "consistent with the user story, linked requirement, and retrieved context.\n"
         "Use negative, boundary, and exception scenarios only when they are supported by the "
         "provided text.\n"
         "Do not return any id fields. Return test_scenarios as a list; Python assigns all "

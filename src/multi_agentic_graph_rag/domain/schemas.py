@@ -17,7 +17,8 @@ class StrictModel(BaseModel):
 
 
 _SOURCE_REQUIREMENT_ID_RE = re.compile(
-    r"\b(?:BR|AC|FR|NFR)\s*-\s*[A-Z0-9]+(?:\s*-\s*[A-Z0-9]+)*\b",
+    r"\b(?:(?:BR|AC|FR|NFR)\s*[-_]\s*[A-Z0-9]+(?:\s*[-_]\s*[A-Z0-9]+)*|"
+    r"SYS\s*[-_ ]\s*REQ\s*[-_ ]\s*[A-Z0-9]+(?:\s*[-_]\s*[A-Z0-9]+)*)\b",
     re.I,
 )
 _PLACEHOLDER_REQUIREMENT_TEXT_RE = re.compile(
@@ -45,6 +46,22 @@ def normalize_priority_label(value: object) -> Literal["High", "Medium", "Low"]:
     if normalized in {"low", "optional", "future", "nice-to-have", "nice to have"}:
         return "Low"
     return "Medium"
+
+
+def normalize_source_req_id(value: object) -> str | None:
+    """Normalize an optional source requirement identifier."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
+        return None
+    match = _SOURCE_REQUIREMENT_ID_RE.search(text)
+    if match is None:
+        return None
+    parts = [part for part in re.split(r"[\s_-]+", match.group(0).upper()) if part]
+    if len(parts) >= 3 and parts[0] == "SYS" and parts[1] == "REQ":
+        return "SYS_REQ_" + "_".join(parts[2:])
+    return "-".join(parts)
 
 
 class IngestionRequest(StrictModel):
@@ -132,6 +149,8 @@ class LLMRequirementCandidate(StrictModel):
     requirement_type: str = "functional"
     priority: str = "medium"
     requirement_key: str | None = None
+    source_req_id: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
     source_trace: SourceTrace
 
 
@@ -147,6 +166,13 @@ class LLMDiscoveredRequirement(StrictModel):
     requirement_type: str = "Functional Requirement"
     priority: str = "Medium"
     requirement_key: str | None = None
+    source_req_id: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("source_req_id", mode="before")
+    @classmethod
+    def normalize_source_identifier(cls, value: object) -> str | None:
+        return normalize_source_req_id(value)
 
     @field_validator("priority", mode="before")
     @classmethod
@@ -268,7 +294,11 @@ class RequirementEvidence(StrictModel):
 class VerifiedRequirement(StrictModel):
     requirement_id: str
     revision_id: str = ""
+    display_id: str = ""
     requirement_key: str = ""
+    source_req_id: str | None = None
+    id_generation_type: Literal["source", "generated"] = "generated"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     statement: str
     normalized_statement: str = ""
     requirement_type: str
@@ -307,7 +337,7 @@ class RequirementRevisionSnapshot(StrictModel):
 
 
 class RequirementArtifact(StrictModel):
-    artifact_schema_version: Literal["1.0", "2.0"] = "2.0"
+    artifact_schema_version: Literal["1.0", "2.0", "2.1"] = "2.1"
     project: str
     document_id: str
     document_version_id: str
@@ -341,11 +371,50 @@ class CompactRequirementArtifact(StrictModel):
     requirements: dict[str, list[CompactRequirementOccurrence]]
 
 
+class RequirementCatalogEntry(StrictModel):
+    display_id: str
+    requirement_uid: str
+    revision_id: str
+    source_req_id: str | None = None
+    id_generation_type: Literal["source", "generated"] = "generated"
+    confidence: float = Field(ge=0.0, le=1.0)
+    chunk_id: str
+    fact_id: str
+    requirement_text: str
+    requirement_type: str
+    priority: Literal["High", "Medium", "Low"]
+    status: Literal["Active", "Superseded"]
+    doc_version: str
+
+
+class RequirementCatalogTraceability(StrictModel):
+    req_id: str
+    requirement_uid: str
+    revision_id: str
+    chunk_id: str
+    fact_ids: list[str]
+
+
+class RequirementsCatalogArtifact(StrictModel):
+    artifact_schema_version: Literal["4.0-catalog"] = "4.0-catalog"
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    requirements: list[RequirementCatalogEntry]
+    traceability: list[RequirementCatalogTraceability] = Field(default_factory=list)
+
+
 class RequirementInput(StrictModel):
     """Normalized requirement fed into user-story generation (stage 3 input)."""
 
     requirement_id: str
     revision_id: str = ""
+    display_id: str = ""
+    source_req_id: str | None = None
+    id_generation_type: Literal["source", "generated"] = "generated"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     requirement_text: str
     requirement_type: str = "Functional Requirement"
     priority: Literal["High", "Medium", "Low"] = "Medium"
@@ -377,11 +446,6 @@ class UserStoryStatement(StrictModel):
         if not value:
             raise ValueError("value must not be empty")
         return value
-
-
-class UserStoryScope(StrictModel):
-    in_scope: list[str] = Field(default_factory=list)
-    out_of_scope: list[str] = Field(default_factory=list)
 
 
 class AcceptanceCriterion(StrictModel):
@@ -428,23 +492,18 @@ class TestScenario(StrictModel):
 
 class _UserStoryContent(StrictModel):
     title: str
-    epic: str
     priority: Literal["High", "Medium", "Low"] = "Medium"
     persona: str
     user_story: UserStoryStatement
-    business_value: str
-    scope: UserStoryScope = Field(default_factory=UserStoryScope)
-    acceptance_criteria: list[AcceptanceCriterion] = Field(min_length=1)
-    business_rules: list[BusinessRule] = Field(default_factory=list)
-    test_scenarios: list[TestScenario] = Field(default_factory=list)
-    definition_of_done: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
 
     @field_validator("priority", mode="before")
     @classmethod
     def normalize_priority(cls, value: object) -> str:
         return normalize_priority_label(value)
 
-    @field_validator("title", "persona", "business_value")
+    @field_validator("title", "persona")
     @classmethod
     def meaningful_text(cls, value: str) -> str:
         value = value.strip()
@@ -454,13 +513,13 @@ class _UserStoryContent(StrictModel):
             raise ValueError(f"value must not be a placeholder: {value!r}")
         return value
 
-    @field_validator("epic")
+    @field_validator("acceptance_criteria")
     @classmethod
-    def non_empty_epic(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("epic must not be empty")
-        return value
+    def non_empty_acceptance_criteria(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values]
+        if any(not value for value in cleaned):
+            raise ValueError("acceptance_criteria entries must not be empty")
+        return cleaned
 
 
 class UserStoryModel(_UserStoryContent):
@@ -479,8 +538,11 @@ class UserStoryRecord(_UserStoryContent):
     """A persisted user story with permanent id and provenance."""
 
     story_id: str
+    display_id: str = ""
     requirement_id: str
+    requirement_display_id: str = ""
     requirement_revision_id: str = ""
+    source_req_id: str | None = None
     project: str
     document_id: str
     document_version_id: str
@@ -491,15 +553,34 @@ class UserStoryRecord(_UserStoryContent):
     evidence_chunk_ids: list[str] = Field(default_factory=list)
 
 
+class UserStoryProjection(_UserStoryContent):
+    display_id: str
+    req_id: str
+    source_req_id: str | None = None
+
+
+class UserStoryTraceability(StrictModel):
+    us_id: str
+    req_id: str
+    source_req_id: str | None = None
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
+
+
 class UserStoryArtifact(StrictModel):
-    artifact_schema_version: Literal["1.0-user-stories", "1.1-user-stories"] = "1.1-user-stories"
+    artifact_schema_version: Literal["2.0-user-stories"] = "2.0-user-stories"
     project: str
     document_id: str
     document_version_id: str
     doc_version: str
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
-    stories: dict[str, UserStoryRecord]
+    stories: list[UserStoryProjection]
+    traceability: list[UserStoryTraceability] = Field(default_factory=list)
+
+
+class UserStoryBuildResult(StrictModel):
+    artifact: UserStoryArtifact
+    records: dict[str, UserStoryRecord]
     coverage: dict[str, list[str]] = Field(default_factory=dict)
 
 
@@ -627,9 +708,13 @@ class TestScenarioRecord(_TestScenarioContent):
     """A persisted test scenario with permanent id and full backward provenance."""
 
     scenario_id: str
+    display_id: str = ""
     story_id: str
+    story_display_id: str = ""
     requirement_id: str
+    requirement_display_id: str = ""
     requirement_revision_id: str = ""
+    source_req_id: str | None = None
     project: str
     document_id: str
     document_version_id: str
@@ -640,17 +725,36 @@ class TestScenarioRecord(_TestScenarioContent):
     evidence_chunk_ids: list[str] = Field(default_factory=list)
 
 
+class TestScenarioProjection(_TestScenarioContent):
+    display_id: str
+    us_id: str
+    req_id: str
+    source_req_id: str | None = None
+
+
+class TestScenarioTraceability(StrictModel):
+    ts_id: str
+    us_id: str
+    req_id: str
+    source_req_id: str | None = None
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
+
+
 class TestScenarioArtifact(StrictModel):
-    artifact_schema_version: Literal["1.0-test-scenarios", "1.1-test-scenarios"] = (
-        "1.1-test-scenarios"
-    )
+    artifact_schema_version: Literal["2.0-test-scenarios"] = "2.0-test-scenarios"
     project: str
     document_id: str
     document_version_id: str
     doc_version: str
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
-    scenarios: dict[str, TestScenarioRecord]
+    scenarios: list[TestScenarioProjection]
+    traceability: list[TestScenarioTraceability] = Field(default_factory=list)
+
+
+class TestScenarioBuildResult(StrictModel):
+    artifact: TestScenarioArtifact
+    records: dict[str, TestScenarioRecord]
     coverage: dict[str, list[str]] = Field(default_factory=dict)
     requirement_coverage: dict[str, list[str]] = Field(default_factory=dict)
 

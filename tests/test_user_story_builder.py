@@ -3,10 +3,7 @@ from __future__ import annotations
 import unittest
 
 from multi_agentic_graph_rag.domain.schemas import (
-    AcceptanceCriterion,
-    BusinessRule,
     RequirementInput,
-    TestScenario,
     UserStoryModel,
     UserStoryStatement,
 )
@@ -24,25 +21,21 @@ class UserStoryBuilderTests(unittest.TestCase):
             generated=[(requirement, _story("Configure warning thresholds"))],
         )
 
-        self.assertEqual(len(artifact.stories), 1)
-        story_id = next(iter(artifact.stories))
+        self.assertEqual(len(artifact.records), 1)
+        story_id = next(iter(artifact.records))
         self.assertTrue(story_id.startswith("US-"))
-        record = artifact.stories[story_id]
+        record = artifact.records[story_id]
         self.assertEqual(record.requirement_id, "REQ-1")
         self.assertEqual(record.project, "SIIMCS")
         self.assertEqual(record.document_id, "DOC-1")
         self.assertEqual(record.document_version_id, "DV-1")
         self.assertEqual(record.doc_version, "1.0")
         self.assertEqual(artifact.coverage, {"REQ-1": [story_id]})
+        self.assertEqual(artifact.artifact.stories[0].display_id, story_id)
 
-    def test_renumbers_acceptance_business_and_test_ids(self) -> None:
+    def test_projects_flat_acceptance_criteria(self) -> None:
         requirement = _requirement("REQ-1", "Users shall configure warning thresholds.")
-        story = _story(
-            "Configure warning thresholds",
-            acceptance=3,
-            business_rules=2,
-            test_scenarios=2,
-        )
+        story = _story("Configure warning thresholds", acceptance=3)
         artifact = build_user_story_artifact(
             project="SIIMCS",
             document_id="DOC-1",
@@ -51,12 +44,11 @@ class UserStoryBuilderTests(unittest.TestCase):
             generated=[(requirement, story)],
         )
 
-        record = next(iter(artifact.stories.values()))
+        record = next(iter(artifact.records.values()))
+        self.assertEqual(len(record.acceptance_criteria), 3)
         self.assertEqual(
-            [ac.id for ac in record.acceptance_criteria], ["AC-001", "AC-002", "AC-003"]
+            artifact.artifact.stories[0].acceptance_criteria, record.acceptance_criteria
         )
-        self.assertEqual([br.id for br in record.business_rules], ["BR-001", "BR-002"])
-        self.assertEqual([ts.id for ts in record.test_scenarios], ["TS-001", "TS-002"])
 
     def test_multiple_stories_per_requirement_get_distinct_ids(self) -> None:
         requirement = _requirement("REQ-1", "Users shall configure warning thresholds.")
@@ -71,7 +63,7 @@ class UserStoryBuilderTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(len(artifact.stories), 2)
+        self.assertEqual(len(artifact.records), 2)
         self.assertEqual(len(artifact.coverage["REQ-1"]), 2)
         self.assertEqual(len(set(artifact.coverage["REQ-1"])), 2)
 
@@ -94,13 +86,14 @@ class UserStoryBuilderTests(unittest.TestCase):
             generated=pairs,
         )
 
-        self.assertEqual(list(first.stories), list(second.stories))
+        self.assertEqual(list(first.records), list(second.records))
         self.assertEqual(first.coverage, second.coverage)
 
 
 def _requirement(requirement_id: str, text: str) -> RequirementInput:
     return RequirementInput(
         requirement_id=requirement_id,
+        display_id="REQ-001",
         requirement_text=text,
         requirement_type="Functional Requirement",
         priority="Medium",
@@ -113,12 +106,9 @@ def _story(
     *,
     priority: str = "Medium",
     acceptance: int = 1,
-    business_rules: int = 1,
-    test_scenarios: int = 1,
 ) -> UserStoryModel:
     return UserStoryModel(
         title=title,
-        epic="Threshold Management",
         priority=priority,
         persona="Operations Engineer",
         user_story=UserStoryStatement(
@@ -126,26 +116,11 @@ def _story(
             i_want="to configure warning thresholds",
             so_that="alerts fire before equipment is damaged",
         ),
-        business_value="Reduces unplanned downtime through timely alerting",
         acceptance_criteria=[
-            AcceptanceCriterion(
-                id=f"ACX{index}",
-                title=f"criterion {index}",
-                given="a configured sensor",
-                when="a threshold is crossed",
-                then="an alert is raised",
-            )
+            f"criterion {index}: alert is raised when a threshold is crossed"
             for index in range(1, acceptance + 1)
         ],
-        business_rules=[
-            BusinessRule(id=f"BRX{index}", rule=f"rule {index}")
-            for index in range(1, business_rules + 1)
-        ],
-        test_scenarios=[
-            TestScenario(id=f"TSX{index}", scenario=f"scenario {index}")
-            for index in range(1, test_scenarios + 1)
-        ],
-        definition_of_done=["code reviewed", "tests passing"],
+        confidence=0.85,
     )
 
 

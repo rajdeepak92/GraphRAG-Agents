@@ -131,9 +131,16 @@ Generated output is local-only under:
 generated/<PROJECT>/req/<RUN_ID>/
 ```
 
-That folder contains compact `requirements.json`, full audit
+That folder contains public catalog `requirements.json`, full audit
 `requirements_full.json`, `run.log`, `run.jsonl`, `chunk_manifest.json`, and
 any saved `llm_response_*.txt` files.
+
+`requirements_full.json` is the internal audit artifact. Public mirrors use
+per-project display aliases: `requirements.json` is `4.0-catalog` with
+`REQ-###`, `user_stories.json` is `2.0-user-stories` with `US-###`, and
+`test_scenarios.json` is `2.0-test-scenarios` with `TS-###`. PostgreSQL,
+workflow results, resume, HFIL, dedup, and Neo4j merges still use internal
+hash IDs.
 
 ## 8. Generate User Stories
 
@@ -178,7 +185,7 @@ under `generated/<PROJECT>/user_stories/<RUN_ID>/` when loaded from PostgreSQL.
 
 Persistence:
 
-- PostgreSQL: `user_story_artifacts` and `user_stories`.
+- PostgreSQL: `user_story_artifacts`, `user_stories`, and display-ID aliases.
 - Neo4j: `(:UserStory)-[:COVERS_REQUIREMENT]->(:Requirement)`,
   `(:Requirement)-[:EVIDENCED_BY_CHUNK]->(:Chunk)`, and
   `(:DocumentVersion)-[:HAS_USER_STORY]->(:UserStory)`.
@@ -228,8 +235,8 @@ uv run marag generate-test-scenarios `
 
 HFIL supports feedback comments, `remove duplicates`, and `exit`. Review turns
 do not write PostgreSQL or JSON; final persistence happens after `exit`.
-`test_scenarios.json` remains canonical. `--emit-md` writes an optional
-Markdown report.
+`test_scenarios.json` remains the canonical public scenario projection.
+`--emit-md` writes an optional Markdown report.
 
 ## 10. Reconcile Local JSON
 
@@ -248,6 +255,7 @@ Inspect the latest run:
 
 ```powershell
 uv run python -m multi_agentic_graph_rag run status <RUN-ID>
+uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements.json
 uv run python -m multi_agentic_graph_rag artifact verify generated\<PROJECT>\req\<RUN-ID>\requirements_full.json
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.log -Tail 200
 Get-Content generated\<PROJECT>\req\<RUN-ID>\run.jsonl -Tail 200

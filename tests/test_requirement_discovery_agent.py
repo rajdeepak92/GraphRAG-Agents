@@ -228,6 +228,69 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
         self.assertTrue(artifact.requirements[0].revision_id.startswith("REQREV-"))
         self.assertTrue(artifact.requirements[0].evidence[0].evidence_id.startswith("REQEVID-"))
 
+    def test_source_req_id_is_normalized_when_present_in_source_quote(self) -> None:
+        manifest = _manifest(["SYS_REQ_001: The system shall import files."])
+        reasoner = _StaticReasoner(
+            [
+                _fact(
+                    "SYS_REQ_001: The system shall import files.",
+                    requirements=[
+                        _requirement(
+                            "The system shall import files.",
+                            source_req_id="SYS REQ 001",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        discovery = RequirementDiscoveryAgent(reasoner).run(manifest)
+        artifact = build_requirement_artifact(
+            project=manifest.project,
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
+            version=manifest.version,
+            source_path=manifest.source_path,
+            source_checksum=manifest.source_checksum,
+            discovery=discovery,
+        )
+
+        requirement = artifact.requirements[0]
+        self.assertEqual(requirement.source_req_id, "SYS_REQ_001")
+        self.assertEqual(requirement.id_generation_type, "source")
+        self.assertEqual(requirement.confidence, 0.85)
+
+    def test_source_req_id_falls_back_to_null_when_not_in_source_quote(self) -> None:
+        manifest = _manifest(["The system shall import files."])
+        reasoner = _StaticReasoner(
+            [
+                _fact(
+                    "The system shall import files.",
+                    requirements=[
+                        _requirement(
+                            "The system shall import files.",
+                            source_req_id="SYS_REQ_001",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        discovery = RequirementDiscoveryAgent(reasoner).run(manifest)
+        artifact = build_requirement_artifact(
+            project=manifest.project,
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
+            version=manifest.version,
+            source_path=manifest.source_path,
+            source_checksum=manifest.source_checksum,
+            discovery=discovery,
+        )
+
+        requirement = artifact.requirements[0]
+        self.assertIsNone(requirement.source_req_id)
+        self.assertEqual(requirement.id_generation_type, "generated")
+
     def test_failed_chunk_saves_raw_response_for_each_validation_attempt(self) -> None:
         manifest = _manifest(["Intro. The system shall import files."])
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -575,6 +638,8 @@ class _AlarmThresholdReasoner:
                                 "requirement_type": "functional",
                                 "priority": "medium",
                                 "requirement_key": "alarm_threshold",
+                                "source_req_id": "",
+                                "confidence": 0.85,
                             }
                         ],
                     }
@@ -621,12 +686,14 @@ def _fact(
     }
 
 
-def _requirement(req_text: str) -> dict[str, str]:
+def _requirement(req_text: str, *, source_req_id: str = "") -> dict[str, object]:
     return {
         "req_text": req_text,
         "requirement_type": "functional",
         "priority": "medium",
         "requirement_key": "system behavior",
+        "source_req_id": source_req_id,
+        "confidence": 0.85,
     }
 
 

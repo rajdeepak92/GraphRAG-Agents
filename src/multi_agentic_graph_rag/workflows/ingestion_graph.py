@@ -32,15 +32,15 @@ from multi_agentic_graph_rag.llm_models.factory import (
 from multi_agentic_graph_rag.observability.session import RunSession, command_session
 from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.artifacts import (
-    write_compact_requirement_artifact,
+    write_requirements_catalog_artifact,
 )
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
 from multi_agentic_graph_rag.services.parsing import checksum_bytes, parse_document
 from multi_agentic_graph_rag.services.requirement_builder import (
-    build_compact_requirement_artifact,
     build_requirement_artifact,
+    build_requirements_catalog_artifact,
 )
 
 
@@ -338,7 +338,6 @@ def _run_pipeline(
             postgres=postgres,
             replace_version=request.replace_version,
         )
-        compact_artifact = build_compact_requirement_artifact(artifact)
         postgres.persist_manifest(manifest)
         full_artifact_target = run_dir / "requirements_full.json"
         if logger is not None:
@@ -357,13 +356,22 @@ def _run_pipeline(
             artifact_path=full_artifact_target,
             run_id=state["run_id"],
         )
-        artifact_path = write_compact_requirement_artifact(
-            compact_artifact,
+        persisted_payload = postgres.load_requirement_artifact_payload(
+            artifact_path=str(full_artifact_target)
+        )
+        persisted_artifact = (
+            RequirementArtifact.model_validate(persisted_payload)
+            if persisted_payload is not None
+            else artifact
+        )
+        catalog_artifact = build_requirements_catalog_artifact(persisted_artifact)
+        artifact_path = write_requirements_catalog_artifact(
+            catalog_artifact,
             run_dir,
             logger=logger,
         )
         if session is not None:
-            session.artifact_payload = compact_artifact.model_dump(mode="json")
+            session.artifact_payload = catalog_artifact.model_dump(mode="json")
         if logger is not None:
             logger.info(
                 "Requirement artifacts persisted/written to {path} and {full_path}",

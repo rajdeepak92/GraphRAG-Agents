@@ -244,8 +244,14 @@ Stage 3 consumes the requirement artifact and generates user stories per
 requirement with hybrid retrieval (Chroma dense + Neo4j BM25 + Neo4j multi-hop)
 fused by the reranker. It requires the real stack
 (`POSTGRES_MODE=postgres`, `NEO4J_MODE=neo4j`, real reasoning/embedding/reranker
-providers) and adds two managed tables, so run `postgres-reset --yes` once
-before the first run.
+providers) and adds managed tables, so run `postgres-reset --yes` once before
+the first run.
+
+Public JSON artifacts use per-project display aliases: `requirements.json` is
+`4.0-catalog` with `REQ-###`, `user_stories.json` is `2.0-user-stories` with
+`US-###`, and `test_scenarios.json` is `2.0-test-scenarios` with `TS-###`.
+Internal workflow state, PostgreSQL rows, Neo4j merges, resume, HFIL, and dedup
+continue to use internal hash IDs.
 
 ```powershell
 uv run marag postgres-reset --yes
@@ -265,6 +271,7 @@ Useful variations:
 ```powershell
 uv run marag generate-user-stories --requirements .\path\to\requirements.json --project PROJECT_1 --top-k 4
 uv run marag generate-user-stories --requirements .\path\to\requirements.json --project PROJECT_1 --reasoning-provider azure_openai --embedding-provider azure_openai --reranker-provider huggingface
+uv run marag artifact verify generated\PROJECT_1\req\<RUN_ID>\requirements.json
 uv run marag artifact verify-user-stories generated\PROJECT_1\req\<RUN_ID>\user_stories.json
 ```
 
@@ -320,8 +327,8 @@ TEST_SCENARIO_MAX_NEW_TOKENS=
 `test_scenarios.json` is written beside the input user-story file, or under
 `generated/<PROJECT>/test_scenarios/<RUN_ID>/` when loaded from PostgreSQL.
 HFIL runs after permanent scenario IDs are assigned and before persistence.
-`test_scenarios.json` remains canonical; Markdown is emitted only with
-`--emit-md`.
+`test_scenarios.json` remains the canonical public scenario projection;
+Markdown is emitted only with `--emit-md`.
 
 ## 10. Reconcile Local JSON
 

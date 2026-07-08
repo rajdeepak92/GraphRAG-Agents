@@ -334,8 +334,11 @@ def _generate_feedback_scenario(
     return TestScenarioRecord(
         scenario_id=scenario_id,
         story_id=story.story_id,
+        story_display_id=story.display_id,
         requirement_id=story.requirement_id,
+        requirement_display_id=story.requirement_display_id,
         requirement_revision_id=story.requirement_revision_id,
+        source_req_id=story.source_req_id,
         project=story.project,
         document_id=story.document_id,
         document_version_id=story.document_version_id,

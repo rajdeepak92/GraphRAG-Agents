@@ -30,14 +30,14 @@ from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger, Led
 _REQUIREMENT_HINT = re.compile(
     r"\b(?:shall|must|required|requires|requirement|acceptance criteria|"
     r"non-functional requirements|BR-[A-Z0-9/-]+|AC-[A-Z0-9/-]+|"
-    r"FR-[A-Z0-9/-]+|NFR(?:-[A-Z0-9/-]+)?)\b",
+    r"FR-[A-Z0-9/-]+|NFR(?:-[A-Z0-9/-]+)?|SYS[-_ ]REQ[-_ ][A-Z0-9/-]+)\b",
     re.I,
 )
 _QUOTE_LEADING_LABELS = re.compile(
     r"^(?:"
     r"acceptance criteria|business requirement|functional requirement|"
     r"non-functional requirement|application requirement|security requirement|"
-    r"scope requirement|out-of-scope requirement|area requirement|"
+    r"area requirement|"
     r"reliability|availability|performance|scalability|maintainability|"
     r"security|embedded safety|alerts and notifications|rule-based automation|"
     r"startup and configuration|request and response validation|"
@@ -358,6 +358,8 @@ def _fact_to_candidate(
             requirement_type=requirement.requirement_type,
             priority=requirement.priority,
             requirement_key=requirement.requirement_key,
+            source_req_id=requirement.source_req_id,
+            confidence=requirement.confidence,
             source_trace=trace.model_copy(),
         )
         for requirement_index, requirement in enumerate(fact.requirements, start=1)

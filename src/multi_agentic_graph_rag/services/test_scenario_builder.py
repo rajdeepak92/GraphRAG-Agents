@@ -8,8 +8,11 @@ from collections.abc import Sequence
 from multi_agentic_graph_rag.domain.identifiers import test_scenario_id
 from multi_agentic_graph_rag.domain.schemas import (
     TestScenarioArtifact,
+    TestScenarioBuildResult,
     TestScenarioModel,
+    TestScenarioProjection,
     TestScenarioRecord,
+    TestScenarioTraceability,
     UserStoryRecord,
 )
 
@@ -23,7 +26,7 @@ def build_test_scenario_artifact(
     document_version_id: str,
     doc_version: str,
     generated: Sequence[tuple[UserStoryRecord, TestScenarioModel]],
-) -> TestScenarioArtifact:
+) -> TestScenarioBuildResult:
     """Assign permanent ids/provenance and group coverage by story and requirement."""
     scenarios: dict[str, TestScenarioRecord] = {}
     coverage: dict[str, list[str]] = {}
@@ -51,14 +54,68 @@ def build_test_scenario_artifact(
         coverage.setdefault(story.story_id, []).append(scenario_id)
         requirement_coverage.setdefault(story.requirement_id, []).append(scenario_id)
 
+    artifact = project_test_scenario_artifact(
+        project=project,
+        document_id=document_id,
+        document_version_id=document_version_id,
+        doc_version=doc_version,
+        records=scenarios,
+        scenario_display_ids={},
+    )
+    return TestScenarioBuildResult(
+        artifact=artifact,
+        records=scenarios,
+        coverage=coverage,
+        requirement_coverage=requirement_coverage,
+    )
+
+
+def project_test_scenario_artifact(
+    *,
+    project: str,
+    document_id: str,
+    document_version_id: str,
+    doc_version: str,
+    records: dict[str, TestScenarioRecord],
+    scenario_display_ids: dict[str, str],
+) -> TestScenarioArtifact:
+    projections: list[TestScenarioProjection] = []
+    traceability: list[TestScenarioTraceability] = []
+    for scenario_id, record in records.items():
+        display_id = scenario_display_ids.get(scenario_id, record.display_id or scenario_id)
+        us_id = record.story_display_id or record.story_id
+        req_id = record.requirement_display_id or record.requirement_id
+        projections.append(
+            TestScenarioProjection(
+                display_id=display_id,
+                us_id=us_id,
+                req_id=req_id,
+                source_req_id=record.source_req_id,
+                title=record.title,
+                description=record.description,
+                scenario_type=record.scenario_type,
+                preconditions=list(record.preconditions),
+                expected_result=record.expected_result,
+                priority=record.priority,
+                confidence=record.confidence,
+            )
+        )
+        traceability.append(
+            TestScenarioTraceability(
+                ts_id=display_id,
+                us_id=us_id,
+                req_id=req_id,
+                source_req_id=record.source_req_id,
+                evidence_chunk_ids=list(record.evidence_chunk_ids),
+            )
+        )
     return TestScenarioArtifact(
         project=project,
         document_id=document_id,
         document_version_id=document_version_id,
         doc_version=doc_version,
-        scenarios=scenarios,
-        coverage=coverage,
-        requirement_coverage=requirement_coverage,
+        scenarios=projections,
+        traceability=traceability,
     )
 
 
@@ -75,8 +132,11 @@ def _to_record(
     return TestScenarioRecord(
         scenario_id=scenario_id,
         story_id=story.story_id,
+        story_display_id=story.display_id,
         requirement_id=story.requirement_id,
+        requirement_display_id=story.requirement_display_id,
         requirement_revision_id=story.requirement_revision_id,
+        source_req_id=story.source_req_id,
         project=project,
         document_id=document_id,
         document_version_id=document_version_id,

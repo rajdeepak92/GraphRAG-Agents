@@ -73,8 +73,9 @@ class UserStoryWorkflowTests(unittest.TestCase):
                 json.loads(artifact_path.read_text(encoding="utf-8"))
             )
             self.assertEqual(len(artifact.stories), 2)
-            self.assertTrue(all(story_id.startswith("US-") for story_id in artifact.stories))
-            self.assertEqual(set(artifact.coverage), {"REQ-1", "REQ-2"})
+            self.assertTrue(all(story.display_id.startswith("US-") for story in artifact.stories))
+            self.assertEqual(len(artifact.traceability), 2)
+            self.assertTrue(all(row.req_id.startswith("REQ-") for row in artifact.traceability))
 
             postgres_rows = _read_jsonl(settings.postgres.local_path)
             self.assertEqual(
@@ -142,7 +143,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _story_payload() -> dict[str, Any]:
     return {
         "title": "Configure warning thresholds",
-        "epic": "Threshold Management",
         "priority": "Medium",
         "persona": "Operations Engineer",
         "user_story": {
@@ -150,19 +150,10 @@ def _story_payload() -> dict[str, Any]:
             "i_want": "to configure warning thresholds",
             "so_that": "alerts fire before equipment is damaged",
         },
-        "business_value": "Reduces unplanned downtime through timely alerting",
         "acceptance_criteria": [
-            {
-                "id": "AC1",
-                "title": "threshold crossed",
-                "given": "a configured sensor",
-                "when": "a threshold is crossed",
-                "then": "an alert is raised",
-            }
+            "Given a configured sensor, when a threshold is crossed, then an alert is raised."
         ],
-        "business_rules": [{"id": "BR1", "rule": "only authorized users may configure"}],
-        "test_scenarios": [{"id": "TS1", "scenario": "cross a warning threshold"}],
-        "definition_of_done": ["code reviewed", "tests passing"],
+        "confidence": 0.85,
     }
 
 

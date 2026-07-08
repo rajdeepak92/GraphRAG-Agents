@@ -716,17 +716,18 @@ def artifact_verify(path: Annotated[Path, typer.Argument()]) -> None:
         run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY.value),
     ) as session:
         artifact = verify_requirement_artifact(path)
+        fact_count = len(getattr(artifact, "facts", []))
         session.logger.info(
             "Verified requirement artifact {path}",
             step="artifact-verify",
             path=str(path),
             requirement_count=len(artifact.requirements),
-            fact_count=len(artifact.facts),
+            fact_count=fact_count,
             status="completed",
         )
         console.print(
             "[green]PASS[/green] artifact verified "
-            f"requirements={len(artifact.requirements)} facts={len(artifact.facts)} "
+            f"requirements={len(artifact.requirements)} facts={fact_count} "
             f"document_version_id={artifact.document_version_id}"
         )
 
@@ -740,17 +741,18 @@ def artifact_verify_user_stories(path: Annotated[Path, typer.Argument()]) -> Non
         run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY_USER_STORIES.value),
     ) as session:
         artifact = verify_user_story_artifact(path)
+        covered_requirements = len({row.req_id for row in artifact.traceability})
         session.logger.info(
             "Verified user-story artifact {path}",
             step="artifact-verify-user-stories",
             path=str(path),
             story_count=len(artifact.stories),
-            requirement_count=len(artifact.coverage),
+            requirement_count=covered_requirements,
             status="completed",
         )
         console.print(
             "[green]PASS[/green] user-story artifact verified "
-            f"stories={len(artifact.stories)} covered={len(artifact.coverage)} "
+            f"stories={len(artifact.stories)} covered={covered_requirements} "
             f"document_version_id={artifact.document_version_id}"
         )
 
@@ -764,19 +766,21 @@ def artifact_verify_test_scenarios(path: Annotated[Path, typer.Argument()]) -> N
         run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY_TEST_SCENARIOS.value),
     ) as session:
         artifact = verify_test_scenario_artifact(path)
+        covered_stories = len({row.us_id for row in artifact.traceability})
+        covered_requirements = len({row.req_id for row in artifact.traceability})
         session.logger.info(
             "Verified test-scenario artifact {path}",
             step="artifact-verify-test-scenarios",
             path=str(path),
             scenario_count=len(artifact.scenarios),
-            story_count=len(artifact.coverage),
-            requirement_count=len(artifact.requirement_coverage),
+            story_count=covered_stories,
+            requirement_count=covered_requirements,
             status="completed",
         )
         console.print(
             "[green]PASS[/green] test-scenario artifact verified "
-            f"scenarios={len(artifact.scenarios)} stories={len(artifact.coverage)} "
-            f"covered_requirements={len(artifact.requirement_coverage)} "
+            f"scenarios={len(artifact.scenarios)} stories={covered_stories} "
+            f"covered_requirements={covered_requirements} "
             f"document_version_id={artifact.document_version_id}"
         )
 

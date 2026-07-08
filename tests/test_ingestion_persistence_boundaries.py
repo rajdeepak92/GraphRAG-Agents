@@ -159,11 +159,22 @@ class _FakePostgres:
         artifact: RequirementArtifact,
         artifact_path: str,
         run_id: str,
-    ) -> None:
+    ) -> RequirementArtifact:
         self.events.append("postgres.persist_artifact")
         self.persisted_artifact = artifact
         self.persisted_artifact_path = artifact_path
         self.persisted_run_id = run_id
+        return artifact
+
+    def load_requirement_artifact_payload(
+        self,
+        artifact_path: str | None = None,
+        document_version_id: str | None = None,
+    ) -> dict[str, object] | None:
+        self.events.append("postgres.load_requirement_artifact_payload")
+        if self.persisted_artifact is None:
+            return None
+        return self.persisted_artifact.model_dump(mode="json")
 
     def record_run(self, run_id: str, status: str, payload: dict[str, object]) -> None:
         self.events.append("postgres.record_run")

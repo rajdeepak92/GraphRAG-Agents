@@ -4,18 +4,24 @@ Generated at: 2026-07-01T23:33:33.919751+00:00 UTC
 
 This file is intentionally repo-local and ignored by Git. It is a deep operational flow guide for the current checkout, including modified and untracked files present during generation.
 
+Schema-upgrade note: current public JSON projections use display aliases at the
+artifact boundary. `requirements.json` is `4.0-catalog`, `user_stories.json` is
+`2.0-user-stories`, and `test_scenarios.json` is `2.0-test-scenarios`.
+`requirements_full.json` remains the internal audit payload. Runtime rows,
+workflow results, resume, HFIL, dedup, PostgreSQL, and Neo4j continue to use
+internal hash IDs.
+
 ## Validation Snapshot
 
 - `uv run ruff check .` -> **PASS**. Ruff lint completed successfully.
-- `uv run ruff format --check .` -> **FAIL**. Would reformat src/multi_agentic_graph_rag/config/config_loader.py, src/multi_agentic_graph_rag/services/retrieval.py, src/multi_agentic_graph_rag/workflows/user_story_graph.py, tests/test_user_story_workflow.py.
-- `uv run mypy src\multi_agentic_graph_rag` -> **PASS**. Mypy strict type check completed successfully for 33 source files.
-- `uv run python -m pytest tests -q` -> **FAIL**. 53 tests passed, but requirement discovery tests failed: invalid identifier req_text values no longer raise ValidationError, and the prompt no longer contains the tested CHUNK-07 phrase.
+- `uv run ruff format --check .` -> **PASS**. Ruff formatting check completed successfully.
+- `uv run mypy src\multi_agentic_graph_rag` -> **PASS**. Mypy strict type check completed successfully for 48 source files.
+- `uv run python -m unittest discover -s tests` -> **PASS**. 140 tests passed.
+- `uv run python -m compileall -q src` -> **PASS**. Source files compile.
 
 Interpretation:
-- The code is lint-clean and type-clean in the current checkout.
-- Formatting is not clean in four files listed above; that is a current project hygiene finding.
-- Tests are mostly passing, but the requirement discovery schema/prompt contract has drifted from the existing test expectations.
-- External live-service validation was not attempted here because the full ingestion and user-story flows require configured PostgreSQL, Neo4j, Chroma, and model providers.
+- The code is lint-clean, format-clean, type-clean, and unit-test clean in the current checkout.
+- External live-service validation was not attempted here because the full ingestion and generation flows require configured PostgreSQL, Neo4j, Chroma, and model providers.
 
 ## End-To-End Flow Map
 
@@ -31,17 +37,17 @@ Interpretation:
 10. **Vector index**: ChromaStore.index_chunks embeds chunk text and upserts chunk documents plus metadata for semantic retrieval.
 11. **Requirement discovery**: RequirementDiscoveryAgent sends one normalized chunk at a time to the reasoning model and validates quotes against the original chunk text.
 12. **Requirement artifact**: build_requirement_artifact assigns canonical facts, fact occurrences, requirement lineage IDs, revision IDs, evidence IDs, and delta events.
-13. **Compact artifact**: build_compact_requirement_artifact projects full requirements into compact requirement-id keyed occurrences for downstream agents.
-14. **Artifact writes**: requirements_full.json holds the full audit artifact; requirements.json holds the compact agent-readable artifact.
+13. **Requirement catalog**: build_requirements_catalog_artifact projects persisted full requirements into display-ID occurrence rows plus deduped traceability.
+14. **Artifact writes**: requirements_full.json holds the full audit artifact; requirements.json holds the public 4.0-catalog projection.
 15. **PostgreSQL persistence**: PostgresStore.persist_artifact stores the full artifact payload and normalized ledger rows.
-16. **User-story input**: generate-user-stories can load compact requirements.json locally or full requirement artifacts from PostgreSQL by document_version_id.
+16. **User-story input**: generate-user-stories can load 4.0-catalog requirements.json locally, old 3.0-compact files for compatibility, or full requirement artifacts from PostgreSQL by document_version_id.
 17. **Hybrid retrieval**: RetrievalService fuses evidence chunks, dense Chroma hits, sparse Neo4j full-text hits, graph neighbors, reranking, and fallback behavior.
 18. **User-story generation**: UserStoryGenerationAgent prompts per requirement, validates meaningfulness, retries once, and returns strict UserStoryGenerationOutput.
-19. **User-story artifact**: build_user_story_artifact assigns permanent user story IDs, renumbers AC/BR/TS records, and writes coverage by requirement.
+19. **User-story artifact**: build_user_story_artifact assigns internal story IDs and returns internal records, internal coverage, and the projected 2.0-user-stories artifact.
 20. **Coverage projection**: Neo4jStore.project_user_story_coverage adds UserStory and Requirement coverage relationships back to the graph.
-21. **Test-scenario input**: generate-test-scenarios loads user_stories.json locally or the user-story artifact from PostgreSQL by document_version_id.
+21. **Test-scenario input**: generate-test-scenarios validates the public user_stories.json projection and loads internal story records from PostgreSQL by document_version_id.
 22. **Test-scenario generation**: TestScenarioGenerationAgent prompts per user story, validates meaningfulness, retries once, and returns strict TestScenarioGenerationOutput.
-23. **Test-scenario artifact**: build_test_scenario_artifact assigns permanent SC-* IDs and writes coverage by story and requirement.
+23. **Test-scenario artifact**: build_test_scenario_artifact assigns internal scenario IDs and returns internal records, internal coverage maps, and the projected 2.0-test-scenarios artifact.
 24. **Test-scenario projection**: Neo4jStore.project_test_scenario_coverage creates TestScenario claim-nodes, links them to UserStory and Requirement nodes, and attaches evidence chunks.
 25. **Run result**: Major workflows record completed or failed ingestion_run payloads and return typed result models.
 
@@ -49,8 +55,8 @@ Interpretation:
 
 - Neo4j is the graph knowledge base for Project, Document, DocumentVersion, Chunk, user-story coverage relationships, and test-scenario validation relationships.
 - Chroma is the semantic vector index for chunk text retrieval scoped by document_version_id.
-- PostgreSQL stores generated requirement artifacts, requirement ledger rows, user-story artifacts, user-story rows, test-scenario artifacts, test-scenario rows, document-version manifests, and run records.
-- The compact `requirements.json` is for downstream agents; the full `requirements_full.json` remains the audit artifact and PostgreSQL payload.
+- PostgreSQL stores generated requirement artifacts, requirement ledger rows, user-story artifacts, user-story rows, test-scenario artifacts, test-scenario rows, display-ID aliases/counters, document-version manifests, and run records.
+- Public JSON projections carry display aliases. The full `requirements_full.json` remains the audit artifact and PostgreSQL payload; `requirements.json` is the public 4.0-catalog mirror.
 
 ## Ingestion Flow Deep Dive
 
@@ -75,17 +81,17 @@ INGEST-018: `chroma.index_chunks` embeds and stores chunks with document metadat
 INGEST-019: `RequirementDiscoveryAgent.run` loops chunk-by-chunk, normalizes prompt text, calls the reasoning model, validates quote spans, and merges outputs.
 INGEST-020: `postgres.load_requirement_revision_snapshot` retrieves current active revisions for delta detection.
 INGEST-021: `build_requirement_artifact` turns LLM candidates into canonical facts, fact occurrences, verified requirements, evidence, and delta events.
-INGEST-022: `write_requirement_artifact` writes `requirements_full.json` with all traceability and audit detail.
-INGEST-023: `build_compact_requirement_artifact` projects full requirements into compact records keyed by requirement_id.
-INGEST-024: `write_compact_requirement_artifact` writes `requirements.json`, the downstream agent-readable artifact.
+INGEST-022: `ArtifactMirror.persist_committed_artifact` persists and writes `requirements_full.json` with all traceability and audit detail plus additive display/source/confidence fields.
+INGEST-023: `build_requirements_catalog_artifact` projects the persisted full artifact into display-ID occurrence rows and deduped traceability.
+INGEST-024: `write_requirements_catalog_artifact` writes `requirements.json`, the downstream agent-readable public catalog.
 INGEST-025: `postgres.persist_manifest` stores the manifest reference payload without full chunk text.
 INGEST-026: `postgres.persist_artifact` stores the full artifact and ledger rows, using `requirements_full.json` as artifact_path.
-INGEST-027: `postgres.record_run` records final run state, then `IngestionResult` reports compact artifact_path plus full_artifact_path.
+INGEST-027: `postgres.record_run` records final run state, then `IngestionResult` reports the public catalog artifact_path plus full_artifact_path.
 
 ## User-Story Flow Deep Dive
 
-USER-STORY-001: `marag generate-user-stories` constructs a `UserStoryRequest` from a compact requirements path or document_version_id lookup.
-USER-STORY-002: `resolve_user_story_identity` reads local compact artifact metadata when available so the command session uses the correct project/version.
+USER-STORY-001: `marag generate-user-stories` constructs a `UserStoryRequest` from a catalog requirements path or document_version_id lookup.
+USER-STORY-002: `resolve_user_story_identity` reads local catalog or compatibility compact artifact metadata when available so the command session uses the correct project/version.
 USER-STORY-003: `UserStoryGeneratorAgent.run` delegates to `run_user_story_generation`, preserving the public stage-3 agent boundary.
 USER-STORY-004: `build_user_story_graph` creates the same two-node linear graph shape: validate request then run pipeline.
 USER-STORY-005: `_validate_request` requires either a requirements path or document_version_id and verifies the local path if supplied.
@@ -93,17 +99,17 @@ USER-STORY-006: `_apply_overrides` applies provider and retrieval top_k override
 USER-STORY-007: `_validate_required_user_story_stack` rejects placeholder providers and requires PostgreSQL plus Neo4j modes.
 USER-STORY-008: The pipeline checks Postgres, Neo4j, and Chroma and ensures the PostgreSQL schema before model or retrieval work.
 USER-STORY-009: The pipeline creates reasoning, embedding, and reranker models, warms reasoning, and ensures the Neo4j full-text chunk index.
-USER-STORY-010: `_load_requirement_source` chooses local compact artifact loading or PostgreSQL full-artifact fallback.
-USER-STORY-011: Local loading validates `CompactRequirementArtifact`, collapses occurrences per requirement, and preserves evidence_chunk_ids from compact chunk_id values.
-USER-STORY-012: PostgreSQL fallback validates the full `RequirementArtifact` payload and derives `RequirementInput` records from requirement source_trace and evidence traces.
+USER-STORY-010: `_load_requirement_source` chooses local 4.0-catalog loading, read-only 3.0-compact compatibility loading, or PostgreSQL full-artifact fallback.
+USER-STORY-011: Local loading validates the public catalog, collapses occurrences per internal requirement, and preserves evidence_chunk_ids from catalog chunk_id values.
+USER-STORY-012: PostgreSQL fallback validates the full `RequirementArtifact` payload and derives `RequirementInput` records from requirement source_trace, evidence traces, display aliases, source IDs, and confidence.
 USER-STORY-013: `RetrievalService.retrieve_context` starts with requirement evidence chunks, then adds dense Chroma results, sparse Neo4j full-text results, and graph neighbors.
 USER-STORY-014: Reranking is optional; if configured it reorders fused chunks, otherwise insertion order is retained.
 USER-STORY-015: Evidence chunks are kept in selected context even if they fall outside top_k, preserving traceability for generation.
 USER-STORY-016: If retrieval returns nothing, the service degrades to requirement_text_fallback so generation can still proceed from the approved requirement text.
 USER-STORY-017: `UserStoryGenerationAgent.generate` prompts one requirement at a time, validates meaningfulness, persists terminal raw responses, and retries once with validation feedback.
-USER-STORY-018: `build_user_story_artifact` deterministically assigns story IDs and renumbers acceptance criteria, business rules, and test scenarios.
-USER-STORY-019: `write_user_story_artifact` writes `user_stories.json` atomically.
-USER-STORY-020: `postgres.persist_user_story_artifact` stores the artifact plus individual user-story rows.
+USER-STORY-018: `build_user_story_artifact` deterministically assigns internal story IDs and returns internal records, coverage maps, and a projected public artifact with flat acceptance criteria.
+USER-STORY-019: `write_user_story_artifact` writes projected `user_stories.json` atomically after display aliases are resolved.
+USER-STORY-020: `postgres.persist_user_story_artifact` stores the projected artifact plus individual internal user-story rows.
 USER-STORY-021: `neo4j.project_user_story_coverage` creates user-story coverage graph nodes and marks covered requirements.
 USER-STORY-022: `postgres.record_run` records final user-story state, and `UserStoryResult` returns artifact path, story IDs, and coverage.
 

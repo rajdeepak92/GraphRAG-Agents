@@ -14,26 +14,32 @@ from multi_agentic_graph_rag.config.settings import (
 )
 from multi_agentic_graph_rag.db.postgres import _MANAGED_TABLES, PostgresStore
 from multi_agentic_graph_rag.domain.schemas import (
-    AcceptanceCriterion,
     RequirementArtifact,
     RequirementDeltaEvent,
     RequirementEvidence,
     SourceTrace,
-    TestScenarioArtifact,
+    TestScenarioBuildResult,
     TestScenarioRecord,
-    UserStoryArtifact,
+    UserStoryBuildResult,
     UserStoryRecord,
     UserStoryStatement,
     VerifiedFact,
     VerifiedRequirement,
 )
+from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.artifacts import (
+    verify_requirement_artifact,
     write_compact_requirement_artifact,
     write_requirement_artifact,
+    write_requirements_catalog_artifact,
 )
 from multi_agentic_graph_rag.services.requirement_builder import (
     build_compact_requirement_artifact,
+    build_requirements_catalog_artifact,
 )
+from multi_agentic_graph_rag.services.requirement_source import load_requirement_source_local
+from multi_agentic_graph_rag.services.test_scenario_builder import project_test_scenario_artifact
+from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 
 
 class PostgresArtifactTests(unittest.TestCase):
@@ -45,7 +51,7 @@ class PostgresArtifactTests(unittest.TestCase):
             local_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
 
             store = PostgresStore(_settings(root))
-            store.persist_artifact(artifact, str(artifact_path), "RUN-1")
+            persisted_artifact = store.persist_artifact(artifact, str(artifact_path), "RUN-1")
 
             by_path = store.load_requirement_artifact_payload(artifact_path=str(artifact_path))
             by_version = store.load_requirement_artifact_payload(
@@ -53,9 +59,9 @@ class PostgresArtifactTests(unittest.TestCase):
             )
 
         self.assertEqual(artifact_path.name, "requirements_full.json")
-        self.assertEqual(by_path, local_payload)
-        self.assertEqual(by_version, local_payload)
-        self.assertEqual(by_path, artifact.model_dump(mode="json"))
+        self.assertNotEqual(by_path, local_payload)
+        self.assertEqual(by_version, by_path)
+        self.assertEqual(by_path, persisted_artifact.model_dump(mode="json"))
 
     def test_compact_requirements_json_is_agent_readable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -127,6 +133,50 @@ class PostgresArtifactTests(unittest.TestCase):
         }
         self.assertTrue(forbidden_keys.isdisjoint(_json_keys(payload)))
 
+    def test_catalog_requirements_json_round_trips_through_verifier_and_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact = _artifact(fact_ids=["FACT-1", "FACT-2"])
+            full_path = write_requirement_artifact(artifact, root / "run")
+            persisted = PostgresStore(_settings(root)).persist_artifact(
+                artifact,
+                str(full_path),
+                "RUN-1",
+            )
+            catalog = build_requirements_catalog_artifact(persisted)
+            catalog_path = write_requirements_catalog_artifact(catalog, root / "run")
+
+            verified = verify_requirement_artifact(catalog_path)
+            source = load_requirement_source_local(catalog_path)
+            payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["artifact_schema_version"], "4.0-catalog")
+        self.assertEqual(len(payload["requirements"]), 2)
+        self.assertEqual(len(payload["traceability"]), 1)
+        self.assertEqual(payload["traceability"][0]["fact_ids"], ["FACT-1", "FACT-2"])
+        self.assertEqual(verified.artifact_schema_version, "4.0-catalog")
+        self.assertEqual(len(source.requirements), 1)
+        self.assertEqual(source.requirements[0].requirement_id, "REQ-1")
+        self.assertTrue(source.requirements[0].display_id.startswith("REQ-"))
+        self.assertEqual(source.requirements[0].evidence_chunk_ids, ["CHUNK-1"])
+
+    def test_reconcile_regenerates_requirements_catalog_from_full_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact = _artifact()
+            store = PostgresStore(_settings(root))
+            full_path = root / "run" / "requirements_full.json"
+            store.persist_artifact(artifact, str(full_path), "RUN-1")
+
+            report = ArtifactMirror(store).reconcile(project="PROJECT")
+            catalog_path = root / "run" / "requirements.json"
+            payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+
+        self.assertIn(str(full_path), report.repaired_paths)
+        self.assertIn(str(catalog_path), report.repaired_paths)
+        self.assertEqual(payload["artifact_schema_version"], "4.0-catalog")
+        self.assertTrue(payload["requirements"][0]["display_id"].startswith("REQ-"))
+
     def test_user_story_artifact_round_trips_and_indexes_stories(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -138,7 +188,7 @@ class PostgresArtifactTests(unittest.TestCase):
 
             by_path = store.load_user_story_artifact_payload(artifact_path=artifact_path)
             by_version = store.load_user_story_artifact_payload(
-                document_version_id=artifact.document_version_id
+                document_version_id=artifact.artifact.document_version_id
             )
             rows = [
                 json.loads(line)
@@ -147,11 +197,17 @@ class PostgresArtifactTests(unittest.TestCase):
                 .splitlines()
             ]
 
-        self.assertEqual(by_path, artifact.model_dump(mode="json"))
-        self.assertEqual(by_version, artifact.model_dump(mode="json"))
+        self.assertEqual(by_path, artifact.artifact.model_dump(mode="json"))
+        self.assertEqual(by_version, artifact.artifact.model_dump(mode="json"))
+        self.assertEqual(by_path["artifact_schema_version"], "2.0-user-stories")
+        self.assertTrue(by_path["stories"][0]["display_id"].startswith("US-"))
+        self.assertTrue(by_path["stories"][0]["req_id"].startswith("REQ-"))
+        self.assertEqual(by_path["stories"][0]["source_req_id"], "SYS_REQ_001")
+        self.assertEqual(by_path["traceability"][0]["source_req_id"], "SYS_REQ_001")
         story_rows = [row for row in rows if row.get("kind") == "user_story"]
         self.assertEqual(len(story_rows), 1)
         self.assertEqual(story_rows[0]["story_id"], "US-STORY-1")
+        self.assertTrue(str(story_rows[0]["display_id"]).startswith("US-"))
         self.assertEqual(story_rows[0]["requirement_id"], "REQ-1")
         self.assertEqual(story_rows[0]["status"], "active")
 
@@ -170,7 +226,7 @@ class PostgresArtifactTests(unittest.TestCase):
 
             by_path = store.load_test_scenario_artifact_payload(artifact_path=artifact_path)
             by_version = store.load_test_scenario_artifact_payload(
-                document_version_id=artifact.document_version_id
+                document_version_id=artifact.artifact.document_version_id
             )
             rows = [
                 json.loads(line)
@@ -179,11 +235,18 @@ class PostgresArtifactTests(unittest.TestCase):
                 .splitlines()
             ]
 
-        self.assertEqual(by_path, artifact.model_dump(mode="json"))
-        self.assertEqual(by_version, artifact.model_dump(mode="json"))
+        self.assertEqual(by_path, artifact.artifact.model_dump(mode="json"))
+        self.assertEqual(by_version, artifact.artifact.model_dump(mode="json"))
+        self.assertEqual(by_path["artifact_schema_version"], "2.0-test-scenarios")
+        self.assertTrue(by_path["scenarios"][0]["display_id"].startswith("TS-"))
+        self.assertTrue(by_path["scenarios"][0]["us_id"].startswith("US-"))
+        self.assertTrue(by_path["scenarios"][0]["req_id"].startswith("REQ-"))
+        self.assertEqual(by_path["scenarios"][0]["source_req_id"], "SYS_REQ_001")
+        self.assertEqual(by_path["traceability"][0]["source_req_id"], "SYS_REQ_001")
         scenario_rows = [row for row in rows if row.get("kind") == "test_scenario"]
         self.assertEqual(len(scenario_rows), 1)
         self.assertEqual(scenario_rows[0]["scenario_id"], "SC-SCENARIO-1")
+        self.assertTrue(str(scenario_rows[0]["display_id"]).startswith("TS-"))
         self.assertEqual(scenario_rows[0]["story_id"], "US-STORY-1")
         self.assertEqual(scenario_rows[0]["requirement_id"], "REQ-1")
         self.assertEqual(scenario_rows[0]["status"], "active")
@@ -279,16 +342,17 @@ def _artifact(
     )
 
 
-def _user_story_artifact() -> UserStoryArtifact:
+def _user_story_artifact() -> UserStoryBuildResult:
     record = UserStoryRecord(
         story_id="US-STORY-1",
         requirement_id="REQ-1",
+        requirement_display_id="REQ-001",
+        source_req_id="SYS_REQ_001",
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
         doc_version="1.0",
         title="Import files reliably",
-        epic="Ingestion",
         priority="Medium",
         persona="Data Engineer",
         user_story=UserStoryStatement(
@@ -296,32 +360,33 @@ def _user_story_artifact() -> UserStoryArtifact:
             i_want="to import files",
             so_that="downstream reporting stays current",
         ),
-        business_value="Keeps operational reporting current",
-        acceptance_criteria=[
-            AcceptanceCriterion(
-                id="AC-001",
-                title="valid file imports",
-                given="a valid source file",
-                when="the import runs",
-                then="records are available",
-            )
-        ],
+        acceptance_criteria=["valid file imports: records are available after the import runs"],
+        confidence=0.85,
     )
-    return UserStoryArtifact(
+    artifact = project_user_story_artifact(
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
         doc_version="1.0",
-        stories={record.story_id: record},
+        records={record.story_id: record},
+        requirement_display_ids={"REQ-1": "REQ-001"},
+        story_display_ids={},
+    )
+    return UserStoryBuildResult(
+        artifact=artifact,
+        records={record.story_id: record},
         coverage={"REQ-1": [record.story_id]},
     )
 
 
-def _test_scenario_artifact() -> TestScenarioArtifact:
+def _test_scenario_artifact() -> TestScenarioBuildResult:
     record = TestScenarioRecord(
         scenario_id="SC-SCENARIO-1",
         story_id="US-STORY-1",
+        story_display_id="US-001",
         requirement_id="REQ-1",
+        requirement_display_id="REQ-001",
+        source_req_id="SYS_REQ_001",
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
@@ -334,12 +399,17 @@ def _test_scenario_artifact() -> TestScenarioArtifact:
         priority="Medium",
         confidence=0.9,
     )
-    return TestScenarioArtifact(
+    artifact = project_test_scenario_artifact(
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
         doc_version="1.0",
-        scenarios={record.scenario_id: record},
+        records={record.scenario_id: record},
+        scenario_display_ids={},
+    )
+    return TestScenarioBuildResult(
+        artifact=artifact,
+        records={record.scenario_id: record},
         coverage={"US-STORY-1": [record.scenario_id]},
         requirement_coverage={"REQ-1": [record.scenario_id]},
     )
