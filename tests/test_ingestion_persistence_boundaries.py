@@ -39,9 +39,16 @@ class IngestionPersistenceBoundaryTests(unittest.TestCase):
             chroma = _FakeChroma(events)
 
             class FakeRequirementDiscoveryAgent:
-                def __init__(self, reasoning_model: object, logger: object = None) -> None:
+                def __init__(
+                    self,
+                    reasoning_model: object,
+                    *,
+                    logger: object = None,
+                    coverage_ledger: object = None,
+                ) -> None:
                     self.reasoning_model = reasoning_model
                     self.logger = logger
+                    self.coverage_ledger = coverage_ledger
 
                 def run(self, manifest: object) -> object:
                     events.append("requirements.discover")

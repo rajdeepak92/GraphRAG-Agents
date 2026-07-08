@@ -25,6 +25,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     SourceTrace,
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
+from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger, LedgerEntry
 
 _REQUIREMENT_HINT = re.compile(
     r"\b(?:shall|must|required|requires|requirement|acceptance criteria|"
@@ -54,9 +55,16 @@ class _NormalizedChunk:
 
 
 class RequirementDiscoveryAgent:
-    def __init__(self, reasoning_model: ReasoningModel, *, logger: Any | None = None) -> None:
+    def __init__(
+        self,
+        reasoning_model: ReasoningModel,
+        *,
+        logger: Any | None = None,
+        coverage_ledger: CoverageLedger | None = None,
+    ) -> None:
         self.reasoning_model = reasoning_model
         self.logger = logger
+        self.coverage_ledger = coverage_ledger
 
     def run(self, manifest: DocumentManifest) -> RequirementDiscoveryOutput:
         outputs: list[RequirementDiscoveryOutput] = []
@@ -79,6 +87,11 @@ class RequirementDiscoveryAgent:
         chunk_index: int,
     ) -> RequirementDiscoveryOutput:
         context = _normalized_context(chunk)
+        ledger_entries: list[LedgerEntry] = []
+        ledger_section = ""
+        if self.coverage_ledger is not None:
+            ledger_entries = self.coverage_ledger.select_for_chunk(context.text)
+            ledger_section = self.coverage_ledger.render_prompt_section(ledger_entries)
         validation_error: str | None = None
         try:
             for attempt in (1, 2):
@@ -86,6 +99,7 @@ class RequirementDiscoveryAgent:
                     manifest,
                     context,
                     validation_error=validation_error,
+                    ledger_section=ledger_section,
                 )
                 _set_response_context(
                     self.reasoning_model,
@@ -131,6 +145,17 @@ class RequirementDiscoveryAgent:
                     retry_count=attempt - 1,
                     response_path=response_path,
                 )
+                if self.coverage_ledger is not None:
+                    converged_count = self.coverage_ledger.count_exact_converged(output)
+                    new_ledger_entries = self.coverage_ledger.record(output)
+                    self._log_ledger_state(
+                        chunk_index=chunk_index,
+                        chunk_id=chunk.chunk_id,
+                        ledger_size=self.coverage_ledger.size,
+                        injected_count=len(ledger_entries),
+                        exact_converged_count=converged_count,
+                        new_entries=new_ledger_entries,
+                    )
                 return output
         finally:
             _clear_response_context(self.reasoning_model)
@@ -186,11 +211,36 @@ class RequirementDiscoveryAgent:
             status="failed" if attempt == 2 else "retrying",
         )
 
+    def _log_ledger_state(
+        self,
+        *,
+        chunk_index: int,
+        chunk_id: str,
+        ledger_size: int,
+        injected_count: int,
+        exact_converged_count: int,
+        new_entries: int,
+    ) -> None:
+        if self.logger is None:
+            return
+        self.logger.info(
+            "Coverage ledger updated after chunk",
+            step="discover_requirements.ledger",
+            chunk_index=chunk_index,
+            chunk_id=chunk_id,
+            ledger_size=ledger_size,
+            injected_count=injected_count,
+            exact_converged_count=exact_converged_count,
+            new_entries=new_entries,
+            status="completed",
+        )
+
 
 def _build_prompt(
     manifest: DocumentManifest,
     chunk: _NormalizedChunk,
     validation_error: str | None = None,
+    ledger_section: str = "",
 ) -> str:
     chunk_json = json.dumps(
         {
@@ -219,6 +269,7 @@ def _build_prompt(
 
     return (
         f"{PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value}"
+        f"{ledger_section}"
         f"{feedback}"
         f"Project: {manifest.project}\n"
         f"Document version: {manifest.version}\n"

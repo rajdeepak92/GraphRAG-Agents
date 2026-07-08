@@ -305,6 +305,24 @@ def load_config(
         discovery=DiscoverySettings(
             batch_size=discovery_batch_size,
             log_llm_responses=log_llm_responses,
+            ledger_enabled=env_bool(
+                env.get(EnvVar.DISCOVERY_LEDGER_ENABLED.value),
+                default=bool(discovery_cfg.get("ledger_enabled", True)),
+            ),
+            ledger_max_entries=_positive_int(
+                env.get(
+                    EnvVar.DISCOVERY_LEDGER_MAX_ENTRIES.value,
+                    discovery_cfg.get("ledger_max_entries"),
+                ),
+                default=500,
+            ),
+            ledger_top_k=_positive_int(
+                env.get(
+                    EnvVar.DISCOVERY_LEDGER_TOP_K.value,
+                    discovery_cfg.get("ledger_top_k"),
+                ),
+                default=40,
+            ),
         ),
         postgres=PostgresSettings(
             mode=env.get(

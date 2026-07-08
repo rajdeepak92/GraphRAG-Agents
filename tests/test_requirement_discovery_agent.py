@@ -16,6 +16,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     RequirementDiscoveryChunkOutput,
 )
+from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger
 from multi_agentic_graph_rag.services.requirement_builder import build_requirement_artifact
 
 T = TypeVar("T", bound=BaseModel)
@@ -267,6 +268,162 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
         self.assertEqual(len(artifact.requirements), 1)
         self.assertEqual(len(artifact.requirements[0].evidence), 2)
 
+    def test_ledger_disabled_first_chunk_prompt_has_no_ledger_section(self) -> None:
+        manifest = _manifest(["The system shall import files."])
+        reasoner = _PromptCapturingReasoner()
+
+        RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        self.assertNotIn("PREVIOUSLY DISCOVERED REQUIREMENTS", reasoner.prompts[0])
+
+    def test_ledger_enabled_first_chunk_prompt_has_no_ledger_section(self) -> None:
+        manifest = _manifest(["The system shall import files.", "The system shall export files."])
+        reasoner = _PromptCapturingReasoner()
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
+
+        self.assertNotIn("PREVIOUSLY DISCOVERED REQUIREMENTS", reasoner.prompts[0])
+
+    def test_ledger_enabled_second_chunk_prompt_includes_prior_requirement(self) -> None:
+        manifest = _manifest(["The system shall import files.", "The system shall export files."])
+        reasoner = _PromptCapturingReasoner()
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
+
+        second_prompt = reasoner.prompts[1]
+        self.assertIn("PREVIOUSLY DISCOVERED REQUIREMENTS", second_prompt)
+        self.assertIn("system behavior", second_prompt)
+        self.assertIn("The system shall import files.", second_prompt)
+
+    def test_ledger_snapshot_is_reused_across_retry_attempts(self) -> None:
+        manifest = _manifest(
+            ["The system shall import files.", "Intro. The system shall export files."]
+        )
+        reasoner = _LedgerRetryReasoner()
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
+
+        ledger_json = (
+            '[{"requirement_key":"system behavior","statement":"The system shall import files."}]'
+        )
+        # prompts: chunk1, chunk2 attempt1 (bad quote), chunk2 attempt2 (repaired).
+        self.assertEqual(len(reasoner.prompts), 3)
+        self.assertIn(ledger_json, reasoner.prompts[1])
+        self.assertIn(ledger_json, reasoner.prompts[2])
+
+    def test_ledger_disabled_prompt_matches_enabled_first_chunk_prompt(self) -> None:
+        manifest = _manifest(["The system shall import files.", "The system shall export files."])
+        enabled_reasoner = _PromptCapturingReasoner()
+        disabled_reasoner = _PromptCapturingReasoner()
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        RequirementDiscoveryAgent(enabled_reasoner, coverage_ledger=ledger).run(manifest)
+        RequirementDiscoveryAgent(disabled_reasoner).run(manifest)
+
+        self.assertEqual(enabled_reasoner.prompts[0], disabled_reasoner.prompts[0])
+        self.assertNotIn("PREVIOUSLY DISCOVERED REQUIREMENTS", disabled_reasoner.prompts[1])
+
+    def test_ledger_records_only_after_validated_output(self) -> None:
+        manifest = _manifest(["Intro. The system shall import files."])
+        reasoner = _AlwaysBadQuoteReasoner()
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        with self.assertRaises(ModelOutputError):
+            RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
+
+        self.assertEqual(ledger.size, 0)
+
+    def test_ledger_does_not_bypass_trace_validation(self) -> None:
+        manifest = _manifest(["Intro. The system shall import files."])
+        reasoner = _AlwaysBadQuoteReasoner()
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        with self.assertRaises(ModelOutputError):
+            RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
+
+        self.assertEqual(len(reasoner.prompts), 2)
+
+    def test_ledger_logging_emits_counts_without_requirement_text(self) -> None:
+        manifest = _manifest(["The system shall import files."])
+        reasoner = _ChunkReasoner(discovery_batch_size=1)
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+        logger = _RecordingLogger()
+
+        RequirementDiscoveryAgent(reasoner, logger=logger, coverage_ledger=ledger).run(manifest)
+
+        ledger_logs = [
+            kwargs
+            for _level, _message, kwargs in logger.records
+            if kwargs.get("step") == "discover_requirements.ledger"
+        ]
+        self.assertEqual(len(ledger_logs), 1)
+        entry = ledger_logs[0]
+        self.assertEqual(entry["ledger_size"], 1)
+        self.assertEqual(entry["injected_count"], 0)
+        self.assertEqual(entry["exact_converged_count"], 0)
+        self.assertEqual(entry["new_entries"], 1)
+        self.assertEqual(entry["status"], "completed")
+        self.assertNotIn("The system shall import files.", str(entry))
+
+    def test_ledger_enabled_duplicate_chunks_collapse_with_two_evidence(self) -> None:
+        manifest = _manifest(
+            [
+                "Context A. The system shall import files.",
+                "Context B. The system shall import files.",
+            ]
+        )
+        reasoner = _ChunkReasoner(discovery_batch_size=1)
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        discovery = RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
+        artifact = build_requirement_artifact(
+            project=manifest.project,
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
+            version=manifest.version,
+            source_path=manifest.source_path,
+            source_checksum=manifest.source_checksum,
+            discovery=discovery,
+        )
+
+        self.assertEqual(len(artifact.facts), 2)
+        self.assertEqual(len(artifact.canonical_facts), 1)
+        self.assertEqual(len(artifact.requirements), 1)
+        self.assertEqual(len(artifact.requirements[0].evidence), 2)
+        self.assertEqual(ledger.size, 1)
+
+    def test_ledger_preserves_changed_revision_for_same_functional_key(self) -> None:
+        manifest = _manifest(
+            [
+                "The alarm shall trigger above 70 degrees.",
+                "The alarm shall trigger above 80 degrees.",
+            ]
+        )
+        reasoner = _AlarmThresholdReasoner()
+        ledger = CoverageLedger(max_entries=100, injection_top_k=10)
+
+        discovery = RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
+        artifact = build_requirement_artifact(
+            project=manifest.project,
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
+            version=manifest.version,
+            source_path=manifest.source_path,
+            source_checksum=manifest.source_checksum,
+            discovery=discovery,
+        )
+
+        self.assertEqual(len(artifact.requirements), 2)
+        lineage_ids = {requirement.requirement_id for requirement in artifact.requirements}
+        revision_ids = {requirement.revision_id for requirement in artifact.requirements}
+        self.assertEqual(len(lineage_ids), 1)
+        self.assertEqual(len(revision_ids), 2)
+        self.assertTrue(any(event.event_type == "changed" for event in artifact.delta_events))
+        self.assertEqual(ledger.size, 2)
+
 
 class _ChunkReasoner:
     provider_name = "huggingface"
@@ -345,6 +502,99 @@ class _PersistingWrongQuoteReasoner:
         path.write_text(self._last_response, encoding="utf-8")
         self.last_response_path = path
         return path
+
+
+class _PromptCapturingReasoner:
+    provider_name = "huggingface"
+    discovery_batch_size = 1
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts.append(prompt)
+        chunk_text = _chunk_text(prompt)
+        quote = _requirement_quote(chunk_text)
+        return schema.model_validate({"facts": [_fact(quote)]})
+
+
+class _LedgerRetryReasoner:
+    provider_name = "huggingface"
+    discovery_batch_size = 1
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self._export_attempts = 0
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts.append(prompt)
+        chunk_text = _chunk_text(prompt)
+        if "export" in chunk_text:
+            self._export_attempts += 1
+            quote = (
+                "not present in the source chunk"
+                if self._export_attempts == 1
+                else _requirement_quote(chunk_text)
+            )
+        else:
+            quote = _requirement_quote(chunk_text)
+        return schema.model_validate({"facts": [_fact(quote)]})
+
+
+class _AlwaysBadQuoteReasoner:
+    provider_name = "huggingface"
+    discovery_batch_size = 1
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts.append(prompt)
+        return schema.model_validate({"facts": [_fact("not present in the source chunk")]})
+
+
+class _AlarmThresholdReasoner:
+    provider_name = "huggingface"
+    discovery_batch_size = 1
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts.append(prompt)
+        chunk_text = _chunk_text(prompt)
+        return schema.model_validate(
+            {
+                "facts": [
+                    {
+                        "fact_text": chunk_text,
+                        "quote": chunk_text,
+                        "requirements": [
+                            {
+                                "req_text": chunk_text,
+                                "requirement_type": "functional",
+                                "priority": "medium",
+                                "requirement_key": "alarm_threshold",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, Any]]] = []
+
+    def info(self, message: str, **kwargs: Any) -> None:
+        self.records.append(("info", message, kwargs))
+
+    def warning(self, message: str, **kwargs: Any) -> None:
+        self.records.append(("warning", message, kwargs))
+
+    def debug(self, message: str, **kwargs: Any) -> None:
+        self.records.append(("debug", message, kwargs))
 
 
 def _chunk_text(prompt: str) -> str:

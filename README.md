@@ -90,6 +90,16 @@ Hugging Face uses `HF_TOKEN`, `HUGGINGFACE_REASONING_MODEL`,
 `DISCOVERY_BATCH_SIZE`. `HUGGINGFACE_TOKEN` and `HUGGING_FACE_HUB_TOKEN`
 remain accepted as backward-compatible aliases.
 
+Requirement discovery runs one chunk at a time. A per-run coverage ledger
+(`DISCOVERY_LEDGER_ENABLED`, default on; sized by `DISCOVERY_LEDGER_MAX_ENTRIES`
+and `DISCOVERY_LEDGER_TOP_K`) injects previously discovered requirements into
+later chunk prompts so the model converges paraphrased restatements onto the
+same `requirement_key`/`req_text` instead of drifting. It never skips a
+requirement or its source evidence: the deterministic requirement builder
+remains the sole authority for deduplication, evidence accumulation, and
+revision tracking. Set `DISCOVERY_LEDGER_ENABLED=false` to restore the previous
+stateless behavior.
+
 ## Static Checks
 
 ```powershell

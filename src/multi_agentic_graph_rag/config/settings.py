@@ -58,6 +58,9 @@ class ChromaSettings(BaseModel):
 class DiscoverySettings(BaseModel):
     batch_size: int = 1
     log_llm_responses: bool = False
+    ledger_enabled: bool = True
+    ledger_max_entries: int = 500
+    ledger_top_k: int = 40
 
 
 class UserStorySettings(BaseModel):

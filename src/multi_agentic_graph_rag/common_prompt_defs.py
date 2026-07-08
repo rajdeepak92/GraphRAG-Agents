@@ -149,6 +149,32 @@ class PromptRequirementDiscovery(StrEnum):
         "constraints, business rules, acceptance criteria, scope items, out-of-scope items, "
         "capabilities, system behaviors, or non-functional requirements.\n\n"
     )
+    LEDGER_SECTION_HEADER = (
+        "PREVIOUSLY DISCOVERED REQUIREMENTS (coverage ledger):\n"
+        "The following requirements were discovered in earlier chunks of this same "
+        "document version. Use them only to avoid paraphrase drift and preserve "
+        "coverage traceability.\n"
+        "Rules:\n"
+        "1. If this chunk restates or paraphrases one of these requirements with the "
+        "same meaning, you MUST still return it, but you MUST reuse the ledger entry's "
+        "requirement_key and req_text EXACTLY, character for character. Never invent "
+        "new wording for a known same-meaning requirement. The quote must still be "
+        "copied exactly from THIS chunk's chunk_text.\n"
+        "2. Never silently omit a requirement because it appears in the ledger. "
+        "Re-emitting the same requirement with the current chunk quote is how coverage "
+        "and evidence are recorded.\n"
+        "3. If this chunk changes only a revision value for the same functional "
+        "obligation, such as a threshold, date, count, amount, temperature, timeout, "
+        "or limit, reuse the same functional requirement_key when appropriate, but "
+        "emit the current chunk's requirement statement as req_text. This allows the "
+        "builder to create a changed revision under the same lineage.\n"
+        "4. A similar topic is NOT automatically the same requirement. If this chunk "
+        "introduces a different obligation, actor, behavior, condition, capability, "
+        "or business rule, create a new requirement_key.\n"
+        "5. The ledger never overrides source traceability. quote must always be an "
+        "exact contiguous substring from THIS chunk's chunk_text.\n"
+        "Ledger entries:\n"
+    )
 
 
 class PromptUserStoryGeneration(StrEnum):

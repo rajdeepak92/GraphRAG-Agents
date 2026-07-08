@@ -35,6 +35,7 @@ from multi_agentic_graph_rag.services.artifacts import (
     write_compact_requirement_artifact,
 )
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
+from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
 from multi_agentic_graph_rag.services.parsing import checksum_bytes, parse_document
 from multi_agentic_graph_rag.services.requirement_builder import (
@@ -291,7 +292,18 @@ def _run_pipeline(
                 store_responsibility="chunk_embeddings_only",
             )
         chroma.index_chunks(manifest, embedding_model)
-        discovery_agent = RequirementDiscoveryAgent(reasoning_model, logger=logger)
+        coverage_ledger = None
+        if settings.discovery.ledger_enabled:
+            coverage_ledger = CoverageLedger(
+                max_entries=settings.discovery.ledger_max_entries,
+                injection_top_k=settings.discovery.ledger_top_k,
+                embedder=embedding_model,
+            )
+        discovery_agent = RequirementDiscoveryAgent(
+            reasoning_model,
+            logger=logger,
+            coverage_ledger=coverage_ledger,
+        )
         if logger is not None:
             logger.info(
                 "Discovering requirements from {document_version_id}",
