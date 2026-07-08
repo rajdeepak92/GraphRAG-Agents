@@ -32,6 +32,18 @@ _REQUIREMENT_HINT = re.compile(
     r"FR-[A-Z0-9/-]+|NFR(?:-[A-Z0-9/-]+)?)\b",
     re.I,
 )
+_QUOTE_LEADING_LABELS = re.compile(
+    r"^(?:"
+    r"acceptance criteria|business requirement|functional requirement|"
+    r"non-functional requirement|application requirement|security requirement|"
+    r"scope requirement|out-of-scope requirement|area requirement|"
+    r"reliability|availability|performance|scalability|maintainability|"
+    r"security|embedded safety|alerts and notifications|rule-based automation|"
+    r"startup and configuration|request and response validation|"
+    r"offline storage and recovery|health and data status"
+    r")\s+",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -195,6 +207,9 @@ def _build_prompt(
             f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
             "Repair the invalid output by using quotes copied exactly from the normalized "
             "chunk_text.\n"
+            "If a quote includes a section heading, category label, row title, or source "
+            "identifier before the actual requirement text, remove that leading label and keep "
+            "only the smallest exact contiguous body span that exists in chunk_text.\n"
             "If a quote failed because it merged a heading with a bullet, table cell, "
             "or nearby line, do not synthesize a combined quote. Instead, choose the "
             "smallest exact contiguous source span that exists in chunk_text.\n"
@@ -311,14 +326,20 @@ def _source_trace_from_quote(
     if not normalized_quote:
         raise TraceValidationError(f"empty source quote for fact {fact_label}")
 
-    normalized_start = context.text.find(normalized_quote)
+    normalized_start = -1
+    matched_quote = normalized_quote
+    for candidate in _quote_search_candidates(normalized_quote):
+        normalized_start = context.text.find(candidate)
+        if normalized_start >= 0:
+            matched_quote = candidate
+            break
     if normalized_start < 0:
         raise TraceValidationError(
             f"source quote for fact {fact_label} cannot be located in "
             f"{context.chunk.chunk_id} after normalization"
         )
 
-    normalized_end = normalized_start + len(normalized_quote)
+    normalized_end = normalized_start + len(matched_quote)
     if normalized_start >= len(context.char_map) or normalized_end > len(context.char_map):
         raise TraceValidationError(
             f"source quote for fact {fact_label} cannot be mapped to raw text"
@@ -335,6 +356,20 @@ def _source_trace_from_quote(
         page=context.chunk.page,
         section=context.chunk.section,
     )
+
+
+def _quote_search_candidates(normalized_quote: str) -> list[str]:
+    candidates = [normalized_quote]
+    stripped = _QUOTE_LEADING_LABELS.sub("", normalized_quote).strip()
+    if stripped and stripped not in candidates:
+        candidates.append(stripped)
+
+    tokens = normalized_quote.split()
+    for index in range(1, len(tokens)):
+        candidate = " ".join(tokens[index:]).strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
 
 
 def _chunk_looks_requirement_bearing(text: str) -> bool:
