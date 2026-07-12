@@ -15,6 +15,7 @@ from multi_agentic_graph_rag.domain.identifiers import (
     assertion_evidence_id,
     assertion_id,
     assertion_key,
+    assertion_lineage_key,
 )
 from multi_agentic_graph_rag.domain.schemas import (
     AssertionCandidate,
@@ -98,9 +99,16 @@ def _to_record(
         polarity=candidate.polarity,
         condition=normalized_cond,
     )
+    lineage_key = assertion_lineage_key(
+        project=project,
+        subject_entity_identifier=subject_entity_id,
+        predicate=candidate.predicate,
+        object_entity_identifier=object_entity_id,
+    )
     return AssertionRecord(
         assertion_id=assertion_id(key, document_version_id),
         assertion_key=key,
+        assertion_lineage_key=lineage_key,
         project=project,
         document_id=document_id,
         document_version_id=document_version_id,

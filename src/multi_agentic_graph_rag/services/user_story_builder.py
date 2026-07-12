@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from multi_agentic_graph_rag.domain.identifiers import user_story_id
 from multi_agentic_graph_rag.domain.schemas import (
+    GenerationTrace,
     RequirementInput,
     UserStoryArtifact,
     UserStoryBuildResult,
@@ -26,6 +27,7 @@ def build_user_story_artifact(
     document_version_id: str,
     doc_version: str,
     generated: Sequence[tuple[RequirementInput, UserStoryModel]],
+    traces: Mapping[str, GenerationTrace] | None = None,
 ) -> UserStoryBuildResult:
     """Assign permanent ids/provenance and group by requirement.
 
@@ -53,6 +55,7 @@ def build_user_story_artifact(
             requirement=requirement,
             story=story,
             story_id=story_id,
+            trace=traces.get(requirement.requirement_id) if traces else None,
         )
         coverage.setdefault(requirement.requirement_id, []).append(story_id)
 
@@ -105,6 +108,10 @@ def project_user_story_artifact(
                 req_id=req_id,
                 source_req_id=record.source_req_id,
                 evidence_chunk_ids=list(record.evidence_chunk_ids),
+                generation_context_run_id=record.generation_context_run_id,
+                retrieved_assertion_ids=list(record.retrieved_assertion_ids),
+                retrieved_chunk_ids=list(record.retrieved_chunk_ids),
+                context_mode=record.context_mode,
             )
         )
     return UserStoryArtifact(
@@ -126,7 +133,9 @@ def _to_record(
     requirement: RequirementInput,
     story: UserStoryModel,
     story_id: str,
+    trace: GenerationTrace | None = None,
 ) -> UserStoryRecord:
+    trace = trace or GenerationTrace()
     return UserStoryRecord(
         story_id=story_id,
         requirement_id=requirement.requirement_id,
@@ -145,6 +154,10 @@ def _to_record(
         acceptance_criteria=list(story.acceptance_criteria),
         confidence=story.confidence,
         evidence_chunk_ids=list(requirement.evidence_chunk_ids),
+        generation_context_run_id=trace.generation_context_run_id,
+        retrieved_assertion_ids=list(trace.retrieved_assertion_ids),
+        retrieved_chunk_ids=list(trace.retrieved_chunk_ids),
+        context_mode=trace.context_mode,
     )
 
 

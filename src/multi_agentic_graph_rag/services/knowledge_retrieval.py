@@ -11,7 +11,8 @@ guarantee still apply.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 from uuid import uuid4
 
 from multi_agentic_graph_rag.config.settings import AppSettings
@@ -23,6 +24,19 @@ from multi_agentic_graph_rag.domain.schemas import (
 
 SOURCE_KNOWLEDGE = "neo4j_knowledge"
 SOURCE_SEMANTIC = "graph_semantic"
+
+# Graph-primary decision statuses and machine-readable fallback reasons. These are
+# stable identifiers emitted in structured logs and snapshot metrics so a run's
+# effective generation mode (graph vs. legacy chunk) is auditable per anchor.
+STATUS_SELECTED = "selected"
+STATUS_FALLBACK = "fallback"
+
+REASON_SELECTED = "selected"
+REASON_KNOWLEDGE_DISABLED = "knowledge_disabled"
+REASON_STAGE_NOT_PRIMARY = "stage_not_primary"
+REASON_RETRIEVAL_ERROR = "retrieval_error"
+REASON_NO_MANDATORY_ANCHOR = "no_mandatory_anchor"
+REASON_BELOW_MIN_ASSERTIONS = "below_min_assertions"
 
 ContextRecorder = Callable[[GenerationContextRun, list[GenerationContextItem]], None]
 
@@ -36,6 +50,88 @@ class KnowledgeRetrievalConfig:
     expansion_k: int
     recorder: ContextRecorder | None
     min_assertions: int = 0
+
+
+@dataclass(frozen=True)
+class GraphPrimaryDecision:
+    """Typed, auditable outcome of the graph-primary grounding gate.
+
+    Replaces the ambiguous ``SemanticContext | None`` return: ``context`` is the
+    selected structured context to freeze/generate from (only when
+    ``status == STATUS_SELECTED``), while ``reason`` names exactly why a fallback
+    happened. ``context_run_id`` is the single id shared by the recorded semantic
+    snapshot, the frozen checkpoint entry, and the persisted generated record.
+    """
+
+    status: str
+    reason: str
+    context: SemanticContext | None = None
+    assertion_count: int = 0
+    mandatory_anchor_count: int = 0
+    min_assertions: int = 0
+    context_run_id: str = ""
+    metrics: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def selected(self) -> bool:
+        return self.status == STATUS_SELECTED and self.context is not None
+
+
+# Reasons that mean "the graph-primary gate was actually attempted and missed"
+# (as opposed to the graph being intentionally off / shadow-only). Only these
+# produce a ``graph_fallback`` warning.
+_GATE_MISS_REASONS = frozenset(
+    {REASON_RETRIEVAL_ERROR, REASON_NO_MANDATORY_ANCHOR, REASON_BELOW_MIN_ASSERTIONS}
+)
+
+
+def log_graph_primary_decision(
+    logger: Any,
+    *,
+    stage: str,
+    project: str,
+    document_version_id: str,
+    anchor_id: str,
+    decision: GraphPrimaryDecision,
+) -> None:
+    """Emit a stage-specific structured log for one graph-primary decision.
+
+    Gate misses (retrieval error / no mandatory anchor / below minimum) log at
+    ``status="graph_fallback"`` with project, document version, anchor id, reason,
+    counts, and the configured threshold so the effective mode is auditable. A
+    disabled or shadow-only channel is expected operation and is not logged as a
+    fallback.
+    """
+    if logger is None:
+        return
+    if decision.selected:
+        logger.info(
+            "Graph-primary context selected",
+            step=f"{stage}.context_map",
+            project=project,
+            document_version_id=document_version_id,
+            anchor_id=anchor_id,
+            reason=decision.reason,
+            assertion_count=decision.assertion_count,
+            mandatory_anchor_count=decision.mandatory_anchor_count,
+            min_assertions=decision.min_assertions,
+            status="graph_primary",
+        )
+        return
+    if decision.reason not in _GATE_MISS_REASONS:
+        return
+    logger.warning(
+        "Graph-primary grounding gate missed; using legacy chunk retrieval",
+        step=f"{stage}.context_map",
+        project=project,
+        document_version_id=document_version_id,
+        anchor_id=anchor_id,
+        reason=decision.reason,
+        assertion_count=decision.assertion_count,
+        mandatory_anchor_count=decision.mandatory_anchor_count,
+        min_assertions=decision.min_assertions,
+        status="graph_fallback",
+    )
 
 
 def build_knowledge_retrieval_config(
@@ -60,6 +156,38 @@ def build_knowledge_retrieval_config(
         expansion_k=knowledge_graph.expansion_k,
         recorder=recorder,
         min_assertions=knowledge_graph.graph_min_assertions,
+    )
+
+
+def require_knowledge_graph_when_primary(
+    *,
+    settings: AppSettings,
+    neo4j: Any,
+    document_version_id: str,
+    primary: bool,
+    stage: str,
+) -> None:
+    """Fail fast when graph-primary generation is requested for a version with no
+    semantic knowledge graph.
+
+    A missing knowledge graph for the whole version is a configuration/pipeline
+    error — the operator forgot to build it — not an ordinary per-anchor grounding
+    fallback. Legacy fallback stays valid only when the knowledge channel or the
+    stage-primary flag was explicitly disabled.
+    """
+    knowledge_graph = settings.knowledge_graph
+    if not (knowledge_graph.enabled and primary):
+        return
+    if neo4j.has_knowledge_assertions(document_version_id):
+        return
+    from multi_agentic_graph_rag.domain.errors import ConfigurationError
+
+    raise ConfigurationError(
+        f"graph-primary {stage} generation is enabled but document version "
+        f"{document_version_id} has no semantic knowledge graph; run "
+        "`marag build-knowledge-graph --project <P> --document-version-id "
+        f"{document_version_id}` first (or ingest with KNOWLEDGE_GRAPH_ENABLED=true), "
+        "or disable graph-primary generation to use the legacy chunk path"
     )
 
 
@@ -133,10 +261,15 @@ def build_context_snapshot(
     return run, items
 
 
+def new_context_run_id() -> str:
+    return f"CTX-{uuid4().hex[:16].upper()}"
+
+
 def build_semantic_snapshot(
     *,
     config: KnowledgeRetrievalConfig,
     context: SemanticContext,
+    context_run_id: str | None = None,
 ) -> tuple[GenerationContextRun, list[GenerationContextItem]]:
     """Assemble a structured assertion snapshot (schema §18) for shadow recording.
 
@@ -144,8 +277,12 @@ def build_semantic_snapshot(
     context item carrying its assertion/entity/predicate/hop provenance and the
     representative TextUnit id, so shadow comparison can measure mandatory-anchor
     recall and assertion selection against the legacy chunk channel.
+
+    ``context_run_id`` may be supplied so the recorded snapshot shares the exact id
+    frozen into the checkpoint and persisted on the generated record (produced
+    once, never re-derived).
     """
-    context_run_id = f"CTX-{uuid4().hex[:16].upper()}"
+    context_run_id = context_run_id or new_context_run_id()
     items: list[GenerationContextItem] = []
     for rank, item in enumerate(context.items, start=1):
         text_unit_id = next(

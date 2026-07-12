@@ -19,7 +19,6 @@ from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import CheckpointError, ConfigurationError
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
-    SemanticContext,
     UserStoryBuildResult,
     UserStoryModel,
     UserStoryRecord,
@@ -49,11 +48,17 @@ from multi_agentic_graph_rag.services.generation_checkpoint import (
     make_context_map_entry,
     record_completion,
     record_failure,
+    trace_from_entry,
     validate_context_map,
     write_context_map_checkpoint,
     write_generation_progress,
 )
-from multi_agentic_graph_rag.services.knowledge_retrieval import build_knowledge_retrieval_config
+from multi_agentic_graph_rag.services.knowledge_retrieval import (
+    GraphPrimaryDecision,
+    build_knowledge_retrieval_config,
+    log_graph_primary_decision,
+    require_knowledge_graph_when_primary,
+)
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
     load_requirement_source_from_full_payload,
@@ -170,6 +175,13 @@ def _run_pipeline(
                 document_version_id=source.document_version_id,
                 project=source.project,
             )
+        require_knowledge_graph_when_primary(
+            settings=settings,
+            neo4j=neo4j,
+            document_version_id=source.document_version_id,
+            primary=settings.knowledge_graph.graph_primary_story,
+            stage="user-story",
+        )
 
         retrieval = RetrievalService(
             chroma=chroma,
@@ -213,12 +225,14 @@ def _run_pipeline(
             logger=logger,
         )
 
+        traces = {entry.requirement_id: trace_from_entry(entry) for entry in entries}
         build_result = build_user_story_artifact(
             project=source.project,
             document_id=source.document_id,
             document_version_id=source.document_version_id,
             doc_version=source.doc_version,
             generated=generated,
+            traces=traces,
         )
         build_result = _preserve_existing_story_ids(
             build_result,
@@ -299,35 +313,35 @@ def _run_pipeline(
         raise
 
 
-def _assemble_story_semantic(
+def _decide_story_semantic(
     *,
     retrieval: RetrievalService,
     requirement: RequirementInput,
+    project: str,
     document_version_id: str,
     logger: RunLogger | None,
-) -> SemanticContext | None:
-    """Graph-primary story context (loop 1), or ``None`` for the legacy chunk path.
+) -> GraphPrimaryDecision:
+    """Graph-primary story decision (loop 1) with a structured audit log.
 
     Assembled once in loop 1 and frozen into the context map so the structured
-    context is reproduced identically on resume. Returns ``None`` (fallback) when
-    the stage is not graph-primary or the grounding gate is not met.
+    context is reproduced identically on resume. Gate misses log ``graph_fallback``
+    and degrade to the legacy chunk path.
     """
-    context = retrieval.assemble_primary_context(
+    decision = retrieval.decide_primary_context(
         requirement_text=requirement.requirement_text,
         document_version_id=document_version_id,
         evidence_chunk_ids=list(requirement.evidence_chunk_ids),
         anchor_id=requirement.requirement_id,
     )
-    if logger is not None and context is not None:
-        logger.info(
-            "Graph-primary story context selected",
-            step="user_stories.context_map",
-            requirement_id=requirement.requirement_id,
-            assertion_count=len(context.items),
-            mandatory_anchor_count=len(context.mandatory_anchor_ids),
-            status="graph_primary",
-        )
-    return context
+    log_graph_primary_decision(
+        logger,
+        stage=STAGE_USER_STORY,
+        project=project,
+        document_version_id=document_version_id,
+        anchor_id=requirement.requirement_id,
+        decision=decision,
+    )
+    return decision
 
 
 def _build_or_load_context_map(
@@ -359,25 +373,30 @@ def _build_or_load_context_map(
             )
         return existing
 
-    entries = [
-        make_context_map_entry(
-            requirement_id=requirement.requirement_id,
+    entries: list[ContextMapEntry] = []
+    for requirement in source.requirements:
+        decision = _decide_story_semantic(
+            retrieval=retrieval,
+            requirement=requirement,
+            project=source.project,
             document_version_id=source.document_version_id,
-            provenance=retrieval.retrieve_context_map(
-                requirement_text=requirement.requirement_text,
-                document_version_id=source.document_version_id,
-                evidence_chunk_ids=requirement.evidence_chunk_ids,
-                anchor_id=requirement.requirement_id,
-            ),
-            semantic=_assemble_story_semantic(
-                retrieval=retrieval,
-                requirement=requirement,
-                document_version_id=source.document_version_id,
-                logger=logger,
-            ),
+            logger=logger,
         )
-        for requirement in source.requirements
-    ]
+        provenance = retrieval.retrieve_context_map(
+            requirement_text=requirement.requirement_text,
+            document_version_id=source.document_version_id,
+            evidence_chunk_ids=requirement.evidence_chunk_ids,
+            anchor_id=requirement.requirement_id,
+        )
+        entries.append(
+            make_context_map_entry(
+                requirement_id=requirement.requirement_id,
+                document_version_id=source.document_version_id,
+                provenance=provenance,
+                semantic=decision.context if decision.selected else None,
+                generation_context_run_id=decision.context_run_id,
+            )
+        )
     entries = validate_context_map(
         entries,
         expected_document_version_id=source.document_version_id,

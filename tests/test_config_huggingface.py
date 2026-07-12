@@ -97,6 +97,43 @@ class HuggingFaceConfigTests(unittest.TestCase):
         self.assertEqual(settings.postgres.mode, "postgres")
         self.assertEqual(settings.neo4j.mode, "neo4j")
 
+    def test_knowledge_graph_defaults_are_graph_primary(self) -> None:
+        settings, _ = self._load("")
+
+        knowledge_graph = settings.knowledge_graph
+        self.assertTrue(knowledge_graph.enabled)
+        self.assertTrue(knowledge_graph.shadow_mode)
+        self.assertTrue(knowledge_graph.graph_primary_story)
+        self.assertTrue(knowledge_graph.graph_primary_scenario)
+        self.assertEqual(knowledge_graph.expansion_k, 6)
+        self.assertEqual(knowledge_graph.graph_min_assertions, 3)
+
+    def test_knowledge_graph_fields_load_from_env(self) -> None:
+        settings, _ = self._load(
+            "\n".join(
+                [
+                    "KNOWLEDGE_GRAPH_ENABLED=false",
+                    "KNOWLEDGE_GRAPH_SHADOW_MODE=false",
+                    "GRAPH_PRIMARY_STORY=false",
+                    "GRAPH_PRIMARY_SCENARIO=false",
+                    "KNOWLEDGE_GRAPH_EXPANSION_K=11",
+                    "KNOWLEDGE_GRAPH_MIN_ASSERTIONS=7",
+                ]
+            )
+        )
+
+        knowledge_graph = settings.knowledge_graph
+        self.assertFalse(knowledge_graph.enabled)
+        self.assertFalse(knowledge_graph.shadow_mode)
+        self.assertFalse(knowledge_graph.graph_primary_story)
+        self.assertFalse(knowledge_graph.graph_primary_scenario)
+        self.assertEqual(knowledge_graph.expansion_k, 11)
+        self.assertEqual(knowledge_graph.graph_min_assertions, 7)
+
+    def test_explicit_opt_out_disables_knowledge_graph(self) -> None:
+        settings, _ = self._load("KNOWLEDGE_GRAPH_ENABLED=false")
+        self.assertFalse(settings.knowledge_graph.enabled)
+
     def test_local_providers_are_rejected_by_factories(self) -> None:
         settings, _ = self._load(
             "\n".join(

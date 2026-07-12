@@ -74,15 +74,17 @@ class UserStorySettings(BaseModel):
 class KnowledgeGraphSettings(BaseModel):
     """Feature flags for the source-knowledge graph and its retrieval rollout.
 
-    ``enabled`` gates every knowledge-graph retrieval integration. With shadow
-    mode on and the graph-primary flags off, generation behavior is unchanged
-    and graph retrieval only records comparison snapshots to PostgreSQL.
+    GraphRAG is the product default: ``enabled`` and both ``graph_primary_*`` flags
+    are on, so ingestion builds the semantic knowledge graph and generation grounds
+    user stories / test scenarios in it. ``shadow_mode`` stays independently
+    configurable for comparison runs. Setting ``enabled=False`` is the explicit
+    opt-out that restores the legacy chunk-only retrieval path.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     shadow_mode: bool = True
-    graph_primary_story: bool = False
-    graph_primary_scenario: bool = False
+    graph_primary_story: bool = True
+    graph_primary_scenario: bool = True
     expansion_k: int = 6
     graph_min_assertions: int = 3
 

@@ -22,6 +22,10 @@ from multi_agentic_graph_rag.domain.schemas import (
     UserStoryArtifact,
     UserStoryBuildResult,
 )
+from multi_agentic_graph_rag.services.assertion_lifecycle import (
+    LifecycleUpdate,
+    PriorAssertion,
+)
 
 _LUCENE_TOKEN = re.compile(r"[A-Za-z0-9]+")
 
@@ -191,6 +195,9 @@ class Neo4jStore:
                         "title": record.title,
                         "covered": True,
                         "evidence_chunk_ids": evidence.get(record.requirement_id, []),
+                        "generation_context_run_id": record.generation_context_run_id,
+                        "retrieved_assertion_ids": list(record.retrieved_assertion_ids),
+                        "context_mode": record.context_mode,
                     },
                 )
             return
@@ -233,6 +240,9 @@ class Neo4jStore:
                         "priority": record.priority,
                         "confidence": record.confidence,
                         "evidence_chunk_ids": evidence.get(record.requirement_id, []),
+                        "generation_context_run_id": record.generation_context_run_id,
+                        "retrieved_assertion_ids": list(record.retrieved_assertion_ids),
+                        "context_mode": record.context_mode,
                     },
                 )
             return
@@ -381,10 +391,12 @@ class Neo4jStore:
                 MATCH (seed:Chunk)<-[:FROM_CHUNK]-(:AssertionEvidence)
                       <-[:SUPPORTED_BY]-(a1:Assertion {document_version_id: $document_version_id})
                 WHERE seed.chunk_id IN $chunk_ids
+                  AND (a1.status IS NULL OR a1.status = 'active')
                 MATCH (a1)-[:SUBJECT|OBJECT]->(e:Entity)
                       <-[:SUBJECT|OBJECT]-(a2:Assertion {
                           document_version_id: $document_version_id
                       })
+                WHERE a2.status IS NULL OR a2.status = 'active'
                 MATCH (a2)-[:SUPPORTED_BY]->(:AssertionEvidence)-[:FROM_CHUNK]->(c:Chunk)
                 WHERE NOT c.chunk_id IN $chunk_ids
                 RETURN c.chunk_id AS chunk_id,
@@ -414,6 +426,7 @@ class Neo4jStore:
             for row in self._read_local_rows()
             if row.get("kind") == "assertion_projection"
             and row.get("document_version_id") == document_version_id
+            and str(row.get("status", "active")) == "active"
         ]
 
         def evidence_chunks(row: dict[str, Any]) -> set[str]:
@@ -487,6 +500,7 @@ class Neo4jStore:
                 YIELD node, score
                 WHERE node.document_version_id = $document_version_id
                   AND ($predicates IS NULL OR node.predicate IN $predicates)
+                  AND (node.status IS NULL OR node.status = 'active')
                 MATCH (node)-[:SUBJECT]->(s:Entity)
                 OPTIONAL MATCH (node)-[:OBJECT]->(o:Entity)
                 RETURN node AS assertion, s AS subject, o AS object, score AS search_score
@@ -527,6 +541,7 @@ class Neo4jStore:
                 MATCH (seed:Chunk)<-[:FROM_CHUNK]-(:AssertionEvidence)
                       <-[:SUPPORTED_BY]-(a:Assertion {document_version_id: $document_version_id})
                 WHERE seed.chunk_id IN $chunk_ids
+                  AND (a.status IS NULL OR a.status = 'active')
                 MATCH (a)-[:SUBJECT]->(s:Entity)
                 OPTIONAL MATCH (a)-[:OBJECT]->(o:Entity)
                 RETURN DISTINCT a AS assertion, s AS subject, o AS object
@@ -575,6 +590,7 @@ class Neo4jStore:
                 MATCH (e:Entity {entity_id: eid})<-[:SUBJECT|OBJECT]-(
                     a:Assertion {document_version_id: $document_version_id})
                 WHERE ($predicates IS NULL OR a.predicate IN $predicates)
+                  AND (a.status IS NULL OR a.status = 'active')
                 WITH eid, a ORDER BY a.confidence DESC, a.assertion_id
                 WITH eid, collect(a)[0..$per_entity_limit] AS capped
                 UNWIND capped AS a
@@ -649,6 +665,22 @@ class Neo4jStore:
             return evidence
 
     def _local_assertions(self, document_version_id: str) -> list[dict[str, Any]]:
+        # Current-knowledge reads: superseded/retired assertions are excluded so a
+        # stale version returns nothing (explicit historical reads are elsewhere).
+        return [
+            row
+            for row in self._read_local_rows()
+            if row.get("kind") == "assertion_projection"
+            and row.get("document_version_id") == document_version_id
+            and str(row.get("status", "active")) == "active"
+        ]
+
+    def _local_assertions_any(self, document_version_id: str) -> list[dict[str, Any]]:
+        """All assertion rows for a version regardless of lifecycle status.
+
+        Historical/audit read (includes superseded/retired); the current-knowledge
+        reads use :meth:`_local_assertions`, which filters to active only.
+        """
         return [
             row
             for row in self._read_local_rows()
@@ -899,6 +931,294 @@ class Neo4jStore:
                 for record in records
             ]
 
+    def has_knowledge_assertions(self, document_version_id: str) -> bool:
+        """Preflight: does this document version have any projected assertions?
+
+        Used to fail fast when graph-primary generation is requested for a version
+        whose semantic knowledge graph was never built.
+        """
+        if self.settings.neo4j.mode == "local_json":
+            return any(
+                row.get("kind") == "assertion_projection"
+                and row.get("document_version_id") == document_version_id
+                for row in self._read_local_rows()
+            )
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            record = session.run(
+                """
+                MATCH (a:Assertion {document_version_id: $document_version_id})
+                RETURN a.assertion_id AS assertion_id
+                LIMIT 1
+                """,
+                document_version_id=document_version_id,
+            ).single()
+            return record is not None
+
+    def fetch_assertion_lineage(self, document_version_id: str) -> list[PriorAssertion]:
+        """Active assertions of a version as (id, key, lineage_key) for lifecycle diff."""
+        if self.settings.neo4j.mode == "local_json":
+            rows = [
+                row
+                for row in self._read_local_rows()
+                if row.get("kind") == "assertion_projection"
+                and row.get("document_version_id") == document_version_id
+                and str(row.get("status", "active")) == "active"
+            ]
+            return [
+                PriorAssertion(
+                    assertion_id=str(row.get("assertion_id", "")),
+                    assertion_key=str(row.get("assertion_key", "")),
+                    assertion_lineage_key=str(row.get("assertion_lineage_key", "")),
+                )
+                for row in rows
+            ]
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            records = session.run(
+                """
+                MATCH (a:Assertion {document_version_id: $document_version_id})
+                WHERE a.status IS NULL OR a.status = 'active'
+                RETURN a.assertion_id AS assertion_id,
+                       a.assertion_key AS assertion_key,
+                       a.assertion_lineage_key AS assertion_lineage_key
+                """,
+                document_version_id=document_version_id,
+            )
+            return [
+                PriorAssertion(
+                    assertion_id=str(record["assertion_id"]),
+                    assertion_key=str(record["assertion_key"] or ""),
+                    assertion_lineage_key=str(record["assertion_lineage_key"] or ""),
+                )
+                for record in records
+            ]
+
+    def apply_assertion_lifecycle(self, updates: list[LifecycleUpdate]) -> None:
+        """Mark prior-version assertions superseded/retired from a lifecycle diff."""
+        if not updates:
+            return
+        payload = [
+            {
+                "assertion_id": update.assertion_id,
+                "status": update.status,
+                "superseded_by_assertion_id": update.superseded_by_assertion_id,
+            }
+            for update in updates
+        ]
+        if self.settings.neo4j.mode == "local_json":
+            by_id = {update["assertion_id"]: update for update in payload}
+            rows = self._read_local_rows()
+            for row in rows:
+                if row.get("kind") != "assertion_projection":
+                    continue
+                update = by_id.get(str(row.get("assertion_id", "")))
+                if update is None:
+                    continue
+                row["status"] = update["status"]
+                row["superseded_by_assertion_id"] = update["superseded_by_assertion_id"]
+            self.settings.neo4j.local_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            return
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            session.run(
+                """
+                UNWIND $updates AS update
+                MATCH (a:Assertion {assertion_id: update.assertion_id})
+                SET a.status = update.status,
+                    a.superseded_by_assertion_id = update.superseded_by_assertion_id
+                """,
+                updates=payload,
+            )
+
+    def prune_superseded_assertions(self, *, document_id: str, dry_run: bool = True) -> list[str]:
+        """Opt-in retention policy for historical knowledge (disabled by default).
+
+        Historical (superseded/retired) assertions are **never** hard-deleted
+        unless the caller explicitly passes ``dry_run=False``. The default dry run
+        returns the ids that *would* be pruned so the policy can be reviewed before
+        any destructive action is taken.
+        """
+        if self.settings.neo4j.mode == "local_json":
+            rows = self._read_local_rows()
+            prunable = [
+                str(row.get("assertion_id", ""))
+                for row in rows
+                if row.get("kind") == "assertion_projection"
+                and row.get("document_id") == document_id
+                and str(row.get("status", "active")) in {"superseded", "retired"}
+            ]
+            if not dry_run and prunable:
+                prunable_set = set(prunable)
+                kept = [
+                    row
+                    for row in rows
+                    if not (
+                        row.get("kind") == "assertion_projection"
+                        and str(row.get("assertion_id", "")) in prunable_set
+                    )
+                ]
+                self.settings.neo4j.local_path.write_text(
+                    "".join(json.dumps(row) + "\n" for row in kept),
+                    encoding="utf-8",
+                )
+            return prunable
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            records = session.run(
+                """
+                MATCH (a:Assertion {document_id: $document_id})
+                WHERE a.status IN ['superseded', 'retired']
+                RETURN a.assertion_id AS assertion_id
+                """,
+                document_id=document_id,
+            )
+            prunable = [str(record["assertion_id"]) for record in records]
+            if not dry_run and prunable:
+                session.run(
+                    """
+                    MATCH (a:Assertion {document_id: $document_id})
+                    WHERE a.status IN ['superseded', 'retired']
+                    OPTIONAL MATCH (a)-[:SUPPORTED_BY]->(ev:AssertionEvidence)
+                    DETACH DELETE a, ev
+                    """,
+                    document_id=document_id,
+                )
+            return prunable
+
+    def active_knowledge_version(self, document_id: str) -> str | None:
+        """The document version currently pointed at as active knowledge, if any."""
+        if self.settings.neo4j.mode == "local_json":
+            for row in reversed(self._read_local_rows()):
+                if (
+                    row.get("kind") == "active_knowledge_version"
+                    and row.get("_local_key") == document_id
+                ):
+                    value = row.get("document_version_id")
+                    return str(value) if value else None
+            return None
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            record = session.run(
+                """
+                MATCH (d:Document {document_id: $document_id})
+                      -[:ACTIVE_KNOWLEDGE_VERSION]->(v:DocumentVersion)
+                RETURN v.document_version_id AS document_version_id
+                LIMIT 1
+                """,
+                document_id=document_id,
+            ).single()
+            if record is None:
+                return None
+            value = record["document_version_id"]
+            return str(value) if value else None
+
+    def set_active_knowledge_version(self, *, document_id: str, document_version_id: str) -> None:
+        """Point ``(:Document)-[:ACTIVE_KNOWLEDGE_VERSION]->(:DocumentVersion)``.
+
+        Per-document (not one global project pointer, since a project owns many
+        documents). Called only after a successful knowledge projection so current
+        queries never resolve against a half-written version.
+        """
+        if self.settings.neo4j.mode == "local_json":
+            self._upsert_local(
+                "active_knowledge_version",
+                document_id,
+                {
+                    "kind": "active_knowledge_version",
+                    "document_id": document_id,
+                    "document_version_id": document_version_id,
+                },
+            )
+            return
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            session.execute_write(
+                _set_active_knowledge_version_tx, document_id, document_version_id
+            )
+
+    def fetch_entities_for_resolution(
+        self, *, project: str, document_id: str
+    ) -> list[EntityRecord]:
+        """Entities to resolve a new build against: those participating in the
+        document's prior active knowledge version only.
+
+        This bounds resolution to live, relevant entities instead of every stale
+        entity ever created for the project. On the first build (no active version
+        yet) the set is empty; deterministic entity ids keep re-runs idempotent
+        regardless of the pointer's position.
+        """
+        prior_version = self.active_knowledge_version(document_id)
+        if prior_version is None:
+            return []
+        if self.settings.neo4j.mode == "local_json":
+            wanted: set[str] = set()
+            for row in self._local_assertions(prior_version):
+                subject = str(row.get("subject_entity_id", ""))
+                if subject:
+                    wanted.add(subject)
+                obj = row.get("object_entity_id")
+                if obj:
+                    wanted.add(str(obj))
+            entities: list[EntityRecord] = []
+            for row in self._read_local_rows():
+                if row.get("kind") != "entity_projection" or row.get("project") != project:
+                    continue
+                if str(row.get("entity_id", "")) not in wanted:
+                    continue
+                payload = {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"kind", "_local_key", "written_at"}
+                }
+                entities.append(EntityRecord.model_validate(payload))
+            return entities
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            records = session.run(
+                """
+                MATCH (v:DocumentVersion {document_version_id: $prior_version})
+                      -[:HAS_ASSERTION]->(a:Assertion)-[:SUBJECT|OBJECT]->(e:Entity)
+                WHERE e.project = $project
+                RETURN DISTINCT e.entity_id AS entity_id,
+                       e.project AS project,
+                       e.canonical_name AS canonical_name,
+                       e.normalized_name AS normalized_name,
+                       e.entity_type AS entity_type,
+                       e.aliases AS aliases
+                """,
+                prior_version=prior_version,
+                project=project,
+            )
+            return [
+                EntityRecord(
+                    entity_id=str(record["entity_id"]),
+                    project=str(record["project"]),
+                    canonical_name=str(record["canonical_name"] or ""),
+                    normalized_name=str(record["normalized_name"] or ""),
+                    entity_type=str(record["entity_type"] or "concept"),
+                    aliases=[str(item) for item in record["aliases"] or []],
+                )
+                for record in records
+            ]
+
     def _driver(self) -> Any:
         from neo4j import GraphDatabase, NotificationDisabledClassification
 
@@ -1131,6 +1451,16 @@ def _project_user_story_coverage_tx(
             story_id=story_id,
             document_version_id=record["document_version_id"],
         )
+        for assertion_id in record.get("retrieved_assertion_ids", []):
+            tx.run(
+                """
+                MATCH (s:UserStory {story_id: $story_id})
+                MATCH (a:Assertion {assertion_id: $assertion_id})
+                MERGE (s)-[:GROUNDED_BY_ASSERTION]->(a)
+                """,
+                story_id=story_id,
+                assertion_id=assertion_id,
+            )
         for chunk_id in evidence_chunk_ids.get(requirement_id, []):
             tx.run(
                 """
@@ -1193,6 +1523,16 @@ def _project_test_scenario_coverage_tx(
             scenario_id=scenario_id,
             document_version_id=record["document_version_id"],
         )
+        for assertion_id in record.get("retrieved_assertion_ids", []):
+            tx.run(
+                """
+                MATCH (t:TestScenario {scenario_id: $scenario_id})
+                MATCH (a:Assertion {assertion_id: $assertion_id})
+                MERGE (t)-[:GROUNDED_BY_ASSERTION]->(a)
+                """,
+                scenario_id=scenario_id,
+                assertion_id=assertion_id,
+            )
         for chunk_id in evidence_chunk_ids.get(requirement_id, []):
             tx.run(
                 """
@@ -1309,6 +1649,7 @@ def _project_knowledge_graph_tx(tx: Any, artifact: dict[str, Any]) -> None:
             UNWIND $assertions AS assertion
             MERGE (a:Assertion {assertion_id: assertion.assertion_id})
             SET a.assertion_key = assertion.assertion_key,
+                a.assertion_lineage_key = assertion.assertion_lineage_key,
                 a.project = assertion.project,
                 a.document_id = assertion.document_id,
                 a.document_version_id = assertion.document_version_id,
@@ -1319,13 +1660,27 @@ def _project_knowledge_graph_tx(tx: Any, artifact: dict[str, Any]) -> None:
                 a.explicitness = assertion.explicitness,
                 a.condition = assertion.condition,
                 a.confidence = assertion.confidence,
-                a.display_text = assertion.display_text
+                a.display_text = assertion.display_text,
+                a.status = assertion.status,
+                a.previous_assertion_id = assertion.previous_assertion_id,
+                a.superseded_by_assertion_id = assertion.superseded_by_assertion_id,
+                a.revision_type = assertion.revision_type
             WITH a, assertion
             MATCH (s:Entity {entity_id: assertion.subject_entity_id})
             MERGE (a)-[:SUBJECT]->(s)
             WITH a, assertion
             MATCH (v:DocumentVersion {document_version_id: assertion.document_version_id})
             MERGE (v)-[:HAS_ASSERTION]->(a)
+            """,
+            assertions=artifact["assertions"],
+        )
+        tx.run(
+            """
+            UNWIND $assertions AS assertion
+            WITH assertion WHERE assertion.previous_assertion_id IS NOT NULL
+            MATCH (a:Assertion {assertion_id: assertion.assertion_id})
+            MATCH (prev:Assertion {assertion_id: assertion.previous_assertion_id})
+            MERGE (a)-[:PREVIOUS_ASSERTION]->(prev)
             """,
             assertions=artifact["assertions"],
         )
@@ -1377,6 +1732,21 @@ def _project_knowledge_graph_tx(tx: Any, artifact: dict[str, Any]) -> None:
             """,
             evidence=evidence_rows,
         )
+
+
+def _set_active_knowledge_version_tx(tx: Any, document_id: str, document_version_id: str) -> None:
+    tx.run(
+        """
+        MATCH (d:Document {document_id: $document_id})
+        OPTIONAL MATCH (d)-[r:ACTIVE_KNOWLEDGE_VERSION]->(:DocumentVersion)
+        DELETE r
+        WITH d
+        MATCH (v:DocumentVersion {document_version_id: $document_version_id})
+        MERGE (d)-[:ACTIVE_KNOWLEDGE_VERSION]->(v)
+        """,
+        document_id=document_id,
+        document_version_id=document_version_id,
+    )
 
 
 def _project_manifest_tx(tx: Any, manifest: dict[str, Any]) -> None:

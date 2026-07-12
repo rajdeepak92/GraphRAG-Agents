@@ -259,6 +259,32 @@ def assertion_id(assertion_key_token: str, document_version_identifier: str) -> 
     )
 
 
+def assertion_lineage_key(
+    *,
+    project: str,
+    subject_entity_identifier: str,
+    predicate: str,
+    object_entity_identifier: str | None,
+) -> str:
+    """Cross-version semantic-slot identity for an assertion.
+
+    Deliberately coarser than :func:`assertion_key`: it fixes only the stable
+    subject / predicate / object-entity identity, so a scalar value, modality,
+    polarity, or normalized condition can change *within the same lineage* (a new
+    revision of the same claim) instead of spawning an unrelated lineage. Assertions
+    with a literal object (no object entity) share a lineage per subject+predicate,
+    which is what lets ``threshold 70C`` -> ``threshold 80C`` supersede rather than
+    duplicate.
+    """
+    return stable_token(
+        project,
+        subject_entity_identifier,
+        predicate.upper(),
+        object_entity_identifier or "",
+        length=16,
+    )
+
+
 def assertion_evidence_id(
     *,
     assertion_identifier: str,

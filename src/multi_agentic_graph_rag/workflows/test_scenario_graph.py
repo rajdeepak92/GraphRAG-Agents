@@ -27,8 +27,8 @@ from multi_agentic_graph_rag.domain.errors import (
     StoreUnavailableError,
 )
 from multi_agentic_graph_rag.domain.schemas import (
+    GenerationTrace,
     RequirementInput,
-    SemanticContext,
     TestScenarioArtifact,
     TestScenarioBuildResult,
     TestScenarioModel,
@@ -62,11 +62,17 @@ from multi_agentic_graph_rag.services.generation_checkpoint import (
     make_context_map_entry,
     record_completion,
     record_failure,
+    trace_from_entry,
     validate_context_map,
     write_context_map_checkpoint,
     write_generation_progress,
 )
-from multi_agentic_graph_rag.services.knowledge_retrieval import build_knowledge_retrieval_config
+from multi_agentic_graph_rag.services.knowledge_retrieval import (
+    GraphPrimaryDecision,
+    build_knowledge_retrieval_config,
+    log_graph_primary_decision,
+    require_knowledge_graph_when_primary,
+)
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
     load_requirement_source_from_full_payload,
@@ -259,6 +265,13 @@ def _generate(
             document_version_id=source.document_version_id,
             project=source.project,
         )
+    require_knowledge_graph_when_primary(
+        settings=settings,
+        neo4j=neo4j,
+        document_version_id=source.document_version_id,
+        primary=settings.knowledge_graph.graph_primary_scenario,
+        stage="test-scenario",
+    )
 
     retrieval = RetrievalService(
         chroma=chroma,
@@ -311,6 +324,7 @@ def _generate(
         document_version_id=source.document_version_id,
         doc_version=source.doc_version,
         generated=generated,
+        traces=_traces_by_story(entries),
     )
     build_result = _preserve_existing_scenario_ids(
         build_result,
@@ -518,6 +532,13 @@ def _run_pipeline(
                 document_version_id=source.document_version_id,
                 project=source.project,
             )
+        require_knowledge_graph_when_primary(
+            settings=settings,
+            neo4j=neo4j,
+            document_version_id=source.document_version_id,
+            primary=settings.knowledge_graph.graph_primary_scenario,
+            stage="test-scenario",
+        )
 
         retrieval = RetrievalService(
             chroma=chroma,
@@ -572,6 +593,7 @@ def _run_pipeline(
             document_version_id=source.document_version_id,
             doc_version=source.doc_version,
             generated=generated,
+            traces=_traces_by_story(entries),
         )
         build_result = _preserve_existing_scenario_ids(
             build_result,
@@ -653,38 +675,45 @@ def _run_pipeline(
         raise
 
 
-def _assemble_scenario_semantic(
+def _decide_scenario_semantic(
     *,
     retrieval: RetrievalService,
     story: UserStoryRecord,
     query_text: str,
     evidence_chunk_ids: list[str],
+    project: str,
     document_version_id: str,
     logger: RunLogger | None,
-) -> SemanticContext | None:
-    """Graph-primary scenario context (loop 1), or ``None`` for the legacy path.
+) -> GraphPrimaryDecision:
+    """Graph-primary scenario decision (loop 1) with a structured audit log.
 
     Uses the story query (title + persona + acceptance criteria + linked
     requirement) and the linked requirement's evidence chunks as anchors, with
-    the scenario predicate profile. Returns ``None`` (fallback) when the stage is
-    not graph-primary or the grounding gate is not met.
+    the scenario predicate profile. Gate misses log ``graph_fallback`` and degrade
+    to the legacy chunk path.
     """
-    context = retrieval.assemble_primary_context(
+    decision = retrieval.decide_primary_context(
         requirement_text=query_text,
         document_version_id=document_version_id,
         evidence_chunk_ids=evidence_chunk_ids,
         anchor_id=story.story_id,
     )
-    if logger is not None and context is not None:
-        logger.info(
-            "Graph-primary scenario context selected",
-            step="test_scenarios.context_map",
-            story_id=story.story_id,
-            assertion_count=len(context.items),
-            mandatory_anchor_count=len(context.mandatory_anchor_ids),
-            status="graph_primary",
-        )
-    return context
+    log_graph_primary_decision(
+        logger,
+        stage=STAGE_TEST_SCENARIO,
+        project=project,
+        document_version_id=document_version_id,
+        anchor_id=story.story_id,
+        decision=decision,
+    )
+    return decision
+
+
+def _traces_by_story(entries: list[ContextMapEntry]) -> dict[str, GenerationTrace]:
+    """Per-story generation grounding trace, keyed by ``story_id`` for the builder."""
+    return {
+        entry.story_id: trace_from_entry(entry) for entry in entries if entry.story_id is not None
+    }
 
 
 def _build_or_load_context_map(
@@ -724,6 +753,15 @@ def _build_or_load_context_map(
         evidence = list(linked.evidence_chunk_ids) if linked else []
         evidence_by_story[story.story_id] = evidence
         query_text = _story_query_text(story, linked_text)
+        decision = _decide_scenario_semantic(
+            retrieval=retrieval,
+            story=story,
+            query_text=query_text,
+            evidence_chunk_ids=evidence,
+            project=source.project,
+            document_version_id=source.document_version_id,
+            logger=logger,
+        )
         provenance = retrieval.retrieve_context_map(
             requirement_text=query_text,
             document_version_id=source.document_version_id,
@@ -736,14 +774,8 @@ def _build_or_load_context_map(
                 document_version_id=source.document_version_id,
                 provenance=provenance,
                 story_id=story.story_id,
-                semantic=_assemble_scenario_semantic(
-                    retrieval=retrieval,
-                    story=story,
-                    query_text=query_text,
-                    evidence_chunk_ids=evidence,
-                    document_version_id=source.document_version_id,
-                    logger=logger,
-                ),
+                semantic=decision.context if decision.selected else None,
+                generation_context_run_id=decision.context_run_id,
             )
         )
     entries = validate_context_map(

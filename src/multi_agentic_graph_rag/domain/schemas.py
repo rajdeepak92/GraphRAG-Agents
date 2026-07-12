@@ -551,6 +551,12 @@ class UserStoryRecord(_UserStoryContent):
     status: Literal["active", "superseded", "outdated"] = "active"
     origin: Literal["generation", "feedback"] = "generation"
     evidence_chunk_ids: list[str] = Field(default_factory=list)
+    # Generation grounding (Area 7): the retrieved context that actually produced
+    # this story, kept separate from ``evidence_chunk_ids`` (requirement source).
+    generation_context_run_id: str = ""
+    retrieved_assertion_ids: list[str] = Field(default_factory=list)
+    retrieved_chunk_ids: list[str] = Field(default_factory=list)
+    context_mode: str = ""
 
 
 class UserStoryProjection(_UserStoryContent):
@@ -564,10 +570,14 @@ class UserStoryTraceability(StrictModel):
     req_id: str
     source_req_id: str | None = None
     evidence_chunk_ids: list[str] = Field(default_factory=list)
+    generation_context_run_id: str = ""
+    retrieved_assertion_ids: list[str] = Field(default_factory=list)
+    retrieved_chunk_ids: list[str] = Field(default_factory=list)
+    context_mode: str = ""
 
 
 class UserStoryArtifact(StrictModel):
-    artifact_schema_version: Literal["2.0-user-stories"] = "2.0-user-stories"
+    artifact_schema_version: Literal["2.0-user-stories", "2.1-user-stories"] = "2.1-user-stories"
     project: str
     document_id: str
     document_version_id: str
@@ -723,6 +733,12 @@ class TestScenarioRecord(_TestScenarioContent):
     status: Literal["active", "superseded", "outdated"] = "active"
     origin: Literal["generation", "feedback"] = "generation"
     evidence_chunk_ids: list[str] = Field(default_factory=list)
+    # Generation grounding (Area 7): the retrieved context that actually produced
+    # this scenario, kept separate from ``evidence_chunk_ids`` (requirement source).
+    generation_context_run_id: str = ""
+    retrieved_assertion_ids: list[str] = Field(default_factory=list)
+    retrieved_chunk_ids: list[str] = Field(default_factory=list)
+    context_mode: str = ""
 
 
 class TestScenarioProjection(_TestScenarioContent):
@@ -738,10 +754,16 @@ class TestScenarioTraceability(StrictModel):
     req_id: str
     source_req_id: str | None = None
     evidence_chunk_ids: list[str] = Field(default_factory=list)
+    generation_context_run_id: str = ""
+    retrieved_assertion_ids: list[str] = Field(default_factory=list)
+    retrieved_chunk_ids: list[str] = Field(default_factory=list)
+    context_mode: str = ""
 
 
 class TestScenarioArtifact(StrictModel):
-    artifact_schema_version: Literal["2.0-test-scenarios"] = "2.0-test-scenarios"
+    artifact_schema_version: Literal["2.0-test-scenarios", "2.1-test-scenarios"] = (
+        "2.1-test-scenarios"
+    )
     project: str
     document_id: str
     document_version_id: str
@@ -1095,6 +1117,7 @@ class AssertionRecord(StrictModel):
 
     assertion_id: str
     assertion_key: str
+    assertion_lineage_key: str = ""
     project: str
     document_id: str
     document_version_id: str
@@ -1108,6 +1131,13 @@ class AssertionRecord(StrictModel):
     condition: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     display_text: str
+    # Cross-version lifecycle (Area 6). ``status`` is the live/history flag;
+    # ``previous_assertion_id`` links a revision to the one it replaced, and
+    # ``superseded_by_assertion_id`` is set on the prior node when replaced.
+    status: Literal["active", "superseded", "retired"] = "active"
+    previous_assertion_id: str | None = None
+    superseded_by_assertion_id: str | None = None
+    revision_type: Literal["new", "unchanged", "changed"] = "new"
 
 
 class AssertionEvidenceRecord(StrictModel):
@@ -1255,3 +1285,47 @@ class SemanticContext(StrictModel):
     items: list[AssertionContextItem] = Field(default_factory=list)
     mandatory_anchor_ids: list[str] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class GenerationTrace(StrictModel):
+    """The retrieved context that actually produced one generated artifact.
+
+    Separate from requirement-source evidence: this records the graph/chunk
+    grounding (``context_run_id`` + selected assertions/chunks + mode) so a story
+    or scenario can be traced back to exactly what the LLM was shown.
+    """
+
+    generation_context_run_id: str = ""
+    retrieved_assertion_ids: list[str] = Field(default_factory=list)
+    retrieved_chunk_ids: list[str] = Field(default_factory=list)
+    context_mode: str = ""
+
+
+class CoverageRequirementRow(StrictModel):
+    """One requirement's coverage status inside a strict coverage report."""
+
+    requirement_id: str
+    requirement_status: str
+    coverage_status: str
+    story_ids: list[str] = Field(default_factory=list)
+    scenario_count: int = 0
+
+
+class CoverageSummary(StrictModel):
+    """Deterministic, zero-safe rollup of per-requirement coverage rows."""
+
+    total_requirements: int = 0
+    requirements_with_stories: int = 0
+    requirements_scenario_covered: int = 0
+    no_story_count: int = 0
+    story_coverage_pct: float = 0.0
+    scenario_coverage_pct: float = 0.0
+
+
+class CoverageReport(StrictModel):
+    """Strict per-requirement coverage report with a summary rollup."""
+
+    project: str
+    document_version_id: str | None = None
+    requirements: list[CoverageRequirementRow] = Field(default_factory=list)
+    summary: CoverageSummary = Field(default_factory=CoverageSummary)

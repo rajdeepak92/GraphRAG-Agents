@@ -199,7 +199,7 @@ class PostgresArtifactTests(unittest.TestCase):
 
         self.assertEqual(by_path, artifact.artifact.model_dump(mode="json"))
         self.assertEqual(by_version, artifact.artifact.model_dump(mode="json"))
-        self.assertEqual(by_path["artifact_schema_version"], "2.0-user-stories")
+        self.assertEqual(by_path["artifact_schema_version"], "2.1-user-stories")
         self.assertTrue(by_path["stories"][0]["display_id"].startswith("US-"))
         self.assertTrue(by_path["stories"][0]["req_id"].startswith("REQ-"))
         self.assertEqual(by_path["stories"][0]["source_req_id"], "SYS_REQ_001")
@@ -237,7 +237,7 @@ class PostgresArtifactTests(unittest.TestCase):
 
         self.assertEqual(by_path, artifact.artifact.model_dump(mode="json"))
         self.assertEqual(by_version, artifact.artifact.model_dump(mode="json"))
-        self.assertEqual(by_path["artifact_schema_version"], "2.0-test-scenarios")
+        self.assertEqual(by_path["artifact_schema_version"], "2.1-test-scenarios")
         self.assertTrue(by_path["scenarios"][0]["display_id"].startswith("TS-"))
         self.assertTrue(by_path["scenarios"][0]["us_id"].startswith("US-"))
         self.assertTrue(by_path["scenarios"][0]["req_id"].startswith("REQ-"))

@@ -257,7 +257,7 @@ def load_config(
     knowledge_graph = KnowledgeGraphSettings(
         enabled=env_bool(
             env.get(EnvVar.KNOWLEDGE_GRAPH_ENABLED.value),
-            default=bool(knowledge_graph_cfg.get("enabled", False)),
+            default=bool(knowledge_graph_cfg.get("enabled", True)),
         ),
         shadow_mode=env_bool(
             env.get(EnvVar.KNOWLEDGE_GRAPH_SHADOW_MODE.value),
@@ -265,11 +265,11 @@ def load_config(
         ),
         graph_primary_story=env_bool(
             env.get(EnvVar.GRAPH_PRIMARY_STORY.value),
-            default=bool(knowledge_graph_cfg.get("graph_primary_story", False)),
+            default=bool(knowledge_graph_cfg.get("graph_primary_story", True)),
         ),
         graph_primary_scenario=env_bool(
             env.get(EnvVar.GRAPH_PRIMARY_SCENARIO.value),
-            default=bool(knowledge_graph_cfg.get("graph_primary_scenario", False)),
+            default=bool(knowledge_graph_cfg.get("graph_primary_scenario", True)),
         ),
         expansion_k=_positive_int(
             env.get(
@@ -277,6 +277,13 @@ def load_config(
                 knowledge_graph_cfg.get("expansion_k"),
             ),
             default=6,
+        ),
+        graph_min_assertions=_positive_int(
+            env.get(
+                EnvVar.KNOWLEDGE_GRAPH_MIN_ASSERTIONS.value,
+                knowledge_graph_cfg.get("graph_min_assertions"),
+            ),
+            default=3,
         ),
     )
 

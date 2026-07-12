@@ -45,5 +45,13 @@
     "chunk_overlap": 150,
     "minimum_chunk_size": 80,
     "maximum_chunk_size": 2000
+  },
+  "knowledge_graph": {
+    "enabled": true,
+    "shadow_mode": true,
+    "graph_primary_story": true,
+    "graph_primary_scenario": true,
+    "expansion_k": 6,
+    "graph_min_assertions": 3
   }
 }

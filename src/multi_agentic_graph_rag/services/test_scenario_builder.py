@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from multi_agentic_graph_rag.domain.identifiers import test_scenario_id
 from multi_agentic_graph_rag.domain.schemas import (
+    GenerationTrace,
     TestScenarioArtifact,
     TestScenarioBuildResult,
     TestScenarioModel,
@@ -26,6 +27,7 @@ def build_test_scenario_artifact(
     document_version_id: str,
     doc_version: str,
     generated: Sequence[tuple[UserStoryRecord, TestScenarioModel]],
+    traces: Mapping[str, GenerationTrace] | None = None,
 ) -> TestScenarioBuildResult:
     """Assign permanent ids/provenance and group coverage by story and requirement."""
     scenarios: dict[str, TestScenarioRecord] = {}
@@ -50,6 +52,7 @@ def build_test_scenario_artifact(
             story=story,
             scenario=scenario,
             scenario_id=scenario_id,
+            trace=traces.get(story.story_id) if traces else None,
         )
         coverage.setdefault(story.story_id, []).append(scenario_id)
         requirement_coverage.setdefault(story.requirement_id, []).append(scenario_id)
@@ -107,6 +110,10 @@ def project_test_scenario_artifact(
                 req_id=req_id,
                 source_req_id=record.source_req_id,
                 evidence_chunk_ids=list(record.evidence_chunk_ids),
+                generation_context_run_id=record.generation_context_run_id,
+                retrieved_assertion_ids=list(record.retrieved_assertion_ids),
+                retrieved_chunk_ids=list(record.retrieved_chunk_ids),
+                context_mode=record.context_mode,
             )
         )
     return TestScenarioArtifact(
@@ -128,7 +135,9 @@ def _to_record(
     story: UserStoryRecord,
     scenario: TestScenarioModel,
     scenario_id: str,
+    trace: GenerationTrace | None = None,
 ) -> TestScenarioRecord:
+    trace = trace or GenerationTrace()
     return TestScenarioRecord(
         scenario_id=scenario_id,
         story_id=story.story_id,
@@ -150,6 +159,10 @@ def _to_record(
         priority=scenario.priority,
         confidence=scenario.confidence,
         evidence_chunk_ids=list(story.evidence_chunk_ids),
+        generation_context_run_id=trace.generation_context_run_id,
+        retrieved_assertion_ids=list(trace.retrieved_assertion_ids),
+        retrieved_chunk_ids=list(trace.retrieved_chunk_ids),
+        context_mode=trace.context_mode,
     )
 
 

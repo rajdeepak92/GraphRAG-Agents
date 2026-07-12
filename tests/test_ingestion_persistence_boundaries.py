@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from multi_agentic_graph_rag.config.settings import (
     AppSettings,
+    KnowledgeGraphSettings,
     Neo4jSettings,
     PathsSettings,
     PostgresSettings,
@@ -235,6 +236,9 @@ def _settings(root: Path, *, postgres_mode: str, neo4j_mode: str) -> AppSettings
             mode=neo4j_mode,
             local_path=root / "runtime" / "neo4j.jsonl",
         ),
+        # Legacy chunk-only path (explicit GraphRAG opt-out): this suite exercises
+        # ingestion persistence boundaries, not knowledge-graph construction.
+        knowledge_graph=KnowledgeGraphSettings(enabled=False),
     )
 
 

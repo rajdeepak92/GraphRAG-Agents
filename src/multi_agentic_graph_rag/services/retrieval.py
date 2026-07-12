@@ -23,10 +23,20 @@ from multi_agentic_graph_rag.services.knowledge_context import (
     config_for_stage,
 )
 from multi_agentic_graph_rag.services.knowledge_retrieval import (
+    REASON_BELOW_MIN_ASSERTIONS,
+    REASON_KNOWLEDGE_DISABLED,
+    REASON_NO_MANDATORY_ANCHOR,
+    REASON_RETRIEVAL_ERROR,
+    REASON_SELECTED,
+    REASON_STAGE_NOT_PRIMARY,
     SOURCE_KNOWLEDGE,
+    STATUS_FALLBACK,
+    STATUS_SELECTED,
+    GraphPrimaryDecision,
     KnowledgeRetrievalConfig,
     build_context_snapshot,
     build_semantic_snapshot,
+    new_context_run_id,
 )
 
 T = TypeVar("T")
@@ -154,25 +164,27 @@ class RetrievalService:
             for rank, item in enumerate(selection.items, start=1)
         ]
 
-    def assemble_primary_context(
+    def decide_primary_context(
         self,
         *,
         requirement_text: str,
         document_version_id: str,
         evidence_chunk_ids: list[str],
         anchor_id: str = "",
-    ) -> SemanticContext | None:
-        """Assemble structured assertion context when the stage is graph-primary.
+    ) -> GraphPrimaryDecision:
+        """Assemble structured assertion context once and return a typed decision.
 
-        Returns ``None`` (legacy chunk fallback) when the knowledge channel is
-        off, the stage is not graph-primary, or the graph fails the grounding
-        gate — no mandatory anchor for this requirement, or fewer than
-        ``min_assertions`` selected assertions (plan §17 fallback conditions).
-        Never raises: any retrieval error degrades to the legacy path.
+        This is the single semantic-retrieval entry point: the assertion set is
+        assembled exactly once here, recorded to ``generation_context_*`` under one
+        ``context_run_id``, and (when the gate passes) returned for freezing into
+        the checkpoint and the generation prompt. The ``reason`` names precisely
+        why a fallback happened; callers emit the structured ``graph_fallback`` log
+        and degrade to the legacy chunk path. Never raises.
         """
         knowledge = self.knowledge
-        if knowledge is None or not knowledge.include_in_context:
-            return None
+        if knowledge is None:
+            return GraphPrimaryDecision(status=STATUS_FALLBACK, reason=REASON_KNOWLEDGE_DISABLED)
+        min_assertions = max(knowledge.min_assertions, 1)
         context = self._safe(
             lambda: assemble_semantic_context(
                 self.neo4j,
@@ -182,14 +194,40 @@ class RetrievalService:
                 evidence_chunk_ids=evidence_chunk_ids,
                 config=config_for_stage(knowledge.stage),
             ),
-            "semantic_primary",
+            "semantic",
             None,
         )
-        if context is None or not context.mandatory_anchor_ids:
-            return None
-        if len(context.items) < max(knowledge.min_assertions, 1):
-            return None
-        return context
+        if context is None:
+            return GraphPrimaryDecision(
+                status=STATUS_FALLBACK,
+                reason=REASON_RETRIEVAL_ERROR,
+                min_assertions=min_assertions,
+            )
+        # Record the semantic snapshot exactly once, under a single shared id, so
+        # shadow comparison, checkpoint freeze, and record persistence all agree.
+        context_run_id = self._record_semantic_snapshot(context)
+        assertion_count = len(context.items)
+        mandatory_count = len(context.mandatory_anchor_ids)
+
+        def _decide(status: str, reason: str, keep: bool) -> GraphPrimaryDecision:
+            return GraphPrimaryDecision(
+                status=status,
+                reason=reason,
+                context=context if keep else None,
+                assertion_count=assertion_count,
+                mandatory_anchor_count=mandatory_count,
+                min_assertions=min_assertions,
+                context_run_id=context_run_id,
+                metrics=dict(context.metrics),
+            )
+
+        if not knowledge.include_in_context:
+            return _decide(STATUS_FALLBACK, REASON_STAGE_NOT_PRIMARY, keep=False)
+        if not context.mandatory_anchor_ids:
+            return _decide(STATUS_FALLBACK, REASON_NO_MANDATORY_ANCHOR, keep=False)
+        if assertion_count < min_assertions:
+            return _decide(STATUS_FALLBACK, REASON_BELOW_MIN_ASSERTIONS, keep=False)
+        return _decide(STATUS_SELECTED, REASON_SELECTED, keep=True)
 
     def _retrieve(
         self,
@@ -322,7 +360,11 @@ class RetrievalService:
         selection: _Selection,
         knowledge_candidates: list[tuple[str, str, float]],
     ) -> None:
-        """Persist the retrieval snapshot(s) for shadow comparison; never blocks."""
+        """Persist the legacy chunk retrieval snapshot for shadow comparison.
+
+        The structured assertion channel is recorded separately and exactly once
+        by :meth:`decide_primary_context`, so this no longer re-assembles it.
+        """
         knowledge = self.knowledge
         recorder = knowledge.recorder if knowledge is not None else None
         if knowledge is None or recorder is None:
@@ -336,47 +378,25 @@ class RetrievalService:
             knowledge_candidates=[(chunk_id, score) for chunk_id, _, score in knowledge_candidates],
         )
         self._safe(lambda: recorder(run, items), "snapshot", None)
-        self._record_semantic_snapshot(
-            anchor_id=anchor_id,
-            requirement_text=requirement_text,
-            document_version_id=document_version_id,
-            evidence_chunk_ids=evidence_chunk_ids,
-        )
 
-    def _record_semantic_snapshot(
-        self,
-        *,
-        anchor_id: str,
-        requirement_text: str,
-        document_version_id: str,
-        evidence_chunk_ids: list[str],
-    ) -> None:
-        """Assemble and record the structured assertion snapshot (shadow §18).
+    def _record_semantic_snapshot(self, context: SemanticContext) -> str:
+        """Record the already-assembled structured assertion snapshot (§18) once.
 
-        Increment 2 contract: this records the knowledge-graph assertion channel
-        for shadow comparison only; it never feeds the generation prompt, so the
-        selected chunk context above is unchanged.
+        Returns the ``context_run_id`` used for the snapshot so the exact same id
+        is frozen into the checkpoint and persisted on the generated record. The
+        assertion set is assembled by the caller; this method never re-assembles
+        it, which is what guarantees a single production of the semantic context.
         """
         knowledge = self.knowledge
         recorder = knowledge.recorder if knowledge is not None else None
-        if knowledge is None or recorder is None:
-            return
-        context = self._safe(
-            lambda: assemble_semantic_context(
-                self.neo4j,
-                anchor_id=anchor_id,
-                query_text=requirement_text,
-                document_version_id=document_version_id,
-                evidence_chunk_ids=evidence_chunk_ids,
-                config=config_for_stage(knowledge.stage),
-            ),
-            "semantic",
-            None,
+        context_run_id = new_context_run_id()
+        if knowledge is None or recorder is None or not context.items:
+            return context_run_id
+        run, items = build_semantic_snapshot(
+            config=knowledge, context=context, context_run_id=context_run_id
         )
-        if context is None or not context.items:
-            return
-        run, items = build_semantic_snapshot(config=knowledge, context=context)
         self._safe(lambda: recorder(run, items), "semantic_snapshot", None)
+        return context_run_id
 
     def _dense(
         self,
@@ -399,6 +419,13 @@ class RetrievalService:
                 order = ranked
         return [ids[index] for index in order]
 
+    @property
+    def _log_step(self) -> str:
+        """Stage-specific retrieval log step (so scenario logs are not labelled
+        as user-story retrieval)."""
+        stage = self.knowledge.stage if self.knowledge is not None else "generation"
+        return f"{stage}.retrieve"
+
     def _safe(self, operation: Callable[[], T], label: str, default: T) -> T:
         try:
             return operation()
@@ -406,7 +433,7 @@ class RetrievalService:
             if self.logger is not None:
                 self.logger.warning(
                     "Hybrid retrieval step failed; continuing with partial context",
-                    step="user_stories.retrieve",
+                    step=self._log_step,
                     retrieval_step=label,
                     error=str(exc),
                     status="degraded",
@@ -418,7 +445,7 @@ class RetrievalService:
             return
         self.logger.warning(
             "Retrieval degraded for requirement; generating from limited context",
-            step="user_stories.retrieve",
+            step=self._log_step,
             document_version_id=document_version_id,
             source=source,
             status="degraded",

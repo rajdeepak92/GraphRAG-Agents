@@ -36,6 +36,9 @@ from multi_agentic_graph_rag.services.artifacts import (
 )
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger
+from multi_agentic_graph_rag.services.knowledge_graph_builder import (
+    build_and_project_knowledge_graph,
+)
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
 from multi_agentic_graph_rag.services.parsing import checksum_bytes, parse_document
 from multi_agentic_graph_rag.services.requirement_builder import (
@@ -292,6 +295,31 @@ def _run_pipeline(
                 store_responsibility="chunk_embeddings_only",
             )
         chroma.index_chunks(manifest, embedding_model)
+        if settings.knowledge_graph.enabled:
+            if logger is not None:
+                logger.info(
+                    "Building semantic knowledge graph for {document_version_id}",
+                    step="build_knowledge_graph",
+                    document_version_id=manifest.document_version_id,
+                    chunk_count=len(manifest.chunks),
+                    store_responsibility="source_knowledge_graph",
+                )
+            build_and_project_knowledge_graph(
+                project=manifest.project,
+                document_id=manifest.document_id,
+                document_version_id=manifest.document_version_id,
+                doc_version=manifest.version,
+                chunks=list(manifest.chunks),
+                reasoning_model=reasoning_model,
+                neo4j=neo4j,
+                logger=logger,
+            )
+            # Move the document's active-knowledge pointer only after a successful
+            # projection, so graph-primary generation reads a complete version.
+            neo4j.set_active_knowledge_version(
+                document_id=manifest.document_id,
+                document_version_id=manifest.document_version_id,
+            )
         coverage_ledger = None
         if settings.discovery.ledger_enabled:
             coverage_ledger = CoverageLedger(

@@ -29,6 +29,7 @@ from pydantic import Field, ValidationError
 from multi_agentic_graph_rag.domain.errors import CheckpointError
 from multi_agentic_graph_rag.domain.schemas import (
     AssertionContextItem,
+    GenerationTrace,
     SemanticContext,
     StrictModel,
 )
@@ -106,6 +107,7 @@ class ContextMapEntry(StrictModel):
     retrieval_metadata: list[RetrievalMetadataEntry] = Field(default_factory=list)
     context_mode: str = CONTEXT_MODE_CHUNKS
     assertions: list[AssertionContextItem] = Field(default_factory=list)
+    generation_context_run_id: str = ""
 
 
 class ContextMapCheckpoint(StrictModel):
@@ -179,13 +181,16 @@ def make_context_map_entry(
     provenance: Sequence[ChunkProvenance],
     story_id: str | None = None,
     semantic: SemanticContext | None = None,
+    generation_context_run_id: str = "",
 ) -> ContextMapEntry:
     """Build one loop-1 context-map entry from retrieval provenance (no text).
 
     When ``semantic`` is supplied (graph-primary), the selected assertions are
     frozen into the entry alongside the chunk provenance, so the structured
     context that feeds generation is recorded and reproduced identically on
-    resume — mirroring how chunk selection is frozen.
+    resume — mirroring how chunk selection is frozen. ``generation_context_run_id``
+    is the single id shared with the recorded semantic snapshot and later
+    persisted on the generated record.
     """
     metadata = [
         RetrievalMetadataEntry(
@@ -204,6 +209,22 @@ def make_context_map_entry(
         retrieval_metadata=metadata,
         context_mode=(CONTEXT_MODE_GRAPH_PRIMARY if semantic is not None else CONTEXT_MODE_CHUNKS),
         assertions=list(semantic.items) if semantic is not None else [],
+        generation_context_run_id=generation_context_run_id,
+    )
+
+
+def trace_from_entry(entry: ContextMapEntry) -> GenerationTrace:
+    """Derive the generation grounding trace from a frozen context-map entry.
+
+    Because it is derived from the checkpointed entry, the trace is reproduced
+    identically on resume — the persisted story/scenario records the exact context
+    that fed the LLM, not a re-retrieved approximation.
+    """
+    return GenerationTrace(
+        generation_context_run_id=entry.generation_context_run_id,
+        retrieved_assertion_ids=[item.assertion_id for item in entry.assertions],
+        retrieved_chunk_ids=list(entry.chunk_ids),
+        context_mode=entry.context_mode,
     )
 
 
@@ -310,6 +331,14 @@ def hydrate_context_map_entry(
             status="degraded",
         )
     if not chunks:
+        # All requested chunk ids were missing from the store. When the checkpoint
+        # froze a graph-primary assertion selection, that structured context is the
+        # actual grounding for generation and must survive missing chunk text — do
+        # not downgrade to the requirement-text fallback and silently drop it.
+        if entry.assertions:
+            return RetrievedContext(
+                chunks=[], source=entry.context_mode, assertions=list(entry.assertions)
+            )
         return RetrievedContext(chunks=[], source="requirement_text_fallback")
     if entry.assertions:
         return RetrievedContext(
@@ -475,6 +504,8 @@ def _dump_entry(entry: ContextMapEntry) -> dict[str, Any]:
     if not entry.assertions:
         # Legacy chunk-only entries stay byte-identical: omit graph-primary fields.
         exclude = exclude | {"context_mode", "assertions"}
+    if not entry.generation_context_run_id:
+        exclude = exclude | {"generation_context_run_id"}
     return entry.model_dump(mode="json", exclude=exclude)
 
 

@@ -312,33 +312,44 @@ def coverage(
     ) as session:
         settings = load_config()
         session.set_log_level(settings.log_level)
-        rows = PostgresStore(settings).load_coverage_status(
+        report = PostgresStore(settings).load_coverage_report(
             project=project,
             document_version_id=document_version_id,
         )
+        summary = report.summary
         session.logger.info(
             "Computed coverage for {project}",
             step="coverage",
             project=project,
-            requirement_count=len(rows),
+            requirement_count=summary.total_requirements,
+            story_coverage_pct=summary.story_coverage_pct,
+            scenario_coverage_pct=summary.scenario_coverage_pct,
             status="completed",
         )
         if json_output:
-            console.print_json(json.dumps(rows))
+            console.print_json(json.dumps(report.model_dump(mode="json")))
             return
         table = Table(title=f"Coverage — {project}")
         table.add_column("Requirement")
         table.add_column("Coverage")
         table.add_column("Stories", justify="right")
         table.add_column("Scenarios", justify="right")
-        for row in rows:
+        for row in report.requirements:
             table.add_row(
-                str(row["requirement_id"]),
-                str(row["coverage_status"]),
-                str(len(row["story_ids"])),
-                str(row["scenario_count"]),
+                row.requirement_id,
+                row.coverage_status,
+                str(len(row.story_ids)),
+                str(row.scenario_count),
             )
         console.print(table)
+        console.print(
+            f"[bold]Total active requirements:[/bold] {summary.total_requirements}  "
+            f"[bold]With stories:[/bold] {summary.requirements_with_stories} "
+            f"({summary.story_coverage_pct}%)  "
+            f"[bold]Scenario-covered:[/bold] {summary.requirements_scenario_covered} "
+            f"({summary.scenario_coverage_pct}%)  "
+            f"[bold]No story:[/bold] {summary.no_story_count}"
+        )
 
 
 @app.command("reconcile")

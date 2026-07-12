@@ -13,6 +13,9 @@ from multi_agentic_graph_rag.domain.identifiers import (
     user_story_evidence_id,
 )
 from multi_agentic_graph_rag.domain.schemas import (
+    CoverageReport,
+    CoverageRequirementRow,
+    CoverageSummary,
     DocumentManifest,
     GenerationContextItem,
     GenerationContextRun,
@@ -132,6 +135,7 @@ _EXPECTED_COLUMNS = {
         "confidence": {"double precision"},
         "status": _TEXT_TYPES,
         "origin": _TEXT_TYPES,
+        "generation_context_run_id": _TEXT_TYPES,
         "run_id": _TEXT_TYPES,
         "payload": {"jsonb"},
         "created_at": {"timestamp with time zone"},
@@ -174,6 +178,7 @@ _EXPECTED_COLUMNS = {
         "confidence": {"double precision"},
         "status": _TEXT_TYPES,
         "origin": _TEXT_TYPES,
+        "generation_context_run_id": _TEXT_TYPES,
         "run_id": _TEXT_TYPES,
         "payload": {"jsonb"},
         "created_at": {"timestamp with time zone"},
@@ -399,6 +404,7 @@ class PostgresStore:
                       confidence double precision not null default 0,
                       status text not null,
                       origin text not null default 'generation',
+                      generation_context_run_id text not null default '',
                       run_id text not null default '',
                       payload jsonb not null,
                       created_at timestamptz not null default now(),
@@ -435,6 +441,7 @@ class PostgresStore:
                       confidence double precision not null default 0,
                       status text not null,
                       origin text not null default 'generation',
+                      generation_context_run_id text not null default '',
                       run_id text not null default '',
                       payload jsonb not null,
                       created_at timestamptz not null default now(),
@@ -659,9 +666,18 @@ class PostgresStore:
                       add column if not exists metadata_json jsonb not null default '{}'::jsonb;
                     create index if not exists generation_context_items_assertion_idx
                       on generation_context_items(assertion_id);
+                    alter table user_stories
+                      add column if not exists generation_context_run_id text not null default '';
+                    alter table test_scenarios
+                      add column if not exists generation_context_run_id text not null default '';
+                    create index if not exists user_stories_generation_context_idx
+                      on user_stories(generation_context_run_id);
+                    create index if not exists test_scenarios_generation_context_idx
+                      on test_scenarios(generation_context_run_id);
                     insert into schema_migrations(version)
                     values ('0001_version_lineage_inline'),
-                           ('0002_context_item_assertion_columns')
+                           ('0002_context_item_assertion_columns'),
+                           ('0003_generation_context_run_id')
                     on conflict (version) do nothing;
                     """
                 )
@@ -960,8 +976,8 @@ class PostgresStore:
                   (story_id, display_id, requirement_id, requirement_display_id,
                    requirement_revision_id, source_req_id, project, document_id,
                    document_version_id, doc_version, origin_version, title, priority,
-                   confidence, status, origin, run_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   confidence, status, origin, generation_context_run_id, run_id, payload)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (story_id) do update
                 set display_id = excluded.display_id,
                     requirement_display_id = excluded.requirement_display_id,
@@ -975,6 +991,7 @@ class PostgresStore:
                     confidence = excluded.confidence,
                     status = excluded.status,
                     origin = excluded.origin,
+                    generation_context_run_id = excluded.generation_context_run_id,
                     run_id = excluded.run_id,
                     payload = excluded.payload,
                     updated_at = now()
@@ -996,6 +1013,7 @@ class PostgresStore:
                     record.confidence,
                     record.status,
                     record.origin,
+                    record.generation_context_run_id,
                     run_id,
                     json.dumps(record.model_dump(mode="json")),
                 ),
@@ -1048,6 +1066,7 @@ class PostgresStore:
                     "confidence": record.confidence,
                     "status": record.status,
                     "origin": record.origin,
+                    "generation_context_run_id": record.generation_context_run_id,
                     "run_id": run_id,
                     "user_story": record.model_dump(mode="json"),
                 },
@@ -1216,9 +1235,10 @@ class PostgresStore:
                   (scenario_id, display_id, story_id, story_display_id, requirement_id,
                    requirement_display_id, project, document_id, document_version_id,
                    doc_version, requirement_revision_id, source_req_id, origin_version,
-                   title, scenario_type, priority, confidence, status, origin, run_id, payload)
+                   title, scenario_type, priority, confidence, status, origin,
+                   generation_context_run_id, run_id, payload)
                 values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (scenario_id) do update
                 set display_id = excluded.display_id,
                     story_display_id = excluded.story_display_id,
@@ -1234,6 +1254,7 @@ class PostgresStore:
                     confidence = excluded.confidence,
                     status = excluded.status,
                     origin = excluded.origin,
+                    generation_context_run_id = excluded.generation_context_run_id,
                     run_id = excluded.run_id,
                     payload = excluded.payload,
                     updated_at = now()
@@ -1258,6 +1279,7 @@ class PostgresStore:
                     record.confidence,
                     record.status,
                     record.origin,
+                    record.generation_context_run_id,
                     run_id,
                     json.dumps(record.model_dump(mode="json")),
                 ),
@@ -1316,6 +1338,7 @@ class PostgresStore:
                     "confidence": record.confidence,
                     "status": record.status,
                     "origin": record.origin,
+                    "generation_context_run_id": record.generation_context_run_id,
                     "run_id": run_id,
                     "test_scenario": record.model_dump(mode="json"),
                 },
@@ -1379,10 +1402,32 @@ class PostgresStore:
                 project=project, document_version_id=document_version_id
             )
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "select requirement_id, status from requirements where project = %s",
-                (project,),
-            )
+            # Denominator = active requirement lineages for the project. When a
+            # document version is requested, scope membership through evidence
+            # *presence in that version* (distinct requirement_evidence rows), not
+            # first_seen_document_version_id, because a lineage that first appeared
+            # in an earlier version can legitimately recur in a later one.
+            if document_version_id is not None:
+                cursor.execute(
+                    """
+                    select r.requirement_id, r.status
+                    from requirements r
+                    where r.project = %s
+                      and r.status = 'active'
+                      and exists (
+                          select 1 from requirement_evidence re
+                          where re.requirement_id = r.requirement_id
+                            and re.document_version_id = %s
+                      )
+                    """,
+                    (project, document_version_id),
+                )
+            else:
+                cursor.execute(
+                    "select requirement_id, status from requirements "
+                    "where project = %s and status = 'active'",
+                    (project,),
+                )
             requirements = [(str(r[0]), str(r[1])) for r in cursor.fetchall()]
 
             story_sql = (
@@ -1407,6 +1452,24 @@ class PostgresStore:
             scenario_story_ids = [str(r[0]) for r in cursor.fetchall()]
         return _compute_coverage(requirements, stories, scenario_story_ids)
 
+    def load_coverage_report(
+        self,
+        *,
+        project: str,
+        document_version_id: str | None = None,
+    ) -> CoverageReport:
+        """Strict per-requirement coverage with a deterministic summary rollup.
+
+        Identical version-scoping semantics to :meth:`load_coverage_status` in
+        both PostgreSQL and local-JSON modes.
+        """
+        rows = self.load_coverage_status(project=project, document_version_id=document_version_id)
+        return build_coverage_report(
+            project=project,
+            document_version_id=document_version_id,
+            rows=rows,
+        )
+
     def _local_coverage_status(
         self,
         *,
@@ -1414,10 +1477,25 @@ class PostgresStore:
         document_version_id: str | None,
     ) -> list[dict[str, Any]]:
         rows = self._read_local_rows()
+        requirement_ids_in_version: set[str] | None = None
+        if document_version_id is not None:
+            requirement_ids_in_version = {
+                str(row.get("requirement_id"))
+                for row in rows
+                if row.get("kind") == "requirement_evidence"
+                and row.get("project") == project
+                and row.get("document_version_id") == document_version_id
+            }
         requirements = [
             (str(row.get("requirement_id")), str(row.get("status", "active")))
             for row in rows
-            if row.get("kind") == "requirement" and row.get("project") == project
+            if row.get("kind") == "requirement"
+            and row.get("project") == project
+            and str(row.get("status", "active")) == "active"
+            and (
+                requirement_ids_in_version is None
+                or str(row.get("requirement_id")) in requirement_ids_in_version
+            )
         ]
 
         def _matches_version(row: dict[str, Any]) -> bool:
@@ -2589,3 +2667,53 @@ def _compute_coverage(
             }
         )
     return result
+
+
+def _safe_percentage(numerator: int, denominator: int) -> float:
+    """Zero-safe percentage rounded deterministically to two decimals."""
+    if denominator <= 0:
+        return 0.0
+    return round(100.0 * numerator / denominator, 2)
+
+
+def build_coverage_report(
+    *,
+    project: str,
+    document_version_id: str | None,
+    rows: list[dict[str, Any]],
+) -> CoverageReport:
+    """Roll per-requirement coverage rows into a strict, zero-safe report."""
+    requirement_rows = [
+        CoverageRequirementRow(
+            requirement_id=str(row["requirement_id"]),
+            requirement_status=str(row["requirement_status"]),
+            coverage_status=str(row["coverage_status"]),
+            story_ids=[str(sid) for sid in row.get("story_ids", [])],
+            scenario_count=int(row.get("scenario_count", 0)),
+        )
+        for row in rows
+    ]
+    total = len(requirement_rows)
+    with_stories = sum(
+        1
+        for row in requirement_rows
+        if row.coverage_status in ("story_covered", "scenario_covered")
+    )
+    scenario_covered = sum(
+        1 for row in requirement_rows if row.coverage_status == "scenario_covered"
+    )
+    no_story = sum(1 for row in requirement_rows if row.coverage_status == "no_story")
+    summary = CoverageSummary(
+        total_requirements=total,
+        requirements_with_stories=with_stories,
+        requirements_scenario_covered=scenario_covered,
+        no_story_count=no_story,
+        story_coverage_pct=_safe_percentage(with_stories, total),
+        scenario_coverage_pct=_safe_percentage(scenario_covered, total),
+    )
+    return CoverageReport(
+        project=project,
+        document_version_id=document_version_id,
+        requirements=requirement_rows,
+        summary=summary,
+    )

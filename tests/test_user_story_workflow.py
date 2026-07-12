@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from multi_agentic_graph_rag.config.settings import (
     AppSettings,
+    KnowledgeGraphSettings,
     Neo4jSettings,
     PathsSettings,
     PostgresSettings,
@@ -212,6 +213,8 @@ def _settings(root: Path) -> AppSettings:
             mode="local_json",
             local_path=root / "runtime" / "neo4j.jsonl",
         ),
+        # Legacy chunk-only path (explicit GraphRAG opt-out).
+        knowledge_graph=KnowledgeGraphSettings(enabled=False),
     )
 
 

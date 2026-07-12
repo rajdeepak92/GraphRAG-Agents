@@ -16,7 +16,6 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from multi_agentic_graph_rag.agents.knowledge_extraction_agent import KnowledgeExtractionAgent
 from multi_agentic_graph_rag.common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
@@ -24,7 +23,6 @@ from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import ConfigurationError
 from multi_agentic_graph_rag.domain.schemas import (
-    KnowledgeGraphArtifact,
     KnowledgeGraphRequest,
     KnowledgeGraphResult,
 )
@@ -34,11 +32,8 @@ from multi_agentic_graph_rag.observability.session import (
     command_run_id,
     command_session,
 )
-from multi_agentic_graph_rag.services.assertion_canonicalization import canonicalize_assertions
-from multi_agentic_graph_rag.services.entity_resolution import resolve_entities
-from multi_agentic_graph_rag.services.text_unit_segmentation import (
-    attach_evidence_text_units,
-    segment_version_chunks,
+from multi_agentic_graph_rag.services.knowledge_graph_builder import (
+    build_and_project_knowledge_graph,
 )
 
 
@@ -119,7 +114,6 @@ def _run_pipeline(
 
         reasoning_model = create_reasoning_model(settings, logger=logger, run_dir=run_dir)
         _warmup_reasoning_model(reasoning_model)
-        neo4j.ensure_knowledge_schema()
 
         metadata = neo4j.fetch_version_metadata(request.document_version_id)
         if metadata is None:
@@ -146,67 +140,22 @@ def _run_pipeline(
                 project=request.project,
             )
 
-        text_units = segment_version_chunks(
-            document_version_id=request.document_version_id,
-            chunks=chunks,
-        )
-        if logger is not None:
-            logger.info(
-                "Segmented {chunk_count} chunks into {text_unit_count} text units",
-                step="segment_text_units",
-                chunk_count=len(chunks),
-                text_unit_count=len(text_units),
-                document_version_id=request.document_version_id,
-            )
-        neo4j.project_text_units(request.document_version_id, text_units)
-
-        agent = KnowledgeExtractionAgent(reasoning_model, logger=logger)
-        extraction = agent.run(
-            project=request.project,
-            version=metadata["version"],
-            chunks=chunks,
-        )
-        existing_entities = neo4j.fetch_project_entities(request.project)
-        resolution = resolve_entities(
-            project=request.project,
-            extraction=extraction,
-            existing_entities=existing_entities,
-            chunk_text_by_id={chunk.chunk_id: chunk.text for chunk in chunks},
-        )
-        assertions, evidence = canonicalize_assertions(
-            project=request.project,
-            document_id=metadata["document_id"],
-            document_version_id=request.document_version_id,
-            extraction=extraction,
-            resolution=resolution,
-        )
-        evidence = attach_evidence_text_units(
-            evidence,
-            chunks_by_id={chunk.chunk_id: chunk for chunk in chunks},
-            text_units=text_units,
-        )
-        artifact = KnowledgeGraphArtifact(
+        artifact = build_and_project_knowledge_graph(
             project=request.project,
             document_id=metadata["document_id"],
             document_version_id=request.document_version_id,
             doc_version=metadata["version"],
-            text_units=text_units,
-            entities=resolution.entities,
-            mentions=resolution.mentions,
-            assertions=assertions,
-            evidence=evidence,
+            chunks=chunks,
+            reasoning_model=reasoning_model,
+            neo4j=neo4j,
+            logger=logger,
         )
-        if logger is not None:
-            logger.info(
-                "Projecting source-knowledge graph into Neo4j",
-                step="project_knowledge_graph",
-                document_version_id=request.document_version_id,
-                entity_count=len(artifact.entities),
-                assertion_count=len(artifact.assertions),
-                evidence_count=len(artifact.evidence),
-                store_responsibility="source_knowledge_graph",
-            )
-        neo4j.project_knowledge_graph(artifact)
+        # The standalone stage moves the document's active-knowledge pointer to
+        # this version only after a successful projection.
+        neo4j.set_active_knowledge_version(
+            document_id=metadata["document_id"],
+            document_version_id=request.document_version_id,
+        )
 
         out_dir = _output_dir(settings, request.project, state["run_id"])
         out_dir.mkdir(parents=True, exist_ok=True)
