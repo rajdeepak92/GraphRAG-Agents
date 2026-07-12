@@ -1,6 +1,6 @@
 """Domain enums."""
 
-from common_defs import StatusName
+from multi_agentic_graph_rag.common_defs import StatusName
 
 RunStatus = StatusName
 DocumentVersionStatus = StatusName

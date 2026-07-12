@@ -160,6 +160,12 @@ TEST_SCENARIO_SPARSE_K=8
 TEST_SCENARIO_NEIGHBOR_WINDOW=1
 TEST_SCENARIO_MAX_NEW_TOKENS=
 
+KNOWLEDGE_GRAPH_ENABLED=false
+KNOWLEDGE_GRAPH_SHADOW_MODE=true
+GRAPH_PRIMARY_STORY=false
+GRAPH_PRIMARY_SCENARIO=false
+KNOWLEDGE_GRAPH_EXPANSION_K=6
+
 ENABLE_HFIL=false
 HFIL_MATCH_THRESHOLD_PCT=60.0
 HFIL_OUT_OF_CONTEXT_PCT=5.0
@@ -380,6 +386,32 @@ Verify the requirement artifact:
 uv run python -m multi_agentic_graph_rag artifact verify `
   generated\PROJECT_1\req\$RUN_ID\requirements_full.json
 ```
+
+### Optional: Build The Source-Knowledge Graph
+
+After ingestion you can extract an evidence-grounded source-knowledge graph
+(entities plus subject/predicate/object assertions with exact-quote evidence and
+atomic text units) and project it into Neo4j. This stage is optional, uses the
+reasoning model only, and does not change requirement/story/scenario generation
+unless the knowledge-graph flags are enabled (see section 6).
+
+Use the `document_version_id` (`DV-...`) reported by `ingest` (it is also present
+in the requirement artifact):
+
+```powershell
+uv run python -m multi_agentic_graph_rag build-knowledge-graph `
+  --project PROJECT_1 `
+  --document-version-id <DV-ID> `
+  --reasoning-provider azure_openai `
+  --json-output
+```
+
+The audit copy is written to
+`generated\PROJECT_1\kg\<RUN_ID>\knowledge_graph.json`; Neo4j remains the source
+of truth for the graph. With `KNOWLEDGE_GRAPH_ENABLED=true` and shadow mode on,
+later story/scenario retrieval records comparison snapshots to PostgreSQL without
+changing generated output; the `GRAPH_PRIMARY_*` flags opt a stage into
+assertion-hop retrieval.
 
 ## 13. Generate User Stories With Azure + Hugging Face Reranker
 

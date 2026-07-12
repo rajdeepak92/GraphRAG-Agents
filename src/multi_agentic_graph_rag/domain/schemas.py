@@ -889,3 +889,369 @@ class IngestionResult(StrictModel):
     requirement_ids: list[str]
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+
+# --- Knowledge graph (source-semantics layer built by ``marag build-knowledge-graph``) ---
+
+_ENTITY_PLACEHOLDER_RE = re.compile(
+    r"^(?:entity|thing|item|object|subject|actor|system|component|tbd|todo|"
+    r"placeholder|n/?a|na|none|null|unknown)$",
+    re.I,
+)
+
+_ASSERTION_MODALITIES = ("fact", "shall", "must", "should", "may", "must_not")
+
+
+def _normalize_assertion_modality(value: object) -> str:
+    if value is None:
+        return "fact"
+    text = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    if text in {"", "null", "none", "n/a", "na", "unknown"}:
+        return "fact"
+    if text in {"must_not", "shall_not", "may_not", "should_not", "prohibited", "forbidden"}:
+        return "must_not"
+    if text in _ASSERTION_MODALITIES:
+        return text
+    if text in {"mandatory", "required", "requirement"}:
+        return "must"
+    if text in {"recommended", "recommendation"}:
+        return "should"
+    if text in {"optional", "permitted", "allowed"}:
+        return "may"
+    return "fact"
+
+
+class LLMExtractedEntity(StrictModel):
+    """One entity exactly as returned by the extraction model for a single chunk."""
+
+    name: str
+    entity_type: str = "concept"
+
+    @field_validator("name")
+    @classmethod
+    def meaningful_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("entity name must not be empty")
+        if _ENTITY_PLACEHOLDER_RE.match(value):
+            raise ValueError(f"entity name must not be a placeholder: {value!r}")
+        return value
+
+    @field_validator("entity_type", mode="before")
+    @classmethod
+    def default_entity_type(cls, value: object) -> str:
+        if value is None:
+            return "concept"
+        text = str(value).strip()
+        if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
+            return "concept"
+        return text
+
+
+class LLMExtractedAssertion(StrictModel):
+    """One assertion exactly as returned by the extraction model for a single chunk.
+
+    ``subject`` and ``object_name`` reference entities by name from the same chunk
+    output. Exactly one of ``object_name`` / ``object_literal`` must be non-empty;
+    the repo-wide LLM convention is an empty string for absent optional fields.
+    """
+
+    subject: str
+    predicate: str
+    object_name: str = ""
+    object_literal: str = ""
+    modality: Literal["fact", "shall", "must", "should", "may", "must_not"] = "fact"
+    polarity: Literal["positive", "negative"] = "positive"
+    explicitness: Literal["explicit", "inferred"] = "explicit"
+    condition: str = ""
+    quote: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("subject", "predicate", "quote")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+    @field_validator("modality", mode="before")
+    @classmethod
+    def normalize_modality(cls, value: object) -> str:
+        return _normalize_assertion_modality(value)
+
+    @field_validator("polarity", mode="before")
+    @classmethod
+    def normalize_polarity(cls, value: object) -> str:
+        text = str(value).strip().lower() if value is not None else ""
+        if text in {"negative", "neg", "not", "false"}:
+            return "negative"
+        return "positive"
+
+    @field_validator("explicitness", mode="before")
+    @classmethod
+    def normalize_explicitness(cls, value: object) -> str:
+        text = str(value).strip().lower() if value is not None else ""
+        if text in {"inferred", "implicit", "implied", "derived"}:
+            return "inferred"
+        return "explicit"
+
+    @model_validator(mode="after")
+    def exactly_one_object(self) -> LLMExtractedAssertion:
+        has_entity = bool(self.object_name.strip())
+        has_literal = bool(self.object_literal.strip())
+        if has_entity == has_literal:
+            raise ValueError(
+                "exactly one of object_name or object_literal must be non-empty "
+                f"(subject={self.subject!r}, predicate={self.predicate!r})"
+            )
+        return self
+
+
+class KnowledgeExtractionChunkOutput(StrictModel):
+    entities: list[LLMExtractedEntity] = Field(default_factory=list)
+    assertions: list[LLMExtractedAssertion] = Field(default_factory=list)
+
+
+class EntityCandidate(StrictModel):
+    """A grounded per-chunk entity occurrence awaiting resolution."""
+
+    chunk_id: str
+    surface_text: str
+    normalized_name: str
+    entity_type: str
+
+
+class AssertionCandidate(StrictModel):
+    """A grounded per-chunk assertion occurrence awaiting canonicalization."""
+
+    chunk_id: str
+    subject_name: str
+    predicate: str
+    object_name: str | None = None
+    object_literal: str | None = None
+    modality: str
+    polarity: Literal["positive", "negative"]
+    explicitness: Literal["explicit", "inferred"]
+    condition: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    source_trace: SourceTrace
+
+
+class ChunkKnowledgeCandidates(StrictModel):
+    chunk_id: str
+    entities: list[EntityCandidate] = Field(default_factory=list)
+    assertions: list[AssertionCandidate] = Field(default_factory=list)
+
+
+class KnowledgeExtractionOutput(StrictModel):
+    chunks: list[ChunkKnowledgeCandidates] = Field(default_factory=list)
+
+
+class TextUnit(StrictModel):
+    """An atomic source segment (sentence/bullet) with source-level offsets.
+
+    Text units are derived deterministically from the ingested chunks at
+    knowledge-graph build time; overlapping chunk windows dedupe to one unit
+    per source span, and ``chunk_ids`` lists every chunk containing the unit.
+    """
+
+    text_unit_id: str
+    document_version_id: str
+    ordinal: int
+    unit_type: Literal["sentence", "bullet"]
+    text: str
+    start_char: int
+    end_char: int
+    page: int | None = None
+    section: str | None = None
+    chunk_ids: list[str] = Field(default_factory=list)
+
+
+class EntityRecord(StrictModel):
+    """A resolved project-scoped canonical entity."""
+
+    entity_id: str
+    project: str
+    canonical_name: str
+    normalized_name: str
+    entity_type: str
+    aliases: list[str] = Field(default_factory=list)
+
+
+class EntityMentionRecord(StrictModel):
+    """One grounded occurrence of an entity inside a chunk."""
+
+    mention_id: str
+    entity_id: str
+    chunk_id: str
+    surface_text: str
+    start_char: int | None = None
+    end_char: int | None = None
+
+
+class AssertionRecord(StrictModel):
+    """A canonical (deduplicated) assertion scoped to one document version."""
+
+    assertion_id: str
+    assertion_key: str
+    project: str
+    document_id: str
+    document_version_id: str
+    subject_entity_id: str
+    predicate: str
+    object_entity_id: str | None = None
+    object_literal: str | None = None
+    modality: str
+    polarity: str
+    explicitness: str
+    condition: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    display_text: str
+
+
+class AssertionEvidenceRecord(StrictModel):
+    """One exact source occurrence supporting a canonical assertion."""
+
+    evidence_id: str
+    assertion_id: str
+    source_trace: SourceTrace
+    text_unit_ids: list[str] = Field(default_factory=list)
+
+
+class KnowledgeGraphArtifact(StrictModel):
+    artifact_schema_version: Literal["1.0-knowledge-graph"] = "1.0-knowledge-graph"
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    text_units: list[TextUnit] = Field(default_factory=list)
+    entities: list[EntityRecord] = Field(default_factory=list)
+    mentions: list[EntityMentionRecord] = Field(default_factory=list)
+    assertions: list[AssertionRecord] = Field(default_factory=list)
+    evidence: list[AssertionEvidenceRecord] = Field(default_factory=list)
+
+
+class KnowledgeGraphRequest(StrictModel):
+    project: str
+    document_version_id: str
+    reasoning_provider: str | None = None
+
+    @field_validator("project", "document_version_id")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
+class KnowledgeGraphResult(StrictModel):
+    run_id: str
+    status: str
+    project: str
+    document_id: str
+    document_version_id: str
+    doc_version: str
+    artifact_path: Path
+    chunk_count: int
+    entity_count: int
+    assertion_count: int
+    evidence_count: int
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class GenerationContextRun(StrictModel):
+    """One retrieval invocation snapshot (shadow comparison / audit)."""
+
+    context_run_id: str
+    stage: str
+    anchor_id: str
+    project: str = ""
+    document_version_id: str
+    source: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class GenerationContextItem(StrictModel):
+    """One candidate or selected item inside a retrieval snapshot.
+
+    The base fields (``item_id``/``source``/``score``/``selected``) describe the
+    legacy chunk-shaped snapshot. The additive assertion fields carry the
+    structured knowledge-graph retrieval channel (schema §18): they stay ``None``
+    for chunk items so historical rows keep validating.
+    """
+
+    context_run_id: str
+    rank: int
+    item_type: str = "chunk"
+    item_id: str
+    source: str
+    score: float | None = None
+    selected: bool = True
+    assertion_id: str | None = None
+    text_unit_id: str | None = None
+    entity_id: str | None = None
+    predicate: str | None = None
+    hop_count: int | None = None
+    normalized_score: float | None = None
+    reranker_score: float | None = None
+    mandatory: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssertionEvidenceContext(StrictModel):
+    """One exact source occurrence backing an assertion in retrieval context."""
+
+    text_unit_id: str | None = None
+    chunk_id: str
+    quote: str
+    page: int | None = None
+    section: str | None = None
+    start_char: int | None = None
+    end_char: int | None = None
+
+
+class AssertionContextItem(StrictModel):
+    """One structured, evidence-backed assertion selected for generation.
+
+    This is the bounded semantic-context unit (schema §14) that replaces raw
+    chunk text: subject/predicate/object plus modality, polarity, condition,
+    confidence, retrieval provenance, and exact TextUnit evidence.
+    """
+
+    assertion_id: str
+    subject_entity_id: str
+    subject_name: str
+    subject_type: str
+    predicate: str
+    object_entity_id: str | None = None
+    object_name: str | None = None
+    object_literal: str | None = None
+    modality: str
+    polarity: str
+    explicitness: str
+    condition: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    hop_count: int = 0
+    source_channel: str
+    mandatory: bool = False
+    retrieval_score: float = 0.0
+    evidence: list[AssertionEvidenceContext] = Field(default_factory=list)
+
+
+class SemanticContext(StrictModel):
+    """The bounded structured assertion context assembled for one anchor.
+
+    Shadow-mode contract: generation prompts are unchanged; this payload is only
+    recorded as a retrieval snapshot until a stage's graph-primary flag is set.
+    """
+
+    stage: str
+    anchor_id: str
+    document_version_id: str
+    items: list[AssertionContextItem] = Field(default_factory=list)
+    mandatory_anchor_ids: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)

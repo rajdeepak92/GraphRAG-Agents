@@ -22,6 +22,10 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
 from multi_agentic_graph_rag.observability.session import RunSession
+from multi_agentic_graph_rag.services.knowledge_context import (
+    authoritative_related,
+    render_assertion_lines,
+)
 from multi_agentic_graph_rag.services.retrieval import RetrievedContext
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
@@ -219,15 +223,10 @@ def _build_test_scenario_prompt(
     linked_requirement = requirement_text or (
         "(requirement text unavailable; rely on the user story and retrieved context)"
     )
-    if context.chunks:
-        context_block = "\n".join(
-            f"[{index}] {chunk.text}" for index, chunk in enumerate(context.chunks, start=1)
-        )
+    if context.assertions:
+        context_section = _render_assertion_context(context)
     else:
-        context_block = (
-            "(no additional retrieved context; derive strictly from the user story and "
-            "linked requirement)"
-        )
+        context_section = _render_chunk_context(context)
 
     feedback = ""
     if validation_error:
@@ -244,7 +243,49 @@ def _build_test_scenario_prompt(
         f"{feedback}"
         f"User story:\n{story_json}\n\n"
         f"Linked requirement:\n{linked_requirement}\n\n"
-        f"Retrieved context:\n{context_block}\n"
+        f"{context_section}\n"
+    )
+
+
+def _render_chunk_context(context: RetrievedContext) -> str:
+    if context.chunks:
+        context_block = "\n".join(
+            f"[{index}] {chunk.text}" for index, chunk in enumerate(context.chunks, start=1)
+        )
+    else:
+        context_block = (
+            "(no additional retrieved context; derive strictly from the user story and "
+            "linked requirement)"
+        )
+    return f"Retrieved context:\n{context_block}"
+
+
+def _render_assertion_context(context: RetrievedContext) -> str:
+    """Structured assertion context for scenario generation (plan §15).
+
+    Authoritative facts (mandatory / hop-0) ground the expected results; related
+    facts (hop >= 1) supply constraints/conditions to probe as test dimensions
+    but are not, on their own, sufficient to assert a mandatory expected result.
+    """
+    authoritative, related = authoritative_related(context.assertions)
+    authoritative_block = render_assertion_lines(authoritative)
+    related_block = render_assertion_lines(related)
+    excerpts = ""
+    if context.chunks:
+        chunk_block = "\n".join(
+            f"[{index}] {chunk.text}" for index, chunk in enumerate(context.chunks, start=1)
+        )
+        excerpts = f"\n\nSupporting source excerpts (for wording only):\n{chunk_block}"
+    return (
+        "AUTHORITATIVE FACTS FOR THIS STORY (grounded in the story's linked requirement "
+        "evidence; every expected result must be supported by these, the acceptance "
+        "criteria, or the linked requirement):\n"
+        f"{authoritative_block}\n\n"
+        "RELATED CONSTRAINTS AND CONDITIONS (probe these as positive/negative/boundary/"
+        "precondition/timeout test dimensions; do not assert a mandatory expected result "
+        "from an unsupported related fact alone):\n"
+        f"{related_block}"
+        f"{excerpts}"
     )
 
 

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from common_defs import IdentifierPrefix
+from multi_agentic_graph_rag.common_defs import IdentifierPrefix
 
 _SAFE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -192,6 +192,90 @@ def test_scenario_evidence_id(
 
 
 test_scenario_evidence_id.__test__ = False  # type: ignore[attr-defined]
+
+
+def text_unit_id(
+    document_version_identifier: str,
+    start_char: int,
+    end_char: int,
+    text: str,
+) -> str:
+    token = stable_token(document_version_identifier, start_char, end_char, text, length=14)
+    return f"{IdentifierPrefix.TEXTUNIT.value}{token}"
+
+
+def entity_id(project: str, normalized_name: str, entity_type: str) -> str:
+    return (
+        f"{IdentifierPrefix.ENTITY.value}"
+        f"{stable_token(project, entity_type, normalized_name, length=14)}"
+    )
+
+
+def entity_mention_id(
+    entity_identifier: str,
+    chunk_identifier: str,
+    surface_text: str,
+) -> str:
+    return (
+        f"{IdentifierPrefix.MENTION.value}"
+        f"{stable_token(entity_identifier, chunk_identifier, surface_text, length=14)}"
+    )
+
+
+def assertion_key(
+    *,
+    project: str,
+    subject_entity_identifier: str,
+    predicate: str,
+    object_entity_identifier: str | None,
+    object_literal: str | None,
+    modality: str,
+    polarity: str,
+    condition: str | None,
+) -> str:
+    """Project-scoped semantic identity for an assertion.
+
+    Modality is part of the identity: ``shall X`` and ``may X`` are different
+    obligations and must not merge. Explicitness stays out; an explicit and an
+    inferred statement of the same claim merge with explicit winning.
+    """
+    return stable_token(
+        project,
+        subject_entity_identifier,
+        predicate,
+        object_entity_identifier or "",
+        object_literal or "",
+        modality,
+        polarity,
+        condition or "",
+        length=16,
+    )
+
+
+def assertion_id(assertion_key_token: str, document_version_identifier: str) -> str:
+    return (
+        f"{IdentifierPrefix.ASSERTION.value}"
+        f"{stable_token(assertion_key_token, document_version_identifier, length=14)}"
+    )
+
+
+def assertion_evidence_id(
+    *,
+    assertion_identifier: str,
+    chunk_identifier: str,
+    quote: str,
+    start_char: int,
+    end_char: int,
+) -> str:
+    token = stable_token(
+        assertion_identifier,
+        chunk_identifier,
+        quote,
+        start_char,
+        end_char,
+        length=14,
+    )
+    return f"{IdentifierPrefix.ASTEVID.value}{token}"
 
 
 def requirement_delta_event_id(

@@ -1,6 +1,6 @@
 """Provider name constants."""
 
-from common_defs import ProviderName
+from multi_agentic_graph_rag.common_defs import ProviderName
 
 ReasoningProvider = ProviderName
 EmbeddingProvider = ProviderName

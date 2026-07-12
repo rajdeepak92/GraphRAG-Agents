@@ -12,8 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from common_defs import IdentifierPrefix, PathDef, RuntimeCommand
-
+from multi_agentic_graph_rag.common_defs import IdentifierPrefix, PathDef, RuntimeCommand
 from multi_agentic_graph_rag.observability.logging import RunLogger, session_slug
 
 

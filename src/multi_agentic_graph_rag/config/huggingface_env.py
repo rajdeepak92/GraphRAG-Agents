@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from common_defs import EnvVar
+from multi_agentic_graph_rag.common_defs import EnvVar
 
 HF_TOKEN_ALIASES = (
     EnvVar.HF_TOKEN.value,

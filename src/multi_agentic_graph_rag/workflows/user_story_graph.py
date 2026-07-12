@@ -9,8 +9,8 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
-from common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGenerationAgent
+from multi_agentic_graph_rag.common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
@@ -19,6 +19,7 @@ from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import CheckpointError, ConfigurationError
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
+    SemanticContext,
     UserStoryBuildResult,
     UserStoryModel,
     UserStoryRecord,
@@ -52,6 +53,7 @@ from multi_agentic_graph_rag.services.generation_checkpoint import (
     write_context_map_checkpoint,
     write_generation_progress,
 )
+from multi_agentic_graph_rag.services.knowledge_retrieval import build_knowledge_retrieval_config
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
     load_requirement_source_from_full_payload,
@@ -176,6 +178,13 @@ def _run_pipeline(
             reranker_model=reranker_model,
             settings=settings.user_story,
             logger=logger,
+            knowledge=build_knowledge_retrieval_config(
+                settings,
+                stage=STAGE_USER_STORY,
+                project=source.project,
+                primary=settings.knowledge_graph.graph_primary_story,
+                recorder=postgres.record_generation_context,
+            ),
         )
         agent = UserStoryGenerationAgent(reasoning_model, logger=logger)
         out_dir = _output_dir(request, settings, source, state["run_id"])
@@ -290,6 +299,37 @@ def _run_pipeline(
         raise
 
 
+def _assemble_story_semantic(
+    *,
+    retrieval: RetrievalService,
+    requirement: RequirementInput,
+    document_version_id: str,
+    logger: RunLogger | None,
+) -> SemanticContext | None:
+    """Graph-primary story context (loop 1), or ``None`` for the legacy chunk path.
+
+    Assembled once in loop 1 and frozen into the context map so the structured
+    context is reproduced identically on resume. Returns ``None`` (fallback) when
+    the stage is not graph-primary or the grounding gate is not met.
+    """
+    context = retrieval.assemble_primary_context(
+        requirement_text=requirement.requirement_text,
+        document_version_id=document_version_id,
+        evidence_chunk_ids=list(requirement.evidence_chunk_ids),
+        anchor_id=requirement.requirement_id,
+    )
+    if logger is not None and context is not None:
+        logger.info(
+            "Graph-primary story context selected",
+            step="user_stories.context_map",
+            requirement_id=requirement.requirement_id,
+            assertion_count=len(context.items),
+            mandatory_anchor_count=len(context.mandatory_anchor_ids),
+            status="graph_primary",
+        )
+    return context
+
+
 def _build_or_load_context_map(
     *,
     source: RequirementSource,
@@ -327,6 +367,13 @@ def _build_or_load_context_map(
                 requirement_text=requirement.requirement_text,
                 document_version_id=source.document_version_id,
                 evidence_chunk_ids=requirement.evidence_chunk_ids,
+                anchor_id=requirement.requirement_id,
+            ),
+            semantic=_assemble_story_semantic(
+                retrieval=retrieval,
+                requirement=requirement,
+                document_version_id=source.document_version_id,
+                logger=logger,
             ),
         )
         for requirement in source.requirements

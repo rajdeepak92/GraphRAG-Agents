@@ -14,6 +14,8 @@ from multi_agentic_graph_rag.domain.identifiers import (
 )
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
+    GenerationContextItem,
+    GenerationContextRun,
     RequirementArtifact,
     RequirementInput,
     RequirementRevisionSnapshot,
@@ -50,6 +52,8 @@ _MANAGED_TABLES = (
     "requirement_artifacts",
     "document_versions",
     "ingestion_runs",
+    "generation_context_runs",
+    "generation_context_items",
 )
 
 _TEXT_TYPES = {"text", "character varying"}
@@ -68,6 +72,35 @@ _EXPECTED_COLUMNS = {
         "document_version_id": _TEXT_TYPES,
         "status": _TEXT_TYPES,
         "payload": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "generation_context_runs": {
+        "context_run_id": _TEXT_TYPES,
+        "stage": _TEXT_TYPES,
+        "anchor_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_version_id": _TEXT_TYPES,
+        "source": _TEXT_TYPES,
+        "metrics": {"jsonb"},
+        "created_at": {"timestamp with time zone"},
+    },
+    "generation_context_items": {
+        "context_run_id": _TEXT_TYPES,
+        "rank": {"integer"},
+        "item_type": _TEXT_TYPES,
+        "item_id": _TEXT_TYPES,
+        "source": _TEXT_TYPES,
+        "score": {"double precision"},
+        "selected": {"boolean"},
+        "assertion_id": _TEXT_TYPES,
+        "text_unit_id": _TEXT_TYPES,
+        "entity_id": _TEXT_TYPES,
+        "predicate": _TEXT_TYPES,
+        "hop_count": {"integer"},
+        "normalized_score": {"double precision"},
+        "reranker_score": {"double precision"},
+        "mandatory": {"boolean"},
+        "metadata_json": {"jsonb"},
         "created_at": {"timestamp with time zone"},
     },
     "requirement_artifacts": {
@@ -517,6 +550,31 @@ class PostgresStore:
                       payload jsonb not null,
                       created_at timestamptz not null default now()
                     );
+                    create table if not exists generation_context_runs (
+                      context_run_id text primary key,
+                      stage text not null,
+                      anchor_id text not null default '',
+                      project text not null default '',
+                      document_version_id text not null,
+                      source text not null default '',
+                      metrics jsonb not null,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists generation_context_items (
+                      context_run_id text not null,
+                      rank integer not null,
+                      item_type text not null default 'chunk',
+                      item_id text not null,
+                      source text not null,
+                      score double precision,
+                      selected boolean not null default true,
+                      created_at timestamptz not null default now(),
+                      primary key(context_run_id, rank)
+                    );
+                    create index if not exists generation_context_runs_anchor_idx
+                      on generation_context_runs(stage, anchor_id);
+                    create index if not exists generation_context_items_item_idx
+                      on generation_context_items(item_id);
                     create index if not exists requirement_revisions_requirement_idx
                       on requirement_revisions(requirement_id);
                     create index if not exists requirement_evidence_revision_idx
@@ -589,8 +647,21 @@ class PostgresStore:
                       add column if not exists requirement_display_id text not null default '';
                     alter table requirement_fact_links
                       add column if not exists requirement_display_id text not null default '';
+                    alter table generation_context_items
+                      add column if not exists assertion_id text,
+                      add column if not exists text_unit_id text,
+                      add column if not exists entity_id text,
+                      add column if not exists predicate text,
+                      add column if not exists hop_count integer,
+                      add column if not exists normalized_score double precision,
+                      add column if not exists reranker_score double precision,
+                      add column if not exists mandatory boolean not null default false,
+                      add column if not exists metadata_json jsonb not null default '{}'::jsonb;
+                    create index if not exists generation_context_items_assertion_idx
+                      on generation_context_items(assertion_id);
                     insert into schema_migrations(version)
-                    values ('0001_version_lineage_inline')
+                    values ('0001_version_lineage_inline'),
+                           ('0002_context_item_assertion_columns')
                     on conflict (version) do nothing;
                     """
                 )
@@ -1654,6 +1725,84 @@ class PostgresStore:
                         json.dumps(payload),
                     ),
                 )
+            connection.commit()
+
+    def record_generation_context(
+        self,
+        run: GenerationContextRun,
+        items: list[GenerationContextItem],
+    ) -> None:
+        """Persist one retrieval snapshot (shadow comparison / audit trail)."""
+        if self.settings.postgres.mode == "local_json":
+            self._upsert_local(
+                "generation_context_run",
+                run.context_run_id,
+                {
+                    "kind": "generation_context_run",
+                    **run.model_dump(mode="json"),
+                    "items": [item.model_dump(mode="json") for item in items],
+                },
+            )
+            return
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into generation_context_runs
+                      (context_run_id, stage, anchor_id, project,
+                       document_version_id, source, metrics)
+                    values (%s, %s, %s, %s, %s, %s, %s)
+                    on conflict (context_run_id) do update
+                    set source=excluded.source, metrics=excluded.metrics
+                    """,
+                    (
+                        run.context_run_id,
+                        run.stage,
+                        run.anchor_id,
+                        run.project,
+                        run.document_version_id,
+                        run.source,
+                        json.dumps(run.metrics),
+                    ),
+                )
+                for item in items:
+                    cursor.execute(
+                        """
+                        insert into generation_context_items
+                          (context_run_id, rank, item_type, item_id, source, score, selected,
+                           assertion_id, text_unit_id, entity_id, predicate, hop_count,
+                           normalized_score, reranker_score, mandatory, metadata_json)
+                        values (%s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        on conflict (context_run_id, rank) do update
+                        set item_type=excluded.item_type, item_id=excluded.item_id,
+                            source=excluded.source, score=excluded.score,
+                            selected=excluded.selected, assertion_id=excluded.assertion_id,
+                            text_unit_id=excluded.text_unit_id, entity_id=excluded.entity_id,
+                            predicate=excluded.predicate, hop_count=excluded.hop_count,
+                            normalized_score=excluded.normalized_score,
+                            reranker_score=excluded.reranker_score,
+                            mandatory=excluded.mandatory, metadata_json=excluded.metadata_json
+                        """,
+                        (
+                            item.context_run_id,
+                            item.rank,
+                            item.item_type,
+                            item.item_id,
+                            item.source,
+                            item.score,
+                            item.selected,
+                            item.assertion_id,
+                            item.text_unit_id,
+                            item.entity_id,
+                            item.predicate,
+                            item.hop_count,
+                            item.normalized_score,
+                            item.reranker_score,
+                            item.mandatory,
+                            json.dumps(item.metadata),
+                        ),
+                    )
             connection.commit()
 
     def _persist_requirement_ledger_postgres(

@@ -27,13 +27,22 @@ from typing import Any, Protocol
 from pydantic import Field, ValidationError
 
 from multi_agentic_graph_rag.domain.errors import CheckpointError
-from multi_agentic_graph_rag.domain.schemas import StrictModel
+from multi_agentic_graph_rag.domain.schemas import (
+    AssertionContextItem,
+    SemanticContext,
+    StrictModel,
+)
 from multi_agentic_graph_rag.observability.logging import RunLogger
 from multi_agentic_graph_rag.services.retrieval import (
     ChunkProvenance,
     RetrievedChunk,
     RetrievedContext,
 )
+
+# Context-map ``context_mode`` values: legacy chunk retrieval vs. the frozen
+# graph-primary structured assertion selection (plan Increment 3).
+CONTEXT_MODE_CHUNKS = "chunks"
+CONTEXT_MODE_GRAPH_PRIMARY = "graph_primary"
 
 STAGE_USER_STORY = "user_story"
 STAGE_TEST_SCENARIO = "test_scenario"
@@ -95,6 +104,8 @@ class ContextMapEntry(StrictModel):
     document_version_id: str
     chunk_ids: list[str] = Field(default_factory=list)
     retrieval_metadata: list[RetrievalMetadataEntry] = Field(default_factory=list)
+    context_mode: str = CONTEXT_MODE_CHUNKS
+    assertions: list[AssertionContextItem] = Field(default_factory=list)
 
 
 class ContextMapCheckpoint(StrictModel):
@@ -167,8 +178,15 @@ def make_context_map_entry(
     document_version_id: str,
     provenance: Sequence[ChunkProvenance],
     story_id: str | None = None,
+    semantic: SemanticContext | None = None,
 ) -> ContextMapEntry:
-    """Build one loop-1 context-map entry from retrieval provenance (no text)."""
+    """Build one loop-1 context-map entry from retrieval provenance (no text).
+
+    When ``semantic`` is supplied (graph-primary), the selected assertions are
+    frozen into the entry alongside the chunk provenance, so the structured
+    context that feeds generation is recorded and reproduced identically on
+    resume — mirroring how chunk selection is frozen.
+    """
     metadata = [
         RetrievalMetadataEntry(
             chunk_id=item.chunk_id,
@@ -184,6 +202,8 @@ def make_context_map_entry(
         document_version_id=document_version_id,
         chunk_ids=[item.chunk_id for item in provenance],
         retrieval_metadata=metadata,
+        context_mode=(CONTEXT_MODE_GRAPH_PRIMARY if semantic is not None else CONTEXT_MODE_CHUNKS),
+        assertions=list(semantic.items) if semantic is not None else [],
     )
 
 
@@ -270,7 +290,8 @@ def hydrate_context_map_entry(
     the LLM always receives actual chunk text, never bare ids.
     """
     if not entry.chunk_ids:
-        return RetrievedContext(chunks=[], source="requirement_text_fallback")
+        source = entry.context_mode if entry.assertions else "requirement_text_fallback"
+        return RetrievedContext(chunks=[], source=source, assertions=list(entry.assertions))
     text_by_id = dict(neo4j.fetch_chunks(list(entry.chunk_ids)))
     chunks: list[RetrievedChunk] = []
     missing: list[str] = []
@@ -290,6 +311,10 @@ def hydrate_context_map_entry(
         )
     if not chunks:
         return RetrievedContext(chunks=[], source="requirement_text_fallback")
+    if entry.assertions:
+        return RetrievedContext(
+            chunks=chunks, source=entry.context_mode, assertions=list(entry.assertions)
+        )
     non_evidence = any(meta.source != _EVIDENCE_SOURCE for meta in entry.retrieval_metadata)
     return RetrievedContext(chunks=chunks, source="hybrid" if non_evidence else "evidence")
 
@@ -447,6 +472,9 @@ def _entry_key(entry: ContextMapEntry, *, require_story_id: bool) -> str:
 
 def _dump_entry(entry: ContextMapEntry) -> dict[str, Any]:
     exclude = {"story_id"} if entry.story_id is None else set()
+    if not entry.assertions:
+        # Legacy chunk-only entries stay byte-identical: omit graph-primary fields.
+        exclude = exclude | {"context_mode", "assertions"}
     return entry.model_dump(mode="json", exclude=exclude)
 
 

@@ -14,11 +14,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from common_defs import EnvVar, RuntimeCommand
 from multi_agentic_graph_rag import __version__
 from multi_agentic_graph_rag.agents.ingestion_document_agent import IngestionDocumentAgent
 from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGeneratorAgent
 from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGeneratorAgent
+from multi_agentic_graph_rag.common_defs import EnvVar, RuntimeCommand
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.huggingface_env import (
     HF_OFFLINE_FLAGS,
@@ -31,6 +31,7 @@ from multi_agentic_graph_rag.domain.errors import MaragError, SchemaMismatchErro
 from multi_agentic_graph_rag.domain.identifiers import run_id
 from multi_agentic_graph_rag.domain.schemas import (
     IngestionRequest,
+    KnowledgeGraphRequest,
     TestScenarioRequest,
     UserStoryRequest,
 )
@@ -50,6 +51,7 @@ from multi_agentic_graph_rag.services.artifacts import (
     verify_test_scenario_artifact,
     verify_user_story_artifact,
 )
+from multi_agentic_graph_rag.workflows.knowledge_graph import run_knowledge_graph_build
 from multi_agentic_graph_rag.workflows.test_scenario_graph import resolve_test_scenario_identity
 from multi_agentic_graph_rag.workflows.user_story_graph import resolve_user_story_identity
 
@@ -544,6 +546,56 @@ def generate_user_stories(
             "[green]PASS[/green] user-story generation completed "
             f"run_id={result.run_id} requirements={result.requirement_count} "
             f"stories={len(result.story_ids)} covered={len(result.coverage)}"
+        )
+        console.print(f"artifact={result.artifact_path}")
+
+
+@app.command("build-knowledge-graph")
+def build_knowledge_graph(
+    project: Annotated[str, typer.Option("--project")],
+    document_version_id: Annotated[str, typer.Option("--document-version-id")],
+    reasoning_provider: Annotated[str | None, typer.Option("--reasoning-provider")] = None,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
+) -> None:
+    request = KnowledgeGraphRequest(
+        project=project,
+        document_version_id=document_version_id,
+        reasoning_provider=reasoning_provider,
+    )
+    with command_session(
+        project=project,
+        version="generated",
+        command=RuntimeCommand.BUILD_KNOWLEDGE_GRAPH.value,
+        run_id=command_run_id(RuntimeCommand.BUILD_KNOWLEDGE_GRAPH.value),
+    ) as session:
+        session.request_payload = request.model_dump(mode="json")
+        session.logger.info(
+            "Starting build-knowledge-graph command",
+            step="knowledge-graph",
+            project=project,
+            document_version_id=document_version_id,
+            status="started",
+        )
+        try:
+            result = run_knowledge_graph_build(request, session=session)
+        except SchemaMismatchError:
+            console.print(
+                "[red]FAIL[/red] PostgreSQL schema mismatch. "
+                "Reset disposable local app tables with: "
+                "python -m multi_agentic_graph_rag postgres-reset --yes"
+            )
+            raise typer.Exit(code=1) from None
+        except MaragError as exc:
+            console.print(f"[red]FAIL[/red] {exc}")
+            raise typer.Exit(code=1) from None
+        if json_output:
+            console.print_json(json.dumps(result.model_dump(mode="json"), indent=2))
+            return
+        console.print(
+            "[green]PASS[/green] knowledge-graph build completed "
+            f"run_id={result.run_id} chunks={result.chunk_count} "
+            f"entities={result.entity_count} assertions={result.assertion_count} "
+            f"evidence={result.evidence_count}"
         )
         console.print(f"artifact={result.artifact_path}")
 

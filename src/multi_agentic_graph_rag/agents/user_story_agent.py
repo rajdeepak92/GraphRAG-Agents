@@ -19,6 +19,10 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
 from multi_agentic_graph_rag.observability.session import RunSession
+from multi_agentic_graph_rag.services.knowledge_context import (
+    authoritative_related,
+    render_assertion_lines,
+)
 from multi_agentic_graph_rag.services.retrieval import RetrievedContext
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
@@ -211,15 +215,6 @@ def _build_user_story_prompt(
         ensure_ascii=False,
         indent=2,
     )
-    if context.chunks:
-        context_block = "\n".join(
-            f"[{index}] {chunk.text}" for index, chunk in enumerate(context.chunks, start=1)
-        )
-    else:
-        context_block = (
-            "(no additional retrieved context; derive strictly from the requirement statement)"
-        )
-
     feedback = ""
     if validation_error:
         feedback = (
@@ -229,11 +224,56 @@ def _build_user_story_prompt(
             f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )
 
+    if context.assertions:
+        context_section = _render_assertion_context(context)
+    else:
+        context_section = _render_chunk_context(context)
+
     return (
         f"{PromptUserStoryGeneration.SYS_PROMPT_USER_STORY_GENERATION.value}"
         f"{feedback}"
         f"Requirement:\n{requirement_json}\n\n"
-        f"Retrieved context:\n{context_block}\n"
+        f"{context_section}\n"
+    )
+
+
+def _render_chunk_context(context: RetrievedContext) -> str:
+    if context.chunks:
+        context_block = "\n".join(
+            f"[{index}] {chunk.text}" for index, chunk in enumerate(context.chunks, start=1)
+        )
+    else:
+        context_block = (
+            "(no additional retrieved context; derive strictly from the requirement statement)"
+        )
+    return f"Retrieved context:\n{context_block}"
+
+
+def _render_assertion_context(context: RetrievedContext) -> str:
+    """Render structured assertion context with authoritative vs. related split.
+
+    Authoritative facts (mandatory / hop-0) are directly evidenced for this
+    requirement and are the grounding for stories; related facts (hop >= 1) are
+    labeled disambiguation-only so the model does not manufacture stories from
+    context that is merely adjacent (plan §14).
+    """
+    authoritative, related = authoritative_related(context.assertions)
+    authoritative_block = render_assertion_lines(authoritative)
+    related_block = render_assertion_lines(related)
+    excerpts = ""
+    if context.chunks:
+        chunk_block = "\n".join(
+            f"[{index}] {chunk.text}" for index, chunk in enumerate(context.chunks, start=1)
+        )
+        excerpts = f"\n\nSupporting source excerpts (for wording only):\n{chunk_block}"
+    return (
+        "AUTHORITATIVE FACTS FOR THIS REQUIREMENT (grounded in this requirement's source "
+        "evidence; base every user story on these together with the requirement statement):\n"
+        f"{authoritative_block}\n\n"
+        "RELATED CONTEXT (for disambiguation only; do not create user stories from these "
+        "alone):\n"
+        f"{related_block}"
+        f"{excerpts}"
     )
 
 

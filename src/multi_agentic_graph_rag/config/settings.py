@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from common_defs import ModeName, ProviderName
+from multi_agentic_graph_rag.common_defs import ModeName, ProviderName
 
 
 class ModelSection(BaseModel):
@@ -71,6 +71,22 @@ class UserStorySettings(BaseModel):
     max_new_tokens: int | None = None
 
 
+class KnowledgeGraphSettings(BaseModel):
+    """Feature flags for the source-knowledge graph and its retrieval rollout.
+
+    ``enabled`` gates every knowledge-graph retrieval integration. With shadow
+    mode on and the graph-primary flags off, generation behavior is unchanged
+    and graph retrieval only records comparison snapshots to PostgreSQL.
+    """
+
+    enabled: bool = False
+    shadow_mode: bool = True
+    graph_primary_story: bool = False
+    graph_primary_scenario: bool = False
+    expansion_k: int = 6
+    graph_min_assertions: int = 3
+
+
 class TestScenarioSettings(UserStorySettings):
     """Stage-4 retrieval/generation settings, type-compatible with RetrievalService."""
 
@@ -122,6 +138,7 @@ class AppSettings(BaseModel):
     discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
     user_story: UserStorySettings = Field(default_factory=UserStorySettings)
     test_scenario: TestScenarioSettings = Field(default_factory=TestScenarioSettings)
+    knowledge_graph: KnowledgeGraphSettings = Field(default_factory=KnowledgeGraphSettings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
     enable_hfil: bool = False

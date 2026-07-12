@@ -15,8 +15,19 @@ from typing import TypeVar
 from multi_agentic_graph_rag.config.settings import UserStorySettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
+from multi_agentic_graph_rag.domain.schemas import AssertionContextItem, SemanticContext
 from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel, RerankerModel
 from multi_agentic_graph_rag.observability.logging import RunLogger
+from multi_agentic_graph_rag.services.knowledge_context import (
+    assemble_semantic_context,
+    config_for_stage,
+)
+from multi_agentic_graph_rag.services.knowledge_retrieval import (
+    SOURCE_KNOWLEDGE,
+    KnowledgeRetrievalConfig,
+    build_context_snapshot,
+    build_semantic_snapshot,
+)
 
 T = TypeVar("T")
 
@@ -31,6 +42,7 @@ class RetrievedChunk:
 class RetrievedContext:
     chunks: list[RetrievedChunk] = field(default_factory=list)
     source: str = "hybrid"
+    assertions: list[AssertionContextItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,7 @@ _SOURCE_EVIDENCE = "evidence"
 _SOURCE_DENSE = "chroma_dense"
 _SOURCE_SPARSE = "neo4j_fulltext"
 _SOURCE_NEIGHBOR = "neo4j_neighbor"
+_SOURCE_KNOWLEDGE = SOURCE_KNOWLEDGE
 
 
 @dataclass(frozen=True)
@@ -79,6 +92,7 @@ class RetrievalService:
         reranker_model: RerankerModel | None,
         settings: UserStorySettings,
         logger: RunLogger | None = None,
+        knowledge: KnowledgeRetrievalConfig | None = None,
     ) -> None:
         self.chroma = chroma
         self.neo4j = neo4j
@@ -86,6 +100,7 @@ class RetrievalService:
         self.reranker_model = reranker_model
         self.settings = settings
         self.logger = logger
+        self.knowledge = knowledge
 
     def retrieve_context(
         self,
@@ -93,11 +108,13 @@ class RetrievalService:
         requirement_text: str,
         document_version_id: str,
         evidence_chunk_ids: list[str],
+        anchor_id: str = "",
     ) -> RetrievedContext:
         selection = self._retrieve(
             requirement_text=requirement_text,
             document_version_id=document_version_id,
             evidence_chunk_ids=evidence_chunk_ids,
+            anchor_id=anchor_id,
         )
         return RetrievedContext(
             chunks=[
@@ -112,6 +129,7 @@ class RetrievalService:
         requirement_text: str,
         document_version_id: str,
         evidence_chunk_ids: list[str],
+        anchor_id: str = "",
     ) -> list[ChunkProvenance]:
         """Loop-1 retrieval: identifiers + provenance only, never chunk text.
 
@@ -124,6 +142,7 @@ class RetrievalService:
             requirement_text=requirement_text,
             document_version_id=document_version_id,
             evidence_chunk_ids=evidence_chunk_ids,
+            anchor_id=anchor_id,
         )
         return [
             ChunkProvenance(
@@ -135,12 +154,50 @@ class RetrievalService:
             for rank, item in enumerate(selection.items, start=1)
         ]
 
+    def assemble_primary_context(
+        self,
+        *,
+        requirement_text: str,
+        document_version_id: str,
+        evidence_chunk_ids: list[str],
+        anchor_id: str = "",
+    ) -> SemanticContext | None:
+        """Assemble structured assertion context when the stage is graph-primary.
+
+        Returns ``None`` (legacy chunk fallback) when the knowledge channel is
+        off, the stage is not graph-primary, or the graph fails the grounding
+        gate — no mandatory anchor for this requirement, or fewer than
+        ``min_assertions`` selected assertions (plan §17 fallback conditions).
+        Never raises: any retrieval error degrades to the legacy path.
+        """
+        knowledge = self.knowledge
+        if knowledge is None or not knowledge.include_in_context:
+            return None
+        context = self._safe(
+            lambda: assemble_semantic_context(
+                self.neo4j,
+                anchor_id=anchor_id,
+                query_text=requirement_text,
+                document_version_id=document_version_id,
+                evidence_chunk_ids=evidence_chunk_ids,
+                config=config_for_stage(knowledge.stage),
+            ),
+            "semantic_primary",
+            None,
+        )
+        if context is None or not context.mandatory_anchor_ids:
+            return None
+        if len(context.items) < max(knowledge.min_assertions, 1):
+            return None
+        return context
+
     def _retrieve(
         self,
         *,
         requirement_text: str,
         document_version_id: str,
         evidence_chunk_ids: list[str],
+        anchor_id: str = "",
     ) -> _Selection:
         fused: dict[str, str] = {}
         source_by_id: dict[str, str] = {}
@@ -196,8 +253,31 @@ class RetrievalService:
                 if add(chunk_id, text, _SOURCE_NEIGHBOR, None):
                     retrieved += 1
 
+        knowledge_candidates: list[tuple[str, str, float]] = []
+        if self.knowledge is not None and evidence_chunk_ids:
+            expansion_k = self.knowledge.expansion_k
+            knowledge_candidates = self._safe(
+                lambda: self.neo4j.knowledge_related_chunks(
+                    evidence_chunk_ids, document_version_id, expansion_k
+                ),
+                "knowledge",
+                empty_scored,
+            )
+            if self.knowledge.include_in_context:
+                for chunk_id, text, score in knowledge_candidates:
+                    if add(chunk_id, text, _SOURCE_KNOWLEDGE, score):
+                        retrieved += 1
+
         if not fused:
             self._log_fallback(document_version_id, source="requirement_text_fallback")
+            self._record_snapshot(
+                anchor_id=anchor_id,
+                requirement_text=requirement_text,
+                document_version_id=document_version_id,
+                evidence_chunk_ids=evidence_chunk_ids,
+                selection=_Selection(items=[], source="requirement_text_fallback"),
+                knowledge_candidates=knowledge_candidates,
+            )
             return _Selection(items=[], source="requirement_text_fallback")
 
         ranked_ids = self._rerank_ids(requirement_text, fused)
@@ -221,7 +301,82 @@ class RetrievalService:
         source = "hybrid" if retrieved > 0 else "evidence"
         if source == "evidence":
             self._log_fallback(document_version_id, source=source)
-        return _Selection(items=items, source=source)
+        selection = _Selection(items=items, source=source)
+        self._record_snapshot(
+            anchor_id=anchor_id,
+            requirement_text=requirement_text,
+            document_version_id=document_version_id,
+            evidence_chunk_ids=evidence_chunk_ids,
+            selection=selection,
+            knowledge_candidates=knowledge_candidates,
+        )
+        return selection
+
+    def _record_snapshot(
+        self,
+        *,
+        anchor_id: str,
+        requirement_text: str,
+        document_version_id: str,
+        evidence_chunk_ids: list[str],
+        selection: _Selection,
+        knowledge_candidates: list[tuple[str, str, float]],
+    ) -> None:
+        """Persist the retrieval snapshot(s) for shadow comparison; never blocks."""
+        knowledge = self.knowledge
+        recorder = knowledge.recorder if knowledge is not None else None
+        if knowledge is None or recorder is None:
+            return
+        run, items = build_context_snapshot(
+            config=knowledge,
+            anchor_id=anchor_id,
+            document_version_id=document_version_id,
+            selection_source=selection.source,
+            selected_items=[(item.chunk_id, item.source, item.score) for item in selection.items],
+            knowledge_candidates=[(chunk_id, score) for chunk_id, _, score in knowledge_candidates],
+        )
+        self._safe(lambda: recorder(run, items), "snapshot", None)
+        self._record_semantic_snapshot(
+            anchor_id=anchor_id,
+            requirement_text=requirement_text,
+            document_version_id=document_version_id,
+            evidence_chunk_ids=evidence_chunk_ids,
+        )
+
+    def _record_semantic_snapshot(
+        self,
+        *,
+        anchor_id: str,
+        requirement_text: str,
+        document_version_id: str,
+        evidence_chunk_ids: list[str],
+    ) -> None:
+        """Assemble and record the structured assertion snapshot (shadow §18).
+
+        Increment 2 contract: this records the knowledge-graph assertion channel
+        for shadow comparison only; it never feeds the generation prompt, so the
+        selected chunk context above is unchanged.
+        """
+        knowledge = self.knowledge
+        recorder = knowledge.recorder if knowledge is not None else None
+        if knowledge is None or recorder is None:
+            return
+        context = self._safe(
+            lambda: assemble_semantic_context(
+                self.neo4j,
+                anchor_id=anchor_id,
+                query_text=requirement_text,
+                document_version_id=document_version_id,
+                evidence_chunk_ids=evidence_chunk_ids,
+                config=config_for_stage(knowledge.stage),
+            ),
+            "semantic",
+            None,
+        )
+        if context is None or not context.items:
+            return
+        run, items = build_semantic_snapshot(config=knowledge, context=context)
+        self._safe(lambda: recorder(run, items), "semantic_snapshot", None)
 
     def _dense(
         self,

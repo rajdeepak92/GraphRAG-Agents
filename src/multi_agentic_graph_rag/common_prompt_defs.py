@@ -328,10 +328,92 @@ DUPLICATE_JUDGE_PROMPT = (
 )
 
 
+class PromptKnowledgeExtraction(StrEnum):
+    SYS_PROMPT_KNOWLEDGE_EXTRACTION = (
+        "You are extracting a source-knowledge graph from exactly one document chunk.\n"
+        f"{PromptSharedFragments.JSON_ONLY.value}\n\n"
+        "Input is one JSON object with chunk_id and normalized chunk_text. The chunk ID, page, "
+        "section, source offsets, and permanent IDs are owned by Python and must not be "
+        "returned.\n\n"
+        "Output schema:\n"
+        "{\n"
+        '  "entities": [\n'
+        '    {"name": "...", "entity_type": "..."}\n'
+        "  ],\n"
+        '  "assertions": [\n'
+        "    {\n"
+        '      "subject": "...",\n'
+        '      "predicate": "...",\n'
+        '      "object_name": "...",\n'
+        '      "object_literal": "",\n'
+        '      "modality": "shall",\n'
+        '      "polarity": "positive",\n'
+        '      "explicitness": "explicit",\n'
+        '      "condition": "",\n'
+        '      "quote": "...",\n'
+        '      "confidence": 0.95\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "Required root fields: entities, assertions. Both must be JSON arrays.\n"
+        "Never return null for any field. Use an empty string for absent optional string "
+        "fields.\n"
+        "Do not return any id fields. Python assigns all permanent IDs.\n\n"
+        "Entity rules:\n"
+        "An entity is a concrete named thing from the source text: a system, subsystem, "
+        "component, device, actor, role, interface, protocol, data object, configuration item, "
+        "alarm, report, process, or measurable quantity.\n"
+        "name must reuse the surface wording that appears in chunk_text. Do not invent names, "
+        "do not translate, and do not generalize to a broader concept.\n"
+        "Every entity name must appear in chunk_text (case-insensitive match allowed).\n"
+        "entity_type is a short lowercase category such as system, component, actor, interface, "
+        "protocol, data_object, process, parameter, alarm, or concept. If unclear, use "
+        "concept.\n"
+        "Return each distinct entity once per chunk, not once per occurrence.\n\n"
+        "Assertion rules:\n"
+        "An assertion is one atomic subject-predicate-object statement supported by the "
+        "chunk text.\n"
+        "subject must exactly match the name of one entry in entities.\n"
+        "Exactly one of object_name or object_literal must be non-empty. object_name must "
+        "exactly match the name of one entry in entities. object_literal holds values that "
+        "are not entities, such as thresholds, durations, counts, ranges, or states.\n"
+        "predicate is a short verb phrase in lowercase, such as collects, presents, uses, "
+        "depends on, has threshold, triggers, generates alarm, must not exceed. Python "
+        "normalizes it; keep it under eight words.\n"
+        "Split coordinated sentences into separate atomic assertions.\n"
+        "modality is one of: fact, shall, must, should, may, must_not. Use the source's own "
+        "obligation strength.\n"
+        "polarity is negative only when the source states that something must not or does "
+        "not happen. Never rewrite a negative statement as positive.\n"
+        "explicitness is explicit when the statement is directly written in chunk_text. Use "
+        "inferred only when the statement is a necessary consequence of the written text, "
+        "and never invent domain knowledge that is not in the chunk.\n"
+        "condition carries the qualifying clause when the statement only applies under a "
+        "stated condition, copied or minimally shortened from the source; otherwise use an "
+        "empty string.\n"
+        "confidence is a number from 0.0 to 1.0 for how directly the quote supports the "
+        "assertion.\n\n"
+        "Hard traceability rule for quote:\n"
+        "quote must be copied exactly from normalized chunk_text.\n"
+        "quote must be an exact contiguous substring that can be found in chunk_text after "
+        "whitespace normalization.\n"
+        "Do not paraphrase, improve, extend, or shorten quote from the middle.\n"
+        "Do not merge a heading with a bullet, table row, clause, or nearby line unless that "
+        "exact merged text appears contiguously in chunk_text.\n"
+        "If no exact quote can be copied for an assertion, do not return that assertion.\n\n"
+        "Before returning the final JSON, internally verify every quote against chunk_text "
+        "and every subject and object_name against entities. Repair or remove entries that "
+        "fail. Do not describe this verification.\n\n"
+        "Return entities and assertions as empty lists only when the chunk contains no "
+        "extractable named things or statements.\n\n"
+    )
+
+
 __all__ = [
     "DUPLICATE_JUDGE_PROMPT",
     "FEEDBACK_STRICT_SCENARIO_PROMPT",
     "SCENARIO_CANONICALIZATION_PROMPT",
+    "PromptKnowledgeExtraction",
     "PromptRequirementDiscovery",
     "PromptSharedFragments",
     "PromptTestScenarioGeneration",

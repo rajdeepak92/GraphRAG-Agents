@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from common_defs import EnvVar, ModeName, PathDef, ProviderName
+from multi_agentic_graph_rag.common_defs import EnvVar, ModeName, PathDef, ProviderName
 from multi_agentic_graph_rag.config.huggingface_env import (
     env_bool,
     env_positive_int,
@@ -21,6 +21,7 @@ from multi_agentic_graph_rag.config.settings import (
     ChunkingSettings,
     DiscoverySettings,
     HuggingFaceSettings,
+    KnowledgeGraphSettings,
     ModelSection,
     Neo4jSettings,
     PathsSettings,
@@ -252,6 +253,33 @@ def load_config(
     )
     hfil_cfg = config_data.get("hfil", {})
 
+    knowledge_graph_cfg = config_data.get("knowledge_graph", {})
+    knowledge_graph = KnowledgeGraphSettings(
+        enabled=env_bool(
+            env.get(EnvVar.KNOWLEDGE_GRAPH_ENABLED.value),
+            default=bool(knowledge_graph_cfg.get("enabled", False)),
+        ),
+        shadow_mode=env_bool(
+            env.get(EnvVar.KNOWLEDGE_GRAPH_SHADOW_MODE.value),
+            default=bool(knowledge_graph_cfg.get("shadow_mode", True)),
+        ),
+        graph_primary_story=env_bool(
+            env.get(EnvVar.GRAPH_PRIMARY_STORY.value),
+            default=bool(knowledge_graph_cfg.get("graph_primary_story", False)),
+        ),
+        graph_primary_scenario=env_bool(
+            env.get(EnvVar.GRAPH_PRIMARY_SCENARIO.value),
+            default=bool(knowledge_graph_cfg.get("graph_primary_scenario", False)),
+        ),
+        expansion_k=_positive_int(
+            env.get(
+                EnvVar.KNOWLEDGE_GRAPH_EXPANSION_K.value,
+                knowledge_graph_cfg.get("expansion_k"),
+            ),
+            default=6,
+        ),
+    )
+
     settings = AppSettings(
         app_env=env.get(
             EnvVar.APP_ENV.value, config_data.get("application", {}).get("app_env", "development")
@@ -349,6 +377,7 @@ def load_config(
         chroma=ChromaSettings(**config_data.get("chroma", {})),
         user_story=user_story,
         test_scenario=test_scenario,
+        knowledge_graph=knowledge_graph,
         azure_openai=AzureOpenAISettings(
             endpoint=env.get(EnvVar.AZURE_OPENAI_ENDPOINT.value, ""),
             api_key=env.get(EnvVar.AZURE_OPENAI_API_KEY.value, ""),

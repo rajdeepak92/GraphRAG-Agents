@@ -7,8 +7,8 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.agents.requirement_discovery_agent import RequirementDiscoveryAgent
+from multi_agentic_graph_rag.common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore

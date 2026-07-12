@@ -13,8 +13,8 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGenerationAgent
+from multi_agentic_graph_rag.common_defs import ModeName, ProviderName, RuntimeCommand
 from multi_agentic_graph_rag.common_prompt_defs import PromptTestScenarioGeneration
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
@@ -28,6 +28,7 @@ from multi_agentic_graph_rag.domain.errors import (
 )
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementInput,
+    SemanticContext,
     TestScenarioArtifact,
     TestScenarioBuildResult,
     TestScenarioModel,
@@ -65,6 +66,7 @@ from multi_agentic_graph_rag.services.generation_checkpoint import (
     write_context_map_checkpoint,
     write_generation_progress,
 )
+from multi_agentic_graph_rag.services.knowledge_retrieval import build_knowledge_retrieval_config
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
     load_requirement_source_from_full_payload,
@@ -265,6 +267,13 @@ def _generate(
         reranker_model=reranker_model,
         settings=settings.test_scenario,
         logger=logger,
+        knowledge=build_knowledge_retrieval_config(
+            settings,
+            stage=STAGE_TEST_SCENARIO,
+            project=source.project,
+            primary=settings.knowledge_graph.graph_primary_scenario,
+            recorder=postgres.record_generation_context,
+        ),
     )
     agent = TestScenarioGenerationAgent(reasoning_model, logger=logger)
     out_dir = _output_dir(request, settings, source, state["run_id"])
@@ -517,6 +526,13 @@ def _run_pipeline(
             reranker_model=reranker_model,
             settings=settings.test_scenario,
             logger=logger,
+            knowledge=build_knowledge_retrieval_config(
+                settings,
+                stage=STAGE_TEST_SCENARIO,
+                project=source.project,
+                primary=settings.knowledge_graph.graph_primary_scenario,
+                recorder=postgres.record_generation_context,
+            ),
         )
         agent = TestScenarioGenerationAgent(reasoning_model, logger=logger)
         out_dir = _output_dir(request, settings, source, state["run_id"])
@@ -637,6 +653,40 @@ def _run_pipeline(
         raise
 
 
+def _assemble_scenario_semantic(
+    *,
+    retrieval: RetrievalService,
+    story: UserStoryRecord,
+    query_text: str,
+    evidence_chunk_ids: list[str],
+    document_version_id: str,
+    logger: RunLogger | None,
+) -> SemanticContext | None:
+    """Graph-primary scenario context (loop 1), or ``None`` for the legacy path.
+
+    Uses the story query (title + persona + acceptance criteria + linked
+    requirement) and the linked requirement's evidence chunks as anchors, with
+    the scenario predicate profile. Returns ``None`` (fallback) when the stage is
+    not graph-primary or the grounding gate is not met.
+    """
+    context = retrieval.assemble_primary_context(
+        requirement_text=query_text,
+        document_version_id=document_version_id,
+        evidence_chunk_ids=evidence_chunk_ids,
+        anchor_id=story.story_id,
+    )
+    if logger is not None and context is not None:
+        logger.info(
+            "Graph-primary scenario context selected",
+            step="test_scenarios.context_map",
+            story_id=story.story_id,
+            assertion_count=len(context.items),
+            mandatory_anchor_count=len(context.mandatory_anchor_ids),
+            status="graph_primary",
+        )
+    return context
+
+
 def _build_or_load_context_map(
     *,
     source: _StorySource,
@@ -673,10 +723,12 @@ def _build_or_load_context_map(
         linked_text = linked.requirement_text if linked else None
         evidence = list(linked.evidence_chunk_ids) if linked else []
         evidence_by_story[story.story_id] = evidence
+        query_text = _story_query_text(story, linked_text)
         provenance = retrieval.retrieve_context_map(
-            requirement_text=_story_query_text(story, linked_text),
+            requirement_text=query_text,
             document_version_id=source.document_version_id,
             evidence_chunk_ids=evidence,
+            anchor_id=story.story_id,
         )
         entries.append(
             make_context_map_entry(
@@ -684,6 +736,14 @@ def _build_or_load_context_map(
                 document_version_id=source.document_version_id,
                 provenance=provenance,
                 story_id=story.story_id,
+                semantic=_assemble_scenario_semantic(
+                    retrieval=retrieval,
+                    story=story,
+                    query_text=query_text,
+                    evidence_chunk_ids=evidence,
+                    document_version_id=source.document_version_id,
+                    logger=logger,
+                ),
             )
         )
     entries = validate_context_map(

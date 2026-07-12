@@ -80,6 +80,7 @@ runtime/logs/*
 !/README.md
 !/huggingface-workflow.md
 !/azure-huggingface-workflow.md
+!/representation.md
 
 # Local test workspace
 tests/
