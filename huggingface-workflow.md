@@ -149,11 +149,12 @@ TEST_SCENARIO_SPARSE_K=8
 TEST_SCENARIO_NEIGHBOR_WINDOW=1
 TEST_SCENARIO_MAX_NEW_TOKENS=
 
-KNOWLEDGE_GRAPH_ENABLED=false
+KNOWLEDGE_GRAPH_ENABLED=true
 KNOWLEDGE_GRAPH_SHADOW_MODE=true
-GRAPH_PRIMARY_STORY=false
-GRAPH_PRIMARY_SCENARIO=false
+GRAPH_PRIMARY_STORY=true
+GRAPH_PRIMARY_SCENARIO=true
 KNOWLEDGE_GRAPH_EXPANSION_K=6
+KNOWLEDGE_GRAPH_MIN_ASSERTIONS=3
 
 ENABLE_HFIL=false
 HFIL_MATCH_THRESHOLD_PCT=60.0
@@ -173,6 +174,29 @@ Notes:
 - Set `HUGGINGFACE_OFFLINE=true` only after the private models are already
   cached under `.global_cache`.
 - For private/gated models, token access and license acceptance are mandatory.
+
+Knowledge-graph (GraphRAG) profile — **on by default**:
+
+- `KNOWLEDGE_GRAPH_ENABLED=true` makes ingestion build the semantic knowledge
+  graph (entities + subject/predicate/object assertions with exact-quote
+  evidence) into Neo4j automatically, right after chunk projection and Chroma
+  indexing. No separate build step is required for the normal flow.
+- `GRAPH_PRIMARY_STORY=true` / `GRAPH_PRIMARY_SCENARIO=true` make user-story and
+  test-scenario generation ground on those assertions (retrieved from Neo4j
+  content relations) instead of raw chunk text. When a requirement is not
+  sufficiently grounded (no mandatory anchor, or fewer than
+  `KNOWLEDGE_GRAPH_MIN_ASSERTIONS` selected), that one requirement falls back to
+  the legacy chunk retrieval and logs `status="graph_fallback"`.
+- `KNOWLEDGE_GRAPH_SHADOW_MODE=true` additionally records retrieval comparison
+  snapshots to PostgreSQL; it is independent of the graph-primary flags.
+- `KNOWLEDGE_GRAPH_EXPANSION_K` bounds one-hop entity expansion;
+  `KNOWLEDGE_GRAPH_MIN_ASSERTIONS` is the grounding-gate minimum.
+- **Explicit opt-out (legacy chunk-only path):** set
+  `KNOWLEDGE_GRAPH_ENABLED=false`. Ingestion then skips the knowledge-graph
+  build and generation uses hybrid chunk retrieval only.
+- Every field above is also settable in `config.json` under `knowledge_graph`;
+  environment variables win over `config.json`, which wins over built-in
+  defaults.
 
 ## 7. Verify Hugging Face Private Model Access
 
@@ -332,6 +356,14 @@ generated/PROJECT_1/req/<RUN_ID>/
   run.jsonl
 ```
 
+With the default GraphRAG profile (`KNOWLEDGE_GRAPH_ENABLED=true`), the same
+ingest run also builds the semantic knowledge graph for this document version and
+projects it into Neo4j (entities, assertions, text-unit evidence), then moves the
+document's active-knowledge pointer to this version. If the knowledge-graph build
+fails, the ingestion run fails clearly rather than continuing with an empty
+graph. Disable this with `KNOWLEDGE_GRAPH_ENABLED=false` to run the legacy
+chunk-only path.
+
 Find the latest run directory:
 
 ```powershell
@@ -351,16 +383,18 @@ uv run python -m multi_agentic_graph_rag artifact verify `
   generated\PROJECT_1\req\$RUN_ID\requirements_full.json
 ```
 
-### Optional: Build The Source-Knowledge Graph
+### Rebuild The Source-Knowledge Graph (standalone)
 
-After ingestion you can extract an evidence-grounded source-knowledge graph
-(entities plus subject/predicate/object assertions with exact-quote evidence and
-atomic text units) and project it into Neo4j. This stage is optional, uses the
-reasoning model only, and does not change requirement/story/scenario generation
-unless the knowledge-graph flags are enabled (see section 6).
+With the default profile, the knowledge graph is already built during ingest, so
+you normally do not need this step. Run it standalone only to rebuild the graph
+for an existing document version (for example after tuning extraction) or when
+you ingested with `KNOWLEDGE_GRAPH_ENABLED=false` and now want the graph.
 
-Use the `document_version_id` (`DV-...`) reported by `ingest` (it is also present
-in the requirement artifact):
+It extracts the same evidence-grounded graph (entities plus
+subject/predicate/object assertions with exact-quote evidence and atomic text
+units), uses the reasoning model only, is idempotent (safe to re-run), and moves
+the active-knowledge pointer on success. Use the `document_version_id` (`DV-...`)
+reported by `ingest` (it is also present in the requirement artifact):
 
 ```powershell
 uv run python -m multi_agentic_graph_rag build-knowledge-graph `
@@ -371,10 +405,7 @@ uv run python -m multi_agentic_graph_rag build-knowledge-graph `
 
 The audit copy is written to
 `generated\PROJECT_1\kg\<RUN_ID>\knowledge_graph.json`; Neo4j remains the source
-of truth for the graph. With `KNOWLEDGE_GRAPH_ENABLED=true` and shadow mode on,
-later story/scenario retrieval records comparison snapshots to PostgreSQL without
-changing generated output; the `GRAPH_PRIMARY_*` flags opt a stage into
-assertion-hop retrieval.
+of truth for the graph.
 
 ## 12. Generate User Stories With Hugging Face Models
 
@@ -388,6 +419,17 @@ uv run python -m multi_agentic_graph_rag generate-user-stories `
   --json-output
 ```
 
+With `GRAPH_PRIMARY_STORY=true` (default), each requirement's context is retrieved
+from the Neo4j knowledge graph (anchor assertions plus one-hop entity expansion)
+and the prompt renders an "AUTHORITATIVE FACTS" / "RELATED CONTEXT" split. This
+requires the knowledge graph to exist for the document version: if it is missing,
+the command fails with a `ConfigurationError` telling you to run ingest with
+`KNOWLEDGE_GRAPH_ENABLED=true` (or `build-knowledge-graph`), or to set
+`KNOWLEDGE_GRAPH_ENABLED=false` for the legacy chunk path. The persisted stories
+also record which retrieved context produced them (`generation_context_run_id`,
+`retrieved_assertion_ids`, `retrieved_chunk_ids`, context mode), separate from the
+requirement-source evidence chunks.
+
 Verify:
 
 ```powershell
@@ -396,6 +438,13 @@ uv run python -m multi_agentic_graph_rag artifact verify-user-stories `
 ```
 
 ## 13. Generate Test Scenarios With Hugging Face Models
+
+With `GRAPH_PRIMARY_SCENARIO=true` (default), scenario context is retrieved from
+the knowledge graph using the user-story query and the linked requirement's
+evidence as anchors, rendered as "AUTHORITATIVE FACTS FOR THIS STORY" vs.
+"RELATED CONSTRAINTS AND CONDITIONS". The same missing-graph preflight and
+per-story `graph_fallback` behavior as user stories apply, and scenarios likewise
+persist their `generation_context_run_id` / retrieved-context trace.
 
 Non-interactive path:
 
@@ -440,10 +489,22 @@ uv run python -m multi_agentic_graph_rag artifact verify-test-scenarios `
 
 ## 14. Coverage And Reconcile
 
-Coverage:
+Coverage prints per-requirement status plus a summary line: total active
+requirements, requirements with stories and the story-coverage percentage, and
+requirements fully covered by scenarios with the end-to-end scenario-coverage
+percentage (zero-safe).
 
 ```powershell
 uv run python -m multi_agentic_graph_rag coverage --project PROJECT_1
+```
+
+Scope coverage to a single document version (denominator counts only
+requirements present in that version, so a later version is not diluted by
+earlier-only requirements). Add `--json-output` for the machine-readable report:
+
+```powershell
+uv run python -m multi_agentic_graph_rag coverage `
+  --project PROJECT_1 --document-version-id <DV-ID> --json-output
 ```
 
 Repair local JSON mirrors from PostgreSQL:
@@ -476,6 +537,13 @@ uv run python -m multi_agentic_graph_rag ingest `
   --json-output
 ```
 
+The V2 ingest also rebuilds the knowledge graph for the new version and
+reconciles it against V1: assertions are matched by a cross-version lineage key,
+so a changed value supersedes the prior assertion, a dropped fact is retired, and
+a genuinely new fact is added. The active-knowledge pointer moves to V2 only after
+the projection succeeds, and story/scenario retrieval then reads **current
+(V2) knowledge only** — superseded and retired assertions are excluded.
+
 Then repeat user-story and test-scenario generation for the new run directory.
 
 Expected behavior:
@@ -484,6 +552,10 @@ Expected behavior:
 - Updated requirements preserve requirement lineage and update children in place.
 - Explicitly outdated requirements cascade-delete child stories/scenarios.
 - Unchanged requirements do not duplicate existing children.
+- Knowledge-graph assertions supersede/retire/add across versions; entity
+  resolution reuses the prior active version's entities (not every stale entity),
+  and historical assertions are retained (not hard-deleted) unless an explicit,
+  disabled-by-default retention pass is run.
 
 ## 16. Troubleshooting
 
@@ -525,4 +597,20 @@ Generation produces invalid JSON:
 - Inspect `generated\PROJECT_1\req\$RUN_ID\llm_response_*.txt`.
 - Reduce `DISCOVERY_BATCH_SIZE` to `1`.
 - Increase `HUGGINGFACE_MAX_NEW_TOKENS` if responses truncate.
+
+Generation fails with "has no semantic knowledge graph":
+
+- The document version was ingested without the knowledge graph while
+  graph-primary generation is on. Re-ingest with `KNOWLEDGE_GRAPH_ENABLED=true`,
+  or run `build-knowledge-graph --project ... --document-version-id <DV-ID>`.
+- Or set `KNOWLEDGE_GRAPH_ENABLED=false` to use the legacy chunk-only path.
+
+Stories/scenarios look chunk-based instead of assertion-grounded:
+
+- Check the run log for `status="graph_fallback"` entries: a requirement/story
+  missed the grounding gate (no mandatory anchor, or fewer than
+  `KNOWLEDGE_GRAPH_MIN_ASSERTIONS` assertions) and fell back to chunk retrieval.
+- Confirm the knowledge graph was actually built for the version (it is, by
+  default, during ingest) and lower `KNOWLEDGE_GRAPH_MIN_ASSERTIONS` if the
+  source is sparse.
 

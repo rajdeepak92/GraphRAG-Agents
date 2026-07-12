@@ -291,24 +291,31 @@ def _validate_assertion(
         raise TraceValidationError(
             f"{label} subject {assertion.subject!r} does not match any entities[].name"
         )
+    # Object resolution is lenient: an object counts as an ENTITY only when it was
+    # declared. An *undeclared* object is demoted to a literal value instead of
+    # failing the whole chunk — models frequently reference an object concept they
+    # forgot to add to entities[] (e.g. "operating data"). The subject stays strict
+    # (it is the assertion's anchor), and a declared self-loop is still rejected.
     object_name: str | None = None
-    if assertion.object_name.strip():
-        object_name = normalize_entity_name(assertion.object_name)
-        if object_name not in entity_names:
-            raise TraceValidationError(
-                f"{label} object_name {assertion.object_name!r} does not match any entities[].name"
-            )
-        if object_name == subject_name:
+    demoted_object_literal: str | None = None
+    raw_object = assertion.object_name.strip()
+    if raw_object:
+        normalized_object = normalize_entity_name(raw_object)
+        if normalized_object not in entity_names:
+            demoted_object_literal = raw_object
+        elif normalized_object == subject_name:
             raise TraceValidationError(
                 f"{label} subject and object_name must reference different entities"
             )
+        else:
+            object_name = normalized_object
 
     predicate = normalize_predicate(assertion.predicate)
     if not predicate:
         raise TraceValidationError(f"{label} predicate {assertion.predicate!r} is not usable")
 
     trace = _source_trace_from_quote(context, assertion.quote, label)
-    literal = assertion.object_literal.strip()
+    literal = assertion.object_literal.strip() or (demoted_object_literal or "")
     condition = assertion.condition.strip()
     return AssertionCandidate(
         chunk_id=context.chunk.chunk_id,

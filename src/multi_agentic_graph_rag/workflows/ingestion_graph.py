@@ -295,31 +295,6 @@ def _run_pipeline(
                 store_responsibility="chunk_embeddings_only",
             )
         chroma.index_chunks(manifest, embedding_model)
-        if settings.knowledge_graph.enabled:
-            if logger is not None:
-                logger.info(
-                    "Building semantic knowledge graph for {document_version_id}",
-                    step="build_knowledge_graph",
-                    document_version_id=manifest.document_version_id,
-                    chunk_count=len(manifest.chunks),
-                    store_responsibility="source_knowledge_graph",
-                )
-            build_and_project_knowledge_graph(
-                project=manifest.project,
-                document_id=manifest.document_id,
-                document_version_id=manifest.document_version_id,
-                doc_version=manifest.version,
-                chunks=list(manifest.chunks),
-                reasoning_model=reasoning_model,
-                neo4j=neo4j,
-                logger=logger,
-            )
-            # Move the document's active-knowledge pointer only after a successful
-            # projection, so graph-primary generation reads a complete version.
-            neo4j.set_active_knowledge_version(
-                document_id=manifest.document_id,
-                document_version_id=manifest.document_version_id,
-            )
         coverage_ledger = None
         if settings.discovery.ledger_enabled:
             coverage_ledger = CoverageLedger(
@@ -409,6 +384,17 @@ def _run_pipeline(
                 document_version_id=artifact.document_version_id,
                 status="completed",
             )
+        # Knowledge-graph build runs AFTER requirements are persisted and is
+        # best-effort: a failure never discards the requirement artifacts. If it
+        # fails, graph-primary generation stays unavailable for this version until
+        # it is rebuilt with `build-knowledge-graph`.
+        kg_warnings = _build_knowledge_graph_best_effort(
+            settings=settings,
+            manifest=manifest,
+            reasoning_model=reasoning_model,
+            neo4j=neo4j,
+            logger=logger,
+        )
         result_payload: IngestionState = {
             "run_id": state["run_id"],
             "checksum": checksum,
@@ -420,7 +406,7 @@ def _run_pipeline(
             "chunk_ids": [chunk.chunk_id for chunk in manifest.chunks],
             "fact_ids": [fact.fact_id for fact in artifact.facts],
             "requirement_ids": [req.requirement_id for req in artifact.requirements],
-            "warnings": [],
+            "warnings": kg_warnings,
             "errors": [],
         }
         if session is not None:
@@ -574,6 +560,67 @@ def run_ingestion(
         warnings=final_state.get("warnings", []),
         errors=final_state.get("errors", []),
     )
+
+
+def _build_knowledge_graph_best_effort(
+    *,
+    settings: AppSettings,
+    manifest: Any,
+    reasoning_model: Any,
+    neo4j: Any,
+    logger: Any | None,
+) -> list[str]:
+    """Build + project the semantic knowledge graph without risking the run.
+
+    Returns a (possibly empty) list of warnings. When the knowledge channel is
+    disabled this is a no-op. On any failure the requirement artifacts are already
+    persisted, so the run still succeeds; the warning tells the operator to rebuild
+    the graph before relying on graph-primary generation.
+    """
+    if not settings.knowledge_graph.enabled:
+        return []
+    try:
+        if logger is not None:
+            logger.info(
+                "Building semantic knowledge graph for {document_version_id}",
+                step="build_knowledge_graph",
+                document_version_id=manifest.document_version_id,
+                chunk_count=len(manifest.chunks),
+                store_responsibility="source_knowledge_graph",
+            )
+        build_and_project_knowledge_graph(
+            project=manifest.project,
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
+            doc_version=manifest.version,
+            chunks=list(manifest.chunks),
+            reasoning_model=reasoning_model,
+            neo4j=neo4j,
+            logger=logger,
+        )
+        # Move the document's active-knowledge pointer only after a successful
+        # projection, so graph-primary generation reads a complete version.
+        neo4j.set_active_knowledge_version(
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
+        )
+        return []
+    except Exception as exc:
+        message = (
+            f"knowledge-graph build failed for {manifest.document_version_id}: {exc}. "
+            "Requirements were persisted; graph-primary story/scenario generation is "
+            "unavailable for this version until you rebuild it with "
+            "`build-knowledge-graph`."
+        )
+        if logger is not None:
+            logger.warning(
+                "Knowledge-graph build failed; continuing (requirements already persisted)",
+                step="build_knowledge_graph",
+                document_version_id=manifest.document_version_id,
+                error=str(exc),
+                status="degraded",
+            )
+        return [message]
 
 
 def _ingest_run_dir(settings: AppSettings, project: str, run_identifier: str) -> Path:
