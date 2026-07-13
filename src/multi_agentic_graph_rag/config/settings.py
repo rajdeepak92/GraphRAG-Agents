@@ -87,6 +87,10 @@ class KnowledgeGraphSettings(BaseModel):
     graph_primary_scenario: bool = True
     expansion_k: int = 6
     graph_min_assertions: int = 3
+    # Bounded retry for transient build failures (provider timeout, rate limit,
+    # temporary Neo4j connectivity). Deterministic failures (validation / schema)
+    # are never retried. ``1`` disables retry.
+    build_max_attempts: int = 2
 
 
 class TestScenarioSettings(UserStorySettings):

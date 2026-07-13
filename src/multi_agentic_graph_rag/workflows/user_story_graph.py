@@ -181,6 +181,8 @@ def _run_pipeline(
             document_version_id=source.document_version_id,
             primary=settings.knowledge_graph.graph_primary_story,
             stage="user-story",
+            postgres=postgres,
+            project=source.project,
         )
 
         retrieval = RetrievalService(

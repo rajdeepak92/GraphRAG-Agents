@@ -987,6 +987,64 @@ class ReconcileReport(StrictModel):
     document_version_id: str | None = None
     repaired_paths: list[str] = Field(default_factory=list)
     missing_artifacts: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+MasterStage = Literal["requirements", "user_stories", "test_scenarios"]
+
+
+class StageMasterArtifact(StrictModel):
+    """Cumulative per-project master projection for one pipeline stage.
+
+    One of these exists per project per stage. ``records`` holds the full
+    cumulative set (active + all preserved historical revisions), materialized
+    deterministically from the normalized PostgreSQL rows. ``checksum`` covers
+    only the reproducible content (schema version, stage, project, document id,
+    records) — never the run/time/revision metadata — so a re-materialization
+    from unchanged rows is byte-identical and drift detection never cries wolf.
+    """
+
+    artifact_schema_version: str
+    stage: MasterStage
+    project: str
+    document_id: str
+    current_document_version_id: str = ""
+    payload_revision: int = 0
+    run_id: str = ""
+    checksum: str = ""
+    record_count: int = 0
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    records: list[dict[str, Any]] = Field(default_factory=list)
+
+
+KnowledgeGraphStatus = Literal["pending", "building", "ready", "failed", "rebuilding"]
+
+
+class KnowledgeGraphStateRecord(StrictModel):
+    """Version-scoped readiness state for the semantic knowledge graph.
+
+    ``ready`` is reached only at the end of the full successful build path
+    (extraction -> validation -> projection -> active-pointer move). A partial or
+    crashed build stays ``building`` / ``failed``, so graph-primary generation is
+    blocked fail-closed until an explicit rebuild succeeds.
+    """
+
+    document_version_id: str
+    project: str
+    document_id: str
+    doc_version: str
+    status: KnowledgeGraphStatus
+    run_id: str = ""
+    attempt: int = 0
+    failure_reason: str | None = None
+    chunk_count: int = 0
+    assertion_count: int = 0
+    evidence_count: int = 0
+    extractor_fingerprint: str = ""
+    graph_schema_version: str = ""
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class IngestionResult(StrictModel):
@@ -1002,6 +1060,16 @@ class IngestionResult(StrictModel):
     chunk_ids: list[str]
     fact_ids: list[str]
     requirement_ids: list[str]
+    # Requirement discovery and the KG build are separate commit boundaries:
+    # ``ingestion_status`` is ``completed`` when both succeed and ``degraded`` when
+    # requirements persisted but the KG build failed. ``downstream_blocked`` mirrors
+    # the graph-primary gate so operators see immediately that story/scenario
+    # generation is blocked until the rebuild command runs.
+    ingestion_status: Literal["completed", "degraded"] = "completed"
+    kg_status: KnowledgeGraphStatus | None = None
+    kg_failure_reason: str | None = None
+    downstream_blocked: bool = False
+    kg_rebuild_command: str | None = None
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 

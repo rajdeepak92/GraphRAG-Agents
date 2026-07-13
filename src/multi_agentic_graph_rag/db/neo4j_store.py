@@ -77,6 +77,20 @@ class Neo4jStore:
                 "CREATE FULLTEXT INDEX chunk_fulltext IF NOT EXISTS "
                 "FOR (c:Chunk) ON EACH [c.text, c.normalized_text]"
             )
+            # Chunk identity contract: chunk_id is version-scoped (derived from the
+            # document-version identifier), so a uniqueness constraint both backs the
+            # MERGE-by-chunk_id projection with an index and enforces immutable
+            # one-node-per-chunk identity. A separate range index on
+            # document_version_id keeps version-scoped retrieval and neighbour
+            # expansion from scanning all chunks.
+            session.run(
+                "CREATE CONSTRAINT chunk_pk IF NOT EXISTS "
+                "FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE"
+            )
+            session.run(
+                "CREATE INDEX chunk_document_version IF NOT EXISTS "
+                "FOR (c:Chunk) ON (c.document_version_id)"
+            )
             # PostgreSQL is authoritative for generated artifacts, but downstream
             # coverage projection MERGEs Requirement/UserStory/TestScenario nodes;
             # uniqueness constraints keep those derivative nodes deduplicated.

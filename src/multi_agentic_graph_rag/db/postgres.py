@@ -24,9 +24,11 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentManifest,
     GenerationContextItem,
     GenerationContextRun,
+    KnowledgeGraphStateRecord,
     RequirementArtifact,
     RequirementInput,
     RequirementRevisionSnapshot,
+    StageMasterArtifact,
     TestScenarioArtifact,
     TestScenarioBuildResult,
     TestScenarioRecord,
@@ -36,6 +38,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     normalize_priority_label,
 )
 from multi_agentic_graph_rag.services.local_lock import LocalFileLock
+from multi_agentic_graph_rag.services.master_projection import materialize_master
 from multi_agentic_graph_rag.services.requirement_builder import (
     build_canonical_requirements_artifact,
 )
@@ -59,11 +62,37 @@ _MANAGED_TABLES = (
     "requirement_artifacts",
     "document_versions",
     "ingestion_runs",
+    "knowledge_graph_state",
+    "requirements_master",
+    "user_stories_master",
+    "test_scenarios_master",
     "generation_context_runs",
     "generation_context_items",
 )
 
+_MASTER_MANAGED_TABLES = (
+    "requirements_master",
+    "user_stories_master",
+    "test_scenarios_master",
+)
+
+_MASTER_TABLE_BY_STAGE = {
+    "requirements": "requirements_master",
+    "user_stories": "user_stories_master",
+    "test_scenarios": "test_scenarios_master",
+}
+
 _TEXT_TYPES = {"text", "character varying"}
+_MASTER_COLUMNS = {
+    "project": _TEXT_TYPES,
+    "artifact_schema_version": _TEXT_TYPES,
+    "current_document_version_id": _TEXT_TYPES,
+    "run_id": _TEXT_TYPES,
+    "payload": {"jsonb"},
+    "checksum": _TEXT_TYPES,
+    "payload_revision": {"integer"},
+    "updated_at": {"timestamp with time zone"},
+}
 _EXPECTED_COLUMNS = {
     "requirement_identity_resolutions": {
         "resolution_id": _TEXT_TYPES,
@@ -94,6 +123,27 @@ _EXPECTED_COLUMNS = {
         "payload": {"jsonb"},
         "created_at": {"timestamp with time zone"},
     },
+    "knowledge_graph_state": {
+        "document_version_id": _TEXT_TYPES,
+        "project": _TEXT_TYPES,
+        "document_id": _TEXT_TYPES,
+        "doc_version": _TEXT_TYPES,
+        "status": _TEXT_TYPES,
+        "run_id": _TEXT_TYPES,
+        "attempt": {"integer"},
+        "failure_reason": _TEXT_TYPES,
+        "chunk_count": {"integer"},
+        "assertion_count": {"integer"},
+        "evidence_count": {"integer"},
+        "extractor_fingerprint": _TEXT_TYPES,
+        "graph_schema_version": _TEXT_TYPES,
+        "started_at": {"timestamp with time zone"},
+        "completed_at": {"timestamp with time zone"},
+        "updated_at": {"timestamp with time zone"},
+    },
+    "requirements_master": _MASTER_COLUMNS,
+    "user_stories_master": _MASTER_COLUMNS,
+    "test_scenarios_master": _MASTER_COLUMNS,
     "generation_context_runs": {
         "context_run_id": _TEXT_TYPES,
         "stage": _TEXT_TYPES,
@@ -369,6 +419,56 @@ class PostgresStore:
                       status text not null,
                       payload jsonb not null,
                       created_at timestamptz not null default now()
+                    );
+                    create table if not exists knowledge_graph_state (
+                      document_version_id text primary key,
+                      project text not null,
+                      document_id text not null,
+                      doc_version text not null,
+                      status text not null,
+                      run_id text not null default '',
+                      attempt integer not null default 0,
+                      failure_reason text,
+                      chunk_count integer not null default 0,
+                      assertion_count integer not null default 0,
+                      evidence_count integer not null default 0,
+                      extractor_fingerprint text not null default '',
+                      graph_schema_version text not null default '',
+                      started_at timestamptz,
+                      completed_at timestamptz,
+                      updated_at timestamptz not null default now()
+                    );
+                    create index if not exists knowledge_graph_state_project_idx
+                      on knowledge_graph_state(project, document_id);
+                    create table if not exists requirements_master (
+                      project text primary key,
+                      artifact_schema_version text not null,
+                      current_document_version_id text not null default '',
+                      run_id text not null default '',
+                      payload jsonb not null,
+                      checksum text not null,
+                      payload_revision integer not null default 1,
+                      updated_at timestamptz not null default now()
+                    );
+                    create table if not exists user_stories_master (
+                      project text primary key,
+                      artifact_schema_version text not null,
+                      current_document_version_id text not null default '',
+                      run_id text not null default '',
+                      payload jsonb not null,
+                      checksum text not null,
+                      payload_revision integer not null default 1,
+                      updated_at timestamptz not null default now()
+                    );
+                    create table if not exists test_scenarios_master (
+                      project text primary key,
+                      artifact_schema_version text not null,
+                      current_document_version_id text not null default '',
+                      run_id text not null default '',
+                      payload jsonb not null,
+                      checksum text not null,
+                      payload_revision integer not null default 1,
+                      updated_at timestamptz not null default now()
                     );
                     create table if not exists requirement_artifacts (
                       artifact_path text primary key,
@@ -799,7 +899,9 @@ class PostgresStore:
                            ('0003_generation_context_run_id'),
                            ('0004_one_active_revision_per_requirement'),
                            ('0005_contract_canonical_ids'),
-                           ('0006_uuid7_format_constraints')
+                           ('0006_uuid7_format_constraints'),
+                           ('0007_knowledge_graph_state'),
+                           ('0008_stage_master_projections')
                     on conflict (version) do nothing;
                     """
                 )
@@ -954,6 +1056,13 @@ class PostgresStore:
                 },
             )
             self._persist_requirement_ledger_local(artifact)
+            self.refresh_stage_master(
+                project=artifact.project,
+                stage="requirements",
+                document_id=artifact.document_id,
+                current_document_version_id=artifact.document_version_id,
+                run_id=run_id,
+            )
             return artifact
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -975,6 +1084,14 @@ class PostgresStore:
                     ),
                 )
                 self._persist_requirement_ledger_postgres(cursor, artifact)
+                self.refresh_stage_master(
+                    project=artifact.project,
+                    stage="requirements",
+                    document_id=artifact.document_id,
+                    current_document_version_id=artifact.document_version_id,
+                    run_id=run_id,
+                    cursor=cursor,
+                )
             connection.commit()
         return artifact
 
@@ -1038,6 +1155,12 @@ class PostgresStore:
                 },
             )
             self._persist_user_stories_local(result, run_id)
+            self.refresh_stage_master(
+                project=result.artifact.project,
+                stage="user_stories",
+                current_document_version_id=result.artifact.document_version_id,
+                run_id=run_id,
+            )
             return result
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -1052,6 +1175,13 @@ class PostgresStore:
                     (artifact_path, result.artifact.document_version_id, json.dumps(payload)),
                 )
                 self._persist_user_stories_postgres(cursor, result, run_id)
+                self.refresh_stage_master(
+                    project=result.artifact.project,
+                    stage="user_stories",
+                    current_document_version_id=result.artifact.document_version_id,
+                    run_id=run_id,
+                    cursor=cursor,
+                )
             connection.commit()
         return result
 
@@ -1245,6 +1375,12 @@ class PostgresStore:
                 },
             )
             self._persist_test_scenarios_local(result, run_id)
+            self.refresh_stage_master(
+                project=result.artifact.project,
+                stage="test_scenarios",
+                current_document_version_id=result.artifact.document_version_id,
+                run_id=run_id,
+            )
             return result
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -1259,6 +1395,13 @@ class PostgresStore:
                     (artifact_path, result.artifact.document_version_id, json.dumps(payload)),
                 )
                 self._persist_test_scenarios_postgres(cursor, result, run_id)
+                self.refresh_stage_master(
+                    project=result.artifact.project,
+                    stage="test_scenarios",
+                    current_document_version_id=result.artifact.document_version_id,
+                    run_id=run_id,
+                    cursor=cursor,
+                )
             connection.commit()
         return result
 
@@ -2054,6 +2197,409 @@ class PostgresStore:
                     ),
                 )
             connection.commit()
+
+    def upsert_knowledge_graph_state(self, state: KnowledgeGraphStateRecord) -> None:
+        """Persist the version-scoped KG readiness state (one row per version)."""
+        if self.settings.postgres.mode == "local_json":
+            self._upsert_local(
+                "knowledge_graph_state",
+                state.document_version_id,
+                {"kind": "knowledge_graph_state", **state.model_dump(mode="json")},
+            )
+            return
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into knowledge_graph_state
+                      (document_version_id, project, document_id, doc_version, status,
+                       run_id, attempt, failure_reason, chunk_count, assertion_count,
+                       evidence_count, extractor_fingerprint, graph_schema_version,
+                       started_at, completed_at, updated_at)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    on conflict (document_version_id) do update set
+                      project=excluded.project,
+                      document_id=excluded.document_id,
+                      doc_version=excluded.doc_version,
+                      status=excluded.status,
+                      run_id=excluded.run_id,
+                      attempt=excluded.attempt,
+                      failure_reason=excluded.failure_reason,
+                      chunk_count=excluded.chunk_count,
+                      assertion_count=excluded.assertion_count,
+                      evidence_count=excluded.evidence_count,
+                      extractor_fingerprint=excluded.extractor_fingerprint,
+                      graph_schema_version=excluded.graph_schema_version,
+                      started_at=excluded.started_at,
+                      completed_at=excluded.completed_at,
+                      updated_at=now()
+                    """,
+                    (
+                        state.document_version_id,
+                        state.project,
+                        state.document_id,
+                        state.doc_version,
+                        state.status,
+                        state.run_id,
+                        state.attempt,
+                        state.failure_reason,
+                        state.chunk_count,
+                        state.assertion_count,
+                        state.evidence_count,
+                        state.extractor_fingerprint,
+                        state.graph_schema_version,
+                        state.started_at,
+                        state.completed_at,
+                    ),
+                )
+            connection.commit()
+
+    def get_knowledge_graph_state(
+        self, document_version_id: str
+    ) -> KnowledgeGraphStateRecord | None:
+        """Read the KG readiness state for one document version, or None if absent."""
+        if self.settings.postgres.mode == "local_json":
+            latest: dict[str, Any] | None = None
+            for row in self._read_local_rows():
+                if (
+                    row.get("kind") == "knowledge_graph_state"
+                    and row.get("document_version_id") == document_version_id
+                ):
+                    latest = row
+            if latest is None:
+                return None
+            payload = {
+                key: value
+                for key, value in latest.items()
+                if key not in {"kind", "written_at", "_local_key"}
+            }
+            return KnowledgeGraphStateRecord.model_validate(payload)
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select document_version_id, project, document_id, doc_version, status,
+                       run_id, attempt, failure_reason, chunk_count, assertion_count,
+                       evidence_count, extractor_fingerprint, graph_schema_version,
+                       started_at, completed_at, updated_at
+                from knowledge_graph_state
+                where document_version_id = %s
+                """,
+                (document_version_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return KnowledgeGraphStateRecord(
+            document_version_id=str(row[0]),
+            project=str(row[1]),
+            document_id=str(row[2]),
+            doc_version=str(row[3]),
+            status=row[4],
+            run_id=str(row[5] or ""),
+            attempt=int(row[6] or 0),
+            failure_reason=row[7],
+            chunk_count=int(row[8] or 0),
+            assertion_count=int(row[9] or 0),
+            evidence_count=int(row[10] or 0),
+            extractor_fingerprint=str(row[11] or ""),
+            graph_schema_version=str(row[12] or ""),
+            started_at=row[13],
+            completed_at=row[14],
+            updated_at=row[15],
+        )
+
+    # --- Cumulative per-project master projections (Phase C) ---
+
+    def load_master_records(
+        self, *, project: str, stage: str, cursor: Any | None = None
+    ) -> list[dict[str, Any]]:
+        """Deterministically read the cumulative records for one project/stage.
+
+        Ordered by permanent id so the materialized payload (and its checksum) is
+        reproducible. When ``cursor`` is supplied the read runs inside the caller's
+        open transaction so the master reflects rows just written in the same tx.
+        """
+        if self.settings.postgres.mode == "local_json":
+            return self._master_records_local(project, stage)
+        if cursor is not None:
+            return self._master_records_pg(cursor, project, stage)
+        with self._connect() as connection, connection.cursor() as own_cursor:
+            return self._master_records_pg(own_cursor, project, stage)
+
+    def _master_records_pg(self, cursor: Any, project: str, stage: str) -> list[dict[str, Any]]:
+        if stage == "user_stories":
+            cursor.execute(
+                "select payload from user_stories where project = %s order by story_id",
+                (project,),
+            )
+            return [_artifact_payload_from_row(row[0]) for row in cursor.fetchall()]
+        if stage == "test_scenarios":
+            cursor.execute(
+                "select payload from test_scenarios where project = %s order by scenario_id",
+                (project,),
+            )
+            return [_artifact_payload_from_row(row[0]) for row in cursor.fetchall()]
+        return self._requirement_master_records_pg(cursor, project)
+
+    def _requirement_master_records_pg(self, cursor: Any, project: str) -> list[dict[str, Any]]:
+        cursor.execute(
+            """
+            select requirement_id, source_req_id, id_generation_type, confidence, status,
+                   first_seen_document_version_id, active_revision_id, document_id
+            from requirements where project = %s order by requirement_id
+            """,
+            (project,),
+        )
+        lineage = cursor.fetchall()
+        cursor.execute(
+            """
+            select r.requirement_id, r.revision_id, r.statement, r.requirement_type,
+                   r.priority, r.status, r.first_seen_document_version_id,
+                   r.superseded_by_version, r.semantic_signature, r.confidence,
+                   r.source_req_id, r.id_generation_type
+            from requirement_revisions r
+            join requirements q on q.requirement_id = r.requirement_id
+            where q.project = %s
+            order by r.requirement_id, r.revision_id
+            """,
+            (project,),
+        )
+        revisions: dict[str, list[dict[str, Any]]] = {}
+        for row in cursor.fetchall():
+            revisions.setdefault(str(row[0]), []).append(
+                {
+                    "revision_id": str(row[1]),
+                    "statement": str(row[2] or ""),
+                    "requirement_type": str(row[3] or ""),
+                    "priority": str(row[4] or ""),
+                    "status": str(row[5] or ""),
+                    "first_seen_document_version_id": str(row[6] or ""),
+                    "superseded_by_version": row[7],
+                    "semantic_signature": str(row[8] or ""),
+                    "confidence": float(row[9] or 0.0),
+                    "source_req_id": row[10],
+                    "id_generation_type": str(row[11] or "generated"),
+                    "evidence": self._requirement_evidence_pg(cursor, project, str(row[1])),
+                }
+            )
+        return [
+            {
+                "requirement_id": str(row[0]),
+                "document_id": str(row[7] or ""),
+                "source_req_id": row[1],
+                "id_generation_type": str(row[2] or "generated"),
+                "confidence": float(row[3] or 0.0),
+                "status": str(row[4] or ""),
+                "origin_version": str(row[5] or ""),
+                "active_revision_id": str(row[6] or ""),
+                "revisions": revisions.get(str(row[0]), []),
+            }
+            for row in lineage
+        ]
+
+    def _requirement_evidence_pg(
+        self, cursor: Any, project: str, revision_id: str
+    ) -> list[dict[str, Any]]:
+        # Join the fact-link table so the many-to-many fact->requirement mapping is
+        # preserved in the master (a fact_id may recur across many requirements).
+        cursor.execute(
+            """
+            select e.evidence_id, e.document_version_id, e.chunk_id, e.quote,
+                   e.start_char, e.end_char, e.page, e.section,
+                   coalesce(
+                     array_agg(l.fact_id order by l.fact_id)
+                       filter (where l.fact_id is not null),
+                     array[]::text[]
+                   ) as fact_ids
+            from requirement_evidence e
+            left join requirement_fact_links l on l.evidence_id = e.evidence_id
+            where e.revision_id = %s
+            group by e.evidence_id, e.document_version_id, e.chunk_id, e.quote,
+                     e.start_char, e.end_char, e.page, e.section
+            order by e.evidence_id
+            """,
+            (revision_id,),
+        )
+        return [
+            {
+                "evidence_id": str(row[0]),
+                "document_version_id": str(row[1] or ""),
+                "chunk_id": str(row[2] or ""),
+                "quote": str(row[3] or ""),
+                "start_char": int(row[4] or 0),
+                "end_char": int(row[5] or 0),
+                "page": row[6],
+                "section": row[7],
+                "fact_ids": [str(fact_id) for fact_id in (row[8] or [])],
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def _master_records_local(self, project: str, stage: str) -> list[dict[str, Any]]:
+        rows = self._read_local_rows()
+        if stage == "user_stories":
+            records = [
+                row["user_story"]
+                for row in rows
+                if row.get("kind") == "user_story" and row.get("project") == project
+            ]
+            return sorted(records, key=lambda item: str(item.get("story_id", "")))
+        if stage == "test_scenarios":
+            records = [
+                row["test_scenario"]
+                for row in rows
+                if row.get("kind") == "test_scenario" and row.get("project") == project
+            ]
+            return sorted(records, key=lambda item: str(item.get("scenario_id", "")))
+        return self._requirement_master_records_local(project, rows)
+
+    def _requirement_master_records_local(
+        self, project: str, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        lineage = {
+            str(row["requirement_id"]): row
+            for row in rows
+            if row.get("kind") == "requirement" and row.get("project") == project
+        }
+        revisions: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            if row.get("kind") != "requirement_revision" or row.get("project") != project:
+                continue
+            record = row["requirement"]
+            revisions.setdefault(str(record["requirement_id"]), []).append(record)
+        out: list[dict[str, Any]] = []
+        for requirement_id in sorted(lineage):
+            head = lineage[requirement_id]
+            rev_list = sorted(
+                revisions.get(requirement_id, []),
+                key=lambda item: str(item.get("revision_id", "")),
+            )
+            out.append(
+                {
+                    "requirement_id": requirement_id,
+                    "document_id": head.get("document_id", ""),
+                    "source_req_id": head.get("source_req_id"),
+                    "id_generation_type": head.get("id_generation_type", "generated"),
+                    "confidence": head.get("confidence", 0.0),
+                    "status": head.get("status", ""),
+                    "origin_version": head.get("first_seen_document_version_id", ""),
+                    "active_revision_id": head.get("active_revision_id", ""),
+                    "revisions": rev_list,
+                }
+            )
+        return out
+
+    def upsert_stage_master(
+        self, master: StageMasterArtifact, *, cursor: Any | None = None
+    ) -> None:
+        """Upsert the master row; on conflict the payload_revision monotonically bumps.
+
+        The single ``(project)`` primary key serializes concurrent writers: the
+        second waits on the row lock, then its ``do update`` sees the incremented
+        revision. No separate advisory lock is needed.
+        """
+        table = _MASTER_TABLE_BY_STAGE[master.stage]
+        payload = master.model_dump(mode="json")
+        if self.settings.postgres.mode == "local_json":
+            existing = self.get_stage_master(project=master.project, stage=master.stage)
+            payload["payload_revision"] = (existing.payload_revision if existing else 0) + 1
+            self._upsert_local(
+                f"{table}",
+                master.project,
+                {"kind": table, "project": master.project, "master": payload},
+            )
+            return
+        run = self._master_upsert_sql(table, master, payload, cursor)
+        if run is not None:
+            run()
+
+    def _master_upsert_sql(
+        self, table: str, master: StageMasterArtifact, payload: dict[str, Any], cursor: Any | None
+    ) -> Any:
+        def execute(active_cursor: Any) -> None:
+            active_cursor.execute(
+                f"""
+                insert into {table}
+                  (project, artifact_schema_version, current_document_version_id, run_id,
+                   payload, checksum, payload_revision, updated_at)
+                values (%s, %s, %s, %s, %s, %s, 1, now())
+                on conflict (project) do update set
+                  artifact_schema_version = excluded.artifact_schema_version,
+                  current_document_version_id = excluded.current_document_version_id,
+                  run_id = excluded.run_id,
+                  payload = excluded.payload,
+                  checksum = excluded.checksum,
+                  payload_revision = {table}.payload_revision + 1,
+                  updated_at = now()
+                """,
+                (
+                    master.project,
+                    master.artifact_schema_version,
+                    master.current_document_version_id,
+                    master.run_id,
+                    json.dumps(payload),
+                    master.checksum,
+                ),
+            )
+
+        if cursor is not None:
+            execute(cursor)
+            return None
+
+        def run() -> None:
+            with self._connect() as connection, connection.cursor() as own_cursor:
+                execute(own_cursor)
+                connection.commit()
+
+        return run
+
+    def refresh_stage_master(
+        self,
+        *,
+        project: str,
+        stage: str,
+        document_id: str = "",
+        current_document_version_id: str = "",
+        run_id: str = "",
+        cursor: Any | None = None,
+    ) -> StageMasterArtifact:
+        """Materialize the cumulative master from normalized rows and upsert it.
+
+        Called inside each ``persist_*`` transaction on the same cursor so the
+        normalized rows and the master payload commit atomically together.
+        """
+        master = materialize_master(
+            self,
+            project=project,
+            stage=stage,
+            document_id=document_id,
+            current_document_version_id=current_document_version_id,
+            run_id=run_id,
+            cursor=cursor,
+        )
+        self.upsert_stage_master(master, cursor=cursor)
+        return master
+
+    def get_stage_master(self, *, project: str, stage: str) -> StageMasterArtifact | None:
+        """Load the cumulative master row for one project/stage, or None."""
+        table = _MASTER_TABLE_BY_STAGE[stage]
+        if self.settings.postgres.mode == "local_json":
+            latest: dict[str, Any] | None = None
+            for row in self._read_local_rows():
+                if row.get("kind") == table and row.get("project") == project:
+                    latest = row
+            if latest is None:
+                return None
+            return StageMasterArtifact.model_validate(latest["master"])
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                f"select payload from {table} where project = %s",
+                (project,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return StageMasterArtifact.model_validate(_artifact_payload_from_row(row[0]))
 
     def record_generation_context(
         self,

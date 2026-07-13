@@ -166,27 +166,53 @@ def require_knowledge_graph_when_primary(
     document_version_id: str,
     primary: bool,
     stage: str,
+    postgres: Any | None = None,
+    project: str = "",
 ) -> None:
-    """Fail fast when graph-primary generation is requested for a version with no
-    semantic knowledge graph.
+    """Block graph-primary generation unless the version's KG is ``ready``.
 
-    A missing knowledge graph for the whole version is a configuration/pipeline
-    error — the operator forgot to build it — not an ordinary per-anchor grounding
-    fallback. Legacy fallback stays valid only when the knowledge channel or the
-    stage-primary flag was explicitly disabled.
+    Readiness is authoritative: a persisted state row proves the KG completed the
+    full build path, so a partial/failed/in-progress build (which never reaches
+    ``ready``) blocks fail-closed. Versions ingested before the readiness state
+    machine existed have no state row; those are grandfathered on the presence of
+    projected assertions so their generation is not retroactively broken.
+
+    Legacy fallback stays valid only when the knowledge channel or the
+    stage-primary flag was explicitly disabled — never as a silent reaction to a
+    KG failure.
     """
+    from multi_agentic_graph_rag.domain.errors import ConfigurationError
+    from multi_agentic_graph_rag.services.knowledge_graph_state import (
+        knowledge_graph_rebuild_command,
+    )
+
     knowledge_graph = settings.knowledge_graph
     if not (knowledge_graph.enabled and primary):
         return
+
+    rebuild = knowledge_graph_rebuild_command(project, document_version_id)
+    state = (
+        postgres.get_knowledge_graph_state(document_version_id) if postgres is not None else None
+    )
+
+    if state is not None:
+        if state.status == "ready":
+            return
+        reason = f" (reason: {state.failure_reason})" if state.failure_reason else ""
+        raise ConfigurationError(
+            f"graph-primary {stage} generation is blocked: the semantic knowledge "
+            f"graph for document version {document_version_id} is '{state.status}', "
+            f"not 'ready'{reason}. Rebuild it with `{rebuild}`, or disable "
+            "graph-primary generation to use the legacy chunk path"
+        )
+
+    # No state row: grandfather pre-readiness-machine versions on assertion presence.
     if neo4j.has_knowledge_assertions(document_version_id):
         return
-    from multi_agentic_graph_rag.domain.errors import ConfigurationError
-
     raise ConfigurationError(
         f"graph-primary {stage} generation is enabled but document version "
         f"{document_version_id} has no semantic knowledge graph; run "
-        "`marag build-knowledge-graph --project <P> --document-version-id "
-        f"{document_version_id}` first (or ingest with KNOWLEDGE_GRAPH_ENABLED=true), "
+        f"`{rebuild}` first (or ingest with KNOWLEDGE_GRAPH_ENABLED=true), "
         "or disable graph-primary generation to use the legacy chunk path"
     )
 

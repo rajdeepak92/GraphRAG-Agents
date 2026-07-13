@@ -32,8 +32,8 @@ from multi_agentic_graph_rag.observability.session import (
     command_run_id,
     command_session,
 )
-from multi_agentic_graph_rag.services.knowledge_graph_builder import (
-    build_and_project_knowledge_graph,
+from multi_agentic_graph_rag.services.knowledge_graph_state import (
+    run_guarded_knowledge_graph_build,
 )
 
 
@@ -140,7 +140,11 @@ def _run_pipeline(
                 project=request.project,
             )
 
-        artifact = build_and_project_knowledge_graph(
+        # The guarded builder owns the readiness state machine (building/rebuilding
+        # -> project -> active pointer -> ready) and bounded transient retry, shared
+        # with the inline ingestion path so the two can never drift. On failure it
+        # records the failed state and re-raises for the outer handler below.
+        build = run_guarded_knowledge_graph_build(
             project=request.project,
             document_id=metadata["document_id"],
             document_version_id=request.document_version_id,
@@ -148,14 +152,12 @@ def _run_pipeline(
             chunks=chunks,
             reasoning_model=reasoning_model,
             neo4j=neo4j,
+            postgres=postgres,
+            settings=settings,
+            run_id=state["run_id"],
             logger=logger,
         )
-        # The standalone stage moves the document's active-knowledge pointer to
-        # this version only after a successful projection.
-        neo4j.set_active_knowledge_version(
-            document_id=metadata["document_id"],
-            document_version_id=request.document_version_id,
-        )
+        artifact = build.artifact
 
         out_dir = _output_dir(settings, request.project, state["run_id"])
         out_dir.mkdir(parents=True, exist_ok=True)

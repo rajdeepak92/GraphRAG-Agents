@@ -160,6 +160,10 @@ class _FakePostgres:
     def persist_manifest(self, manifest: object) -> None:
         self.events.append("postgres.persist_manifest")
 
+    def get_stage_master(self, *, project: str, stage: str) -> None:
+        # Master-file sync is out of scope for this boundary test; no master row.
+        return None
+
     def persist_artifact(
         self,
         artifact: RequirementArtifact,

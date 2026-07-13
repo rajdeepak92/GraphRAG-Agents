@@ -503,6 +503,14 @@ def ingest(
         )
         console.print(f"manifest={result.manifest_path}")
         console.print(f"artifact={result.artifact_path}")
+        if result.ingestion_status == "degraded":
+            console.print(
+                "[yellow]DEGRADED[/yellow] requirements persisted but the semantic "
+                "knowledge-graph build failed; graph-primary story/scenario generation "
+                "is blocked for this version until you rebuild it."
+            )
+            if result.kg_rebuild_command:
+                console.print(f"rebuild: {result.kg_rebuild_command}")
 
 
 @app.command("generate-user-stories")

@@ -271,6 +271,8 @@ def _generate(
         document_version_id=source.document_version_id,
         primary=settings.knowledge_graph.graph_primary_scenario,
         stage="test-scenario",
+        postgres=postgres,
+        project=source.project,
     )
 
     retrieval = RetrievalService(
@@ -537,6 +539,8 @@ def _run_pipeline(
             document_version_id=source.document_version_id,
             primary=settings.knowledge_graph.graph_primary_scenario,
             stage="test-scenario",
+            postgres=postgres,
+            project=source.project,
         )
 
         retrieval = RetrievalService(

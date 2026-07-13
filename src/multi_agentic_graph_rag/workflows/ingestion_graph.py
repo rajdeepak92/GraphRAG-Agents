@@ -36,8 +36,9 @@ from multi_agentic_graph_rag.services.artifacts import (
 )
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger
-from multi_agentic_graph_rag.services.knowledge_graph_builder import (
-    build_and_project_knowledge_graph,
+from multi_agentic_graph_rag.services.knowledge_graph_state import (
+    knowledge_graph_rebuild_command,
+    run_guarded_knowledge_graph_build,
 )
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
 from multi_agentic_graph_rag.services.parsing import checksum_bytes, parse_document
@@ -63,6 +64,11 @@ class IngestionState(TypedDict, total=False):
     chunk_ids: list[str]
     fact_ids: list[str]
     requirement_ids: list[str]
+    ingestion_status: str
+    kg_status: str | None
+    kg_failure_reason: str | None
+    downstream_blocked: bool
+    kg_rebuild_command: str | None
     warnings: list[str]
     errors: list[str]
 
@@ -330,11 +336,13 @@ def _run_pipeline(
         # best-effort: a failure never discards the requirement artifacts. If it
         # fails, graph-primary generation stays unavailable for this version until
         # it is rebuilt with `build-knowledge-graph`.
-        kg_warnings = _build_knowledge_graph_best_effort(
+        kg_outcome = _build_knowledge_graph_best_effort(
             settings=settings,
             manifest=manifest,
             reasoning_model=reasoning_model,
             neo4j=neo4j,
+            postgres=postgres,
+            run_id=state["run_id"],
             logger=logger,
         )
         result_payload: IngestionState = {
@@ -347,7 +355,12 @@ def _run_pipeline(
             "chunk_ids": [chunk.chunk_id for chunk in manifest.chunks],
             "fact_ids": [fact.fact_id for fact in artifact.facts],
             "requirement_ids": [req.requirement_id for req in artifact.requirements],
-            "warnings": kg_warnings,
+            "ingestion_status": kg_outcome.get("ingestion_status", "completed"),
+            "kg_status": kg_outcome.get("kg_status"),
+            "kg_failure_reason": kg_outcome.get("kg_failure_reason"),
+            "downstream_blocked": bool(kg_outcome.get("downstream_blocked", False)),
+            "kg_rebuild_command": kg_outcome.get("kg_rebuild_command"),
+            "warnings": kg_outcome.get("warnings", []),
             "errors": [],
         }
         if session is not None:
@@ -605,6 +618,11 @@ def run_ingestion(
         chunk_ids=final_state["chunk_ids"],
         fact_ids=final_state["fact_ids"],
         requirement_ids=final_state["requirement_ids"],
+        ingestion_status=final_state.get("ingestion_status", "completed"),
+        kg_status=final_state.get("kg_status"),
+        kg_failure_reason=final_state.get("kg_failure_reason"),
+        downstream_blocked=final_state.get("downstream_blocked", False),
+        kg_rebuild_command=final_state.get("kg_rebuild_command"),
         warnings=final_state.get("warnings", []),
         errors=final_state.get("errors", []),
     )
@@ -616,17 +634,21 @@ def _build_knowledge_graph_best_effort(
     manifest: Any,
     reasoning_model: Any,
     neo4j: Any,
+    postgres: Any,
+    run_id: str,
     logger: Any | None,
-) -> list[str]:
+) -> dict[str, Any]:
     """Build + project the semantic knowledge graph without risking the run.
 
-    Returns a (possibly empty) list of warnings. When the knowledge channel is
-    disabled this is a no-op. On any failure the requirement artifacts are already
-    persisted, so the run still succeeds; the warning tells the operator to rebuild
-    the graph before relying on graph-primary generation.
+    Delegates the readiness state machine (building -> project -> active pointer ->
+    ready, with bounded transient retry) to the shared guarded builder so this path
+    and the standalone stage never drift. When the knowledge channel is disabled
+    this is a no-op. On failure the requirement artifacts are already persisted, so
+    the run still succeeds but is marked ``degraded`` with ``downstream_blocked`` so
+    the operator sees that graph-primary generation is blocked until rebuild.
     """
     if not settings.knowledge_graph.enabled:
-        return []
+        return {"ingestion_status": "completed", "warnings": []}
     try:
         if logger is not None:
             logger.info(
@@ -636,7 +658,7 @@ def _build_knowledge_graph_best_effort(
                 chunk_count=len(manifest.chunks),
                 store_responsibility="source_knowledge_graph",
             )
-        build_and_project_knowledge_graph(
+        result = run_guarded_knowledge_graph_build(
             project=manifest.project,
             document_id=manifest.document_id,
             document_version_id=manifest.document_version_id,
@@ -644,21 +666,23 @@ def _build_knowledge_graph_best_effort(
             chunks=list(manifest.chunks),
             reasoning_model=reasoning_model,
             neo4j=neo4j,
+            postgres=postgres,
+            settings=settings,
+            run_id=run_id,
             logger=logger,
         )
-        # Move the document's active-knowledge pointer only after a successful
-        # projection, so graph-primary generation reads a complete version.
-        neo4j.set_active_knowledge_version(
-            document_id=manifest.document_id,
-            document_version_id=manifest.document_version_id,
-        )
-        return []
+        return {
+            "ingestion_status": "completed",
+            "kg_status": result.state.status,
+            "downstream_blocked": False,
+            "warnings": [],
+        }
     except Exception as exc:
+        rebuild = knowledge_graph_rebuild_command(manifest.project, manifest.document_version_id)
         message = (
             f"knowledge-graph build failed for {manifest.document_version_id}: {exc}. "
             "Requirements were persisted; graph-primary story/scenario generation is "
-            "unavailable for this version until you rebuild it with "
-            "`build-knowledge-graph`."
+            f"blocked for this version until you rebuild it with `{rebuild}`."
         )
         if logger is not None:
             logger.warning(
@@ -668,7 +692,14 @@ def _build_knowledge_graph_best_effort(
                 error=str(exc),
                 status="degraded",
             )
-        return [message]
+        return {
+            "ingestion_status": "degraded",
+            "kg_status": "failed",
+            "kg_failure_reason": str(exc),
+            "downstream_blocked": True,
+            "kg_rebuild_command": rebuild,
+            "warnings": [message],
+        }
 
 
 def _ingest_run_dir(settings: AppSettings, project: str, run_identifier: str) -> Path:
