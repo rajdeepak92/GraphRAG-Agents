@@ -29,6 +29,31 @@ from multi_agentic_graph_rag.workflows.ingestion_graph import _run_pipeline
 
 
 class IngestionPersistenceBoundaryTests(unittest.TestCase):
+    def test_schema_upgrade_makes_uuid7_constraints_case_insensitive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = PostgresStore(
+                _settings(
+                    Path(temp_dir),
+                    postgres_mode="postgres",
+                    neo4j_mode="neo4j",
+                )
+            )
+            connection = MagicMock()
+            cursor = connection.cursor.return_value.__enter__.return_value
+
+            with (
+                patch.object(store, "_connect", return_value=nullcontext(connection)),
+                patch.object(store, "_validate_schema"),
+            ):
+                store.ensure_schema()
+
+        schema_sql = cursor.execute.call_args_list[0].args[0]
+        self.assertIn("0009_uuid7_case_insensitive_constraints", schema_sql)
+        self.assertIn("check (requirement_id ~*", schema_sql)
+        self.assertIn("check (revision_id ~*", schema_sql)
+        self.assertIn("check (evidence_id ~*", schema_sql)
+        connection.commit.assert_called_once()
+
     def test_postgres_identity_lock_contention_fails_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = PostgresStore(

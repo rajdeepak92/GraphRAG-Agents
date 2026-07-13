@@ -923,6 +923,38 @@ class PostgresStore:
                           not valid;
                       end if;
                     end $$;
+                    -- Migration 0009 repairs migration 0006's lowercase-only regular
+                    -- expressions. Canonical UUIDv7 allocators emit uppercase UUID text,
+                    -- while application validation intentionally accepts either case.
+                    do $$
+                    begin
+                      if not exists (
+                        select 1 from schema_migrations
+                        where version = '0009_uuid7_case_insensitive_constraints'
+                      ) then
+                        alter table requirements
+                          drop constraint if exists requirements_uuid7_format_check;
+                        alter table requirements
+                          add constraint requirements_uuid7_format_check
+                          check (requirement_id ~*
+                            '^REQ-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+                          not valid;
+                        alter table requirement_revisions
+                          drop constraint if exists requirement_revisions_uuid7_format_check;
+                        alter table requirement_revisions
+                          add constraint requirement_revisions_uuid7_format_check
+                          check (revision_id ~*
+                            '^REQREV-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+                          not valid;
+                        alter table requirement_evidence
+                          drop constraint if exists requirement_evidence_uuid7_format_check;
+                        alter table requirement_evidence
+                          add constraint requirement_evidence_uuid7_format_check
+                          check (evidence_id ~*
+                            '^REQEVID-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+                          not valid;
+                      end if;
+                    end $$;
                     insert into schema_migrations(version)
                     values ('0001_version_lineage_inline'),
                            ('0002_context_item_assertion_columns'),
@@ -931,7 +963,8 @@ class PostgresStore:
                            ('0005_contract_canonical_ids'),
                            ('0006_uuid7_format_constraints'),
                            ('0007_knowledge_graph_state'),
-                           ('0008_stage_master_projections')
+                           ('0008_stage_master_projections'),
+                           ('0009_uuid7_case_insensitive_constraints')
                     on conflict (version) do nothing;
                     """
                 )
