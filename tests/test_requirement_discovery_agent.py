@@ -9,12 +9,17 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from multi_agentic_graph_rag.agents.requirement_discovery_agent import RequirementDiscoveryAgent
+from multi_agentic_graph_rag.agents.requirement_discovery_agent import (
+    RequirementDiscoveryAgent,
+    _collect_semantic_diagnostics,
+    _has_multiple_actors,
+)
 from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentChunk,
     DocumentManifest,
     RequirementDiscoveryChunkOutput,
+    RequirementRevisionSnapshot,
 )
 from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger
 from multi_agentic_graph_rag.services.requirement_builder import build_requirement_artifact
@@ -65,6 +70,339 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
         self.assertEqual(len(fact.requirements), 2)
         self.assertEqual(fact.requirements[0].temp_id, "R1")
         self.assertEqual(fact.requirements[1].temp_id, "R2")
+
+    def test_equivalent_observations_may_reuse_one_requirement_key(self) -> None:
+        first_quote = "Context A: The system shall import files."
+        second_quote = "Context B: The system shall import files."
+        manifest = _manifest([f"{first_quote} {second_quote}"])
+        reasoner = _StaticReasoner(
+            [
+                _fact(first_quote, requirements=[_requirement("The system shall import files.")]),
+                _fact(second_quote, requirements=[_requirement("The system shall import files.")]),
+            ]
+        )
+
+        discovery = RequirementDiscoveryAgent(reasoner).run(manifest)
+        artifact = _build_artifact(manifest, discovery)
+
+        self.assertEqual(reasoner.prompts, 1)
+        self.assertEqual(len(artifact.requirements), 1)
+        self.assertEqual(len(artifact.requirements[0].evidence), 2)
+
+    def test_incompatible_key_is_precisely_retried_and_split_into_stable_keys(self) -> None:
+        quote = "The system shall import and export files."
+        manifest = _manifest([quote])
+        reasoner = _CollisionRepairReasoner(quote)
+
+        output = RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        self.assertEqual(len(reasoner.prompts), 2)
+        retry_prompt = reasoner.prompts[1]
+        self.assertIn('"system_files"', retry_prompt)
+        self.assertIn("The system shall import files.", retry_prompt)
+        self.assertIn("The system shall export files.", retry_prompt)
+        self.assertIn("normalized_atomic_signature", retry_prompt)
+        self.assertIn("source_quote", retry_prompt)
+        self.assertIn("distinct stable keys", retry_prompt)
+        keys = [
+            requirement.requirement_key for requirement in output.chunks[0].facts[0].requirements
+        ]
+        self.assertEqual(keys, ["system_import_files", "system_export_files"])
+
+    def test_compound_source_split_uses_distinct_semantic_keys(self) -> None:
+        quote = "The system shall import and export files."
+        manifest = _manifest([quote])
+        reasoner = _StaticReasoner(
+            [
+                _fact(
+                    quote,
+                    requirements=[
+                        _requirement(
+                            "The system shall import files.",
+                            requirement_key="system_import_files",
+                        ),
+                        _requirement(
+                            "The system shall export files.",
+                            requirement_key="system_export_files",
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        output = RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        keys = {
+            requirement.requirement_key for requirement in output.chunks[0].facts[0].requirements
+        }
+        self.assertEqual(keys, {"system_import_files", "system_export_files"})
+
+    def test_same_source_req_id_with_incompatible_semantics_is_not_merged(self) -> None:
+        quote = "BR-CFG-01: The system shall import and export files."
+        manifest = _manifest([quote])
+        reasoner = _StaticReasoner(
+            [
+                _fact(
+                    quote,
+                    requirements=[
+                        _requirement(
+                            "The system shall import files.",
+                            source_req_id="BR-CFG-01",
+                            requirement_key="system_import_files",
+                        ),
+                        _requirement(
+                            "The system shall export files.",
+                            source_req_id="BR-CFG-01",
+                            requirement_key="system_export_files",
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        discovery = RequirementDiscoveryAgent(reasoner).run(manifest)
+        artifact = _build_artifact(manifest, discovery)
+
+        self.assertEqual(len(artifact.requirements), 2)
+        self.assertEqual(
+            {requirement.source_req_id for requirement in artifact.requirements},
+            {"BR-CFG-01"},
+        )
+        self.assertEqual(
+            len({requirement.requirement_id for requirement in artifact.requirements}),
+            2,
+        )
+
+    def test_pure_key_collision_surviving_retry_is_repaired_and_proceeds(self) -> None:
+        # A requirement_key is a non-authoritative hint; Python owns permanent identity.
+        # A pure collision the model never fixes must be repaired deterministically, not
+        # fail the chunk and drop supported requirements.
+        quote = "The system shall import and export files."
+        manifest = _manifest([quote])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reasoner = _PersistingCollisionReasoner(Path(temp_dir), quote)
+
+            discovery = RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        self.assertEqual(reasoner.prompts, 2)
+        keys = [
+            requirement.requirement_key for requirement in discovery.chunks[0].facts[0].requirements
+        ]
+        # Repaired to distinct, stable keys derived from the semantic signature.
+        self.assertTrue(all(key.startswith("system_files:") for key in keys), keys)
+        self.assertEqual(len(set(keys)), 2, keys)
+
+        artifact = _build_artifact(manifest, discovery)
+        self.assertEqual(len(artifact.requirements), 2)
+        self.assertEqual(
+            len({requirement.requirement_id for requirement in artifact.requirements}), 2
+        )
+
+    def test_pure_key_collision_repair_is_stable_across_reruns(self) -> None:
+        quote = "The system shall import and export files."
+        manifest = _manifest([quote])
+        with (
+            tempfile.TemporaryDirectory() as first_dir,
+            tempfile.TemporaryDirectory() as second_dir,
+        ):
+            first = RequirementDiscoveryAgent(
+                _PersistingCollisionReasoner(Path(first_dir), quote)
+            ).run(manifest)
+            second = RequirementDiscoveryAgent(
+                _PersistingCollisionReasoner(Path(second_dir), quote)
+            ).run(manifest)
+
+        first_keys = [r.requirement_key for r in first.chunks[0].facts[0].requirements]
+        second_keys = [r.requirement_key for r in second.chunks[0].facts[0].requirements]
+        self.assertEqual(first_keys, second_keys)
+
+    def test_source_support_failure_fails_closed_with_diagnostics(self) -> None:
+        quote = "Embedded controller that reads sensor data using Modbus."
+        req_text = (
+            "SIIMCS uses an embedded controller to collect operating data from industrial "
+            "sensors through a Modbus communication interface."
+        )
+        manifest = _manifest([f"Overview. {quote}"])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reasoner = _PersistingReasoner(
+                Path(temp_dir),
+                [_fact(quote, requirements=[_requirement(req_text)])],
+            )
+
+            with self.assertRaises(ModelOutputError) as raised:
+                RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        message = str(raised.exception)
+        self.assertIn("CHUNK-1", message)
+        self.assertIn("attempt=2", message)
+        self.assertIn("source_support", message)
+        self.assertIn("support_ratio", message)
+        self.assertIn("missing_tokens", message)
+        self.assertIn("siimcs", message)
+        self.assertIn("llm_response_1_2.txt", message)
+        self.assertEqual(reasoner.prompts, 2)
+
+    def test_embedded_controller_quote_cannot_support_longer_statement(self) -> None:
+        quote = "Embedded controller that reads sensor data using Modbus."
+        req_text = (
+            "SIIMCS uses an embedded controller to collect operating data from industrial "
+            "sensors through a Modbus communication interface."
+        )
+        output = RequirementDiscoveryChunkOutput.model_validate(
+            {"facts": [_fact(quote, requirements=[_requirement(req_text)])]}
+        )
+
+        diagnostics = _collect_semantic_diagnostics(output, chunk_id="CHUNK-1")
+
+        support = [d for d in diagnostics if d.category == "source_support"]
+        self.assertEqual(len(support), 1)
+        self.assertIsNotNone(support[0].support_ratio)
+        assert support[0].support_ratio is not None
+        self.assertLess(support[0].support_ratio, 0.5)
+        # Tokens borrowed from outside the quote are reported as missing.
+        self.assertIn("siimcs", support[0].missing_tokens)
+        self.assertIn("industrial", support[0].missing_tokens)
+        self.assertIn("interface", support[0].missing_tokens)
+
+    def test_source_support_corrective_retry_produces_atomic_statement(self) -> None:
+        quote = "Embedded controller that reads sensor data using Modbus."
+        unsupported = (
+            "SIIMCS uses an embedded controller to collect operating data from industrial "
+            "sensors through a Modbus communication interface."
+        )
+        supported = "The embedded controller reads sensor data using Modbus."
+        manifest = _manifest([f"Overview. {quote}"])
+        reasoner = _RetryReasoner(
+            [
+                [_fact(quote, requirements=[_requirement(unsupported)])],
+                [_fact(quote, requirements=[_requirement(supported)])],
+            ]
+        )
+
+        output = RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        self.assertEqual(len(reasoner.prompts), 2)
+        retry_prompt = reasoner.prompts[1]
+        self.assertIn("source_support", retry_prompt)
+        self.assertIn("missing_tokens", retry_prompt)
+        self.assertIn("previous structured output", retry_prompt)
+        self.assertIn("fact_index", retry_prompt)
+        statements = [r.statement for r in output.chunks[0].facts[0].requirements]
+        self.assertEqual(statements, [supported])
+
+    def test_multiple_semantic_errors_reported_and_repaired_in_one_retry(self) -> None:
+        quote = "Sensor-1 and Sensor-2 report data. Embedded controller that reads sensor data."
+        bad_actor = "Sensor-1 and Sensor-2 shall report data."
+        bad_support = (
+            "SIIMCS uses an embedded controller to collect operating data from industrial "
+            "sensors through Modbus."
+        )
+        good_split = [
+            _requirement("Sensor-1 shall report data.", requirement_key="sensor_1_report"),
+            _requirement("Sensor-2 shall report data.", requirement_key="sensor_2_report"),
+            _requirement(
+                "The embedded controller reads sensor data.", requirement_key="controller_reads"
+            ),
+        ]
+        manifest = _manifest([quote])
+        reasoner = _RetryReasoner(
+            [
+                [
+                    _fact(
+                        quote,
+                        requirements=[
+                            _requirement(bad_actor, requirement_key="sensors_report"),
+                            _requirement(bad_support, requirement_key="controller_reads"),
+                        ],
+                    )
+                ],
+                [_fact(quote, requirements=good_split)],
+            ]
+        )
+
+        output = RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        self.assertEqual(len(reasoner.prompts), 2)
+        retry_prompt = reasoner.prompts[1]
+        self.assertIn("multiple_actors", retry_prompt)
+        self.assertIn("source_support", retry_prompt)
+        self.assertEqual(len(output.chunks[0].facts[0].requirements), 3)
+
+    def test_qa_and_validation_teams_is_single_actor(self) -> None:
+        self.assertFalse(_has_multiple_actors("QA and Validation Teams"))
+        quote = "QA and Validation Teams shall validate SIIMCS outputs."
+        manifest = _manifest([quote])
+        reasoner = _StaticReasoner([_fact(quote, requirements=[_requirement(quote)])])
+
+        output = RequirementDiscoveryAgent(reasoner).run(manifest)
+
+        self.assertEqual(reasoner.prompts, 1)
+        self.assertEqual(len(output.chunks[0].facts[0].requirements), 1)
+
+    def test_genuine_independent_numbered_actors_are_flagged(self) -> None:
+        self.assertTrue(_has_multiple_actors("Sensor-1 and Sensor-2"))
+        self.assertTrue(_has_multiple_actors("Sensor-1 or Sensor-2"))
+        self.assertFalse(_has_multiple_actors("the operator and the administrator"))
+        output = RequirementDiscoveryChunkOutput.model_validate(
+            {
+                "facts": [
+                    _fact(
+                        "Sensor-1 and Sensor-2 report data.",
+                        requirements=[_requirement("Sensor-1 and Sensor-2 shall report data.")],
+                    )
+                ]
+            }
+        )
+
+        diagnostics = _collect_semantic_diagnostics(output, chunk_id="CHUNK-1")
+
+        self.assertTrue(any(d.category == "multiple_actors" for d in diagnostics))
+
+    def test_corrected_chunk_reuses_prior_uuid_ids_without_duplicates(self) -> None:
+        quote = "The system shall import and export files."
+        manifest = _manifest([quote])
+        facts = [
+            _fact(
+                quote,
+                requirements=[
+                    _requirement(
+                        "The system shall import files.",
+                        requirement_key="system_import_files",
+                    ),
+                    _requirement(
+                        "The system shall export files.",
+                        requirement_key="system_export_files",
+                    ),
+                ],
+            )
+        ]
+        first_discovery = RequirementDiscoveryAgent(_StaticReasoner(facts)).run(manifest)
+        first = _build_artifact(manifest, first_discovery)
+        prior = {
+            requirement.requirement_id: RequirementRevisionSnapshot(
+                requirement_id=requirement.requirement_id,
+                revision_id=requirement.revision_id,
+                statement=requirement.statement,
+                normalized_statement=requirement.normalized_statement,
+                requirement_type=requirement.requirement_type,
+                semantic_signature=requirement.semantic_signature,
+            )
+            for requirement in first.requirements
+        }
+
+        second_discovery = RequirementDiscoveryAgent(_StaticReasoner(facts)).run(manifest)
+        second = _build_artifact(manifest, second_discovery, prior_revisions=prior)
+
+        self.assertEqual(len(first.requirements), 2)
+        self.assertEqual(len(second.requirements), 2)
+        self.assertEqual(
+            {requirement.requirement_id for requirement in first.requirements},
+            {requirement.requirement_id for requirement in second.requirements},
+        )
+        self.assertEqual(
+            {requirement.revision_id for requirement in first.requirements},
+            {requirement.revision_id for requirement in second.requirements},
+        )
 
     def test_normalized_quote_maps_back_to_exact_raw_pdf_newline_span(self) -> None:
         raw_text = (
@@ -520,6 +858,86 @@ class _StaticReasoner:
         return schema.model_validate({"facts": self.facts})
 
 
+class _CollisionRepairReasoner:
+    provider_name = "huggingface"
+    discovery_batch_size = 1
+
+    def __init__(self, quote: str) -> None:
+        self.quote = quote
+        self.prompts: list[str] = []
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts.append(prompt)
+        keys = (
+            ("system_files", "system_files")
+            if len(self.prompts) == 1
+            else ("system_import_files", "system_export_files")
+        )
+        return schema.model_validate({"facts": _collision_facts(self.quote, keys)})
+
+
+class _PersistingCollisionReasoner:
+    provider_name = "azure_openai"
+    discovery_batch_size = 1
+
+    def __init__(self, run_dir: Path, quote: str) -> None:
+        self.run_dir = run_dir
+        self.quote = quote
+        self.prompts = 0
+        self.last_response_path: Path | None = None
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts += 1
+        return schema.model_validate(
+            {"facts": _collision_facts(self.quote, ("system_files", "system_files"))}
+        )
+
+    def persist_last_response(self, *, filename: str) -> Path:
+        path = self.run_dir / filename
+        path.write_text(f"raw collision response {self.prompts}", encoding="utf-8")
+        self.last_response_path = path
+        return path
+
+
+class _RetryReasoner:
+    """Returns a fixed facts payload per attempt, capturing the prompts it saw."""
+
+    provider_name = "huggingface"
+    discovery_batch_size = 1
+
+    def __init__(self, facts_per_attempt: list[list[dict[str, Any]]]) -> None:
+        self.facts_per_attempt = facts_per_attempt
+        self.prompts: list[str] = []
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts.append(prompt)
+        index = min(len(self.prompts) - 1, len(self.facts_per_attempt) - 1)
+        return schema.model_validate({"facts": self.facts_per_attempt[index]})
+
+
+class _PersistingReasoner:
+    """Always returns the same facts and persists a raw response file per attempt."""
+
+    provider_name = "azure_openai"
+    discovery_batch_size = 1
+
+    def __init__(self, run_dir: Path, facts: list[dict[str, Any]]) -> None:
+        self.run_dir = run_dir
+        self.facts = facts
+        self.prompts = 0
+        self.last_response_path: Path | None = None
+
+    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        self.prompts += 1
+        return schema.model_validate({"facts": self.facts})
+
+    def persist_last_response(self, *, filename: str) -> Path:
+        path = self.run_dir / filename
+        path.write_text(f"raw response {self.prompts}", encoding="utf-8")
+        self.last_response_path = path
+        return path
+
+
 class _QuoteRetryReasoner:
     provider_name = "huggingface"
     discovery_batch_size = 1
@@ -702,6 +1120,36 @@ def _requirement(
         "source_req_id": source_req_id,
         "confidence": 0.85,
     }
+
+
+def _collision_facts(quote: str, keys: tuple[str, str]) -> list[dict[str, Any]]:
+    return [
+        _fact(
+            quote,
+            requirements=[
+                _requirement("The system shall import files.", requirement_key=keys[0]),
+                _requirement("The system shall export files.", requirement_key=keys[1]),
+            ],
+        )
+    ]
+
+
+def _build_artifact(
+    manifest: DocumentManifest,
+    discovery: Any,
+    *,
+    prior_revisions: dict[str, RequirementRevisionSnapshot] | None = None,
+) -> Any:
+    return build_requirement_artifact(
+        project=manifest.project,
+        document_id=manifest.document_id,
+        document_version_id=manifest.document_version_id,
+        version=manifest.version,
+        source_path=manifest.source_path,
+        source_checksum=manifest.source_checksum,
+        discovery=discovery,
+        prior_revisions=prior_revisions,
+    )
 
 
 def _manifest(texts: list[str]) -> DocumentManifest:

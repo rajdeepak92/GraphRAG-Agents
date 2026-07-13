@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, NotRequired, TypedDict, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -20,6 +21,12 @@ from multi_agentic_graph_rag.llm_models.json_output import (
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _DEFAULT_SYSTEM_MESSAGE = PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value
+
+
+class _ChatCompletionRequest(TypedDict):
+    model: str
+    messages: list[dict[str, str]]
+    temperature: NotRequired[float]
 
 
 class AzureOpenAIReasoningModel:
@@ -45,6 +52,10 @@ class AzureOpenAIReasoningModel:
         self._last_parse_attempt = 0
         self._response_context: dict[str, Any] = {}
         self._system_message = _DEFAULT_SYSTEM_MESSAGE
+        # Once a deployment rejects an explicit temperature, remember it so every
+        # later call omits the parameter up front instead of paying a failing
+        # round-trip per chunk. Reset only by constructing a new model.
+        self._omit_temperature = False
 
     def set_system_message(self, text: str) -> None:
         self._system_message = text
@@ -141,14 +152,15 @@ class AzureOpenAIReasoningModel:
         ):
             raise RuntimeError("Azure OpenAI reasoning is not configured")
 
-        AzureOpenAI = cast(Any, import_module("openai")).AzureOpenAI
+        openai = cast(Any, import_module("openai"))
+        AzureOpenAI = openai.AzureOpenAI
 
         client = AzureOpenAI(
             azure_endpoint=self.settings.endpoint,
             api_key=self.settings.api_key,
             api_version=self.settings.api_version,
         )
-        response = client.chat.completions.create(
+        request = _chat_completion_request(
             model=self.settings.reasoning_deployment,
             messages=[
                 {
@@ -157,8 +169,20 @@ class AzureOpenAIReasoningModel:
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0,
+            temperature=None if self._omit_temperature else self.settings.reasoning_temperature,
         )
+        try:
+            response = client.chat.completions.create(**request)
+        except openai.BadRequestError as error:
+            if "temperature" not in request or not _is_unsupported_temperature_error(error):
+                raise
+            # Azure reasoning deployments may reject any explicit temperature. Retry
+            # exactly once with only that optional parameter removed; all other 400s
+            # and any second failure propagate unchanged. Remember the rejection so
+            # subsequent calls skip the doomed round-trip entirely.
+            request.pop("temperature")
+            self._omit_temperature = True
+            response = client.chat.completions.create(**request)
         return cast(str, response.choices[0].message.content or "{}")
 
     def _parse_completion(self, completion: str, schema: type[T]) -> T:
@@ -242,6 +266,32 @@ class AzureOpenAIEmbeddingModel:
         )
         response = client.embeddings.create(model=self.settings.embedding_deployment, input=texts)
         return [item.embedding for item in response.data]
+
+
+def _chat_completion_request(
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float | None,
+) -> _ChatCompletionRequest:
+    request: _ChatCompletionRequest = {"model": model, "messages": messages}
+    if temperature is not None:
+        request["temperature"] = temperature
+    return request
+
+
+def _is_unsupported_temperature_error(error: Exception) -> bool:
+    param = getattr(error, "param", None)
+    code = getattr(error, "code", None)
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping):
+        payload: Mapping[str, Any] = body
+        nested = body.get("error")
+        if isinstance(nested, Mapping):
+            payload = nested
+        param = param or payload.get("param")
+        code = code or payload.get("code")
+    return param == "temperature" and code == "unsupported_value"
 
 
 def _build_retry_prompt(prompt: str, error: Exception) -> str:

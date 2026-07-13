@@ -112,6 +112,7 @@ class AzureOpenAISettings(BaseModel):
     api_key: str = ""
     api_version: str = "2024-10-21"
     reasoning_deployment: str = ""
+    reasoning_temperature: float | None = 0.0
     embedding_deployment: str = ""
 
 

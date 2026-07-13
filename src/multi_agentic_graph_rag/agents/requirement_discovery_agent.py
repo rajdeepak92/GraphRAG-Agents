@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from multi_agentic_graph_rag.common_prompt_defs import (
@@ -13,11 +13,13 @@ from multi_agentic_graph_rag.common_prompt_defs import (
     PromptSharedFragments,
 )
 from multi_agentic_graph_rag.domain.errors import ModelOutputError, TraceValidationError
+from multi_agentic_graph_rag.domain.identifiers import stable_token
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentChunk,
     DocumentManifest,
     LLMChunkExtraction,
     LLMDiscoveredFact,
+    LLMDiscoveredRequirement,
     LLMFactCandidate,
     LLMRequirementCandidate,
     RequirementDiscoveryChunkOutput,
@@ -26,6 +28,9 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
 from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger, LedgerEntry
+from multi_agentic_graph_rag.services.requirement_identity_resolver import (
+    structured_requirement_signature,
+)
 
 _REQUIREMENT_HINT = re.compile(
     r"\b(?:shall|must|required|requires|requirement|acceptance criteria|"
@@ -52,6 +57,94 @@ class _NormalizedChunk:
     chunk: DocumentChunk
     text: str
     char_map: list[int]
+
+
+# Semantic-validation category slugs. ``key_collision`` is the only non-terminal
+# category: because Python (never the LLM key) owns permanent identity, a surviving
+# key collision is repaired deterministically instead of failing the chunk.
+_CATEGORY_KEY_COLLISION = "key_collision"
+_CATEGORY_SOURCE_SUPPORT = "source_support"
+_CATEGORY_MULTIPLE_ACTIONS = "multiple_actions"
+_CATEGORY_MULTIPLE_ACTORS = "multiple_actors"
+
+_SUPPORT_RATIO_FLOOR = 0.5
+_DIAGNOSTIC_TEXT_LIMIT = 400
+_DIAGNOSTICS_JSON_LIMIT = 6000
+_PREVIOUS_OUTPUT_JSON_LIMIT = 6000
+# A numbered instance discriminator (Sensor-1, reg_3, api-2) names one concrete
+# entity; two such distinct instances joined by a conjunction are genuinely
+# independent actors. Reuses the first branch of the schema discriminator regex.
+_NUMBERED_INSTANCE_RE = re.compile(r"[A-Za-z]+[-_]\d+[A-Za-z0-9_-]*")
+_ACTOR_CONJUNCTION_RE = re.compile(r"\band\b|\bor\b|&|,|;", re.I)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+@dataclass
+class _CandidateDiagnostic:
+    """One actionable semantic-validation finding for a single requirement candidate."""
+
+    category: str
+    chunk_id: str
+    fact_index: int
+    requirement_index: int
+    requirement_key: str
+    source_req_id: str | None
+    req_text: str
+    source_quote: str
+    normalized_atomic_signature: str
+    semantic_field: str = ""
+    support_ratio: float | None = None
+    missing_tokens: list[str] = field(default_factory=list)
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "category": self.category,
+            "chunk_id": self.chunk_id,
+            "fact_index": self.fact_index,
+            "requirement_index": self.requirement_index,
+            "requirement_key": self.requirement_key,
+            "source_req_id": self.source_req_id,
+            "req_text": _sanitize_diagnostic_text(self.req_text),
+            "source_quote": _sanitize_diagnostic_text(self.source_quote),
+            "normalized_atomic_signature": _sanitize_diagnostic_text(
+                self.normalized_atomic_signature
+            ),
+        }
+        if self.semantic_field:
+            payload["semantic_field"] = self.semantic_field
+        if self.support_ratio is not None:
+            payload["support_ratio"] = self.support_ratio
+        if self.missing_tokens:
+            payload["missing_tokens"] = self.missing_tokens[:20]
+        return payload
+
+
+class _SemanticValidationError(TraceValidationError):
+    """Aggregated, actionable semantic-validation failures for one chunk.
+
+    Carries every independent candidate error found in a single pass so one
+    corrective retry can address all of them. ``requirement_key`` is a
+    non-authoritative hint, so a pure key collision is *not* terminal.
+    """
+
+    def __init__(self, diagnostics: list[_CandidateDiagnostic]) -> None:
+        self.diagnostics = diagnostics
+        self.categories = sorted({diagnostic.category for diagnostic in diagnostics})
+        self.diagnostics_json = _bounded_json([d.to_payload() for d in diagnostics])
+        chunk_ids = sorted({diagnostic.chunk_id for diagnostic in diagnostics})
+        super().__init__(
+            "requirement discovery semantic validation failed for "
+            f"{','.join(chunk_ids)}: categories={','.join(self.categories)}; "
+            f"diagnostics={self.diagnostics_json}"
+        )
+
+    @property
+    def terminal_diagnostics(self) -> list[_CandidateDiagnostic]:
+        return [d for d in self.diagnostics if d.category != _CATEGORY_KEY_COLLISION]
+
+    @property
+    def has_terminal(self) -> bool:
+        return bool(self.terminal_diagnostics)
 
 
 class RequirementDiscoveryAgent:
@@ -92,13 +185,15 @@ class RequirementDiscoveryAgent:
         if self.coverage_ledger is not None:
             ledger_entries = self.coverage_ledger.select_for_chunk(context.text)
             ledger_section = self.coverage_ledger.render_prompt_section(ledger_entries)
-        validation_error: str | None = None
+        validation_error: TraceValidationError | None = None
+        previous_output: RequirementDiscoveryChunkOutput | None = None
         try:
             for attempt in (1, 2):
                 prompt = _build_prompt(
                     manifest,
                     context,
                     validation_error=validation_error,
+                    previous_output=previous_output,
                     ledger_section=ledger_section,
                 )
                 _set_response_context(
@@ -112,7 +207,22 @@ class RequirementDiscoveryAgent:
                     schema=RequirementDiscoveryChunkOutput,
                 )
                 try:
-                    _validate_candidate_semantics(chunk_output)
+                    diagnostics = _collect_semantic_diagnostics(
+                        chunk_output, chunk_id=chunk.chunk_id
+                    )
+                    if diagnostics:
+                        semantic_error = _SemanticValidationError(diagnostics)
+                        if attempt < 2 or semantic_error.has_terminal:
+                            raise semantic_error
+                        # Final attempt, only key collisions remain: the LLM key is a
+                        # non-authoritative hint, so repair it deterministically from
+                        # validated semantic content rather than failing the chunk.
+                        _canonicalize_conflicting_keys(chunk_output, diagnostics)
+                        self._log_key_canonicalization(
+                            chunk_index=chunk_index,
+                            chunk_id=chunk.chunk_id,
+                            diagnostics=diagnostics,
+                        )
                     output = _chunk_to_nested(context, chunk_output)
                     _verify_traces(manifest, output)
                 except TraceValidationError as error:
@@ -132,9 +242,11 @@ class RequirementDiscoveryAgent:
                         raise ModelOutputError(
                             "Requirement discovery chunk "
                             f"{chunk_index} failed validation after retry "
-                            f"for {chunk.chunk_id}: {error}; raw_response_path={response_path}"
+                            f"for {chunk.chunk_id}: attempt={attempt}; {error}"
+                            f"; raw_response_path={response_path}"
                         ) from error
-                    validation_error = str(error)
+                    validation_error = error
+                    previous_output = chunk_output
                     continue
 
                 response_path = _last_response_path(self.reasoning_model)
@@ -163,6 +275,31 @@ class RequirementDiscoveryAgent:
 
         raise ModelOutputError(
             f"Requirement discovery chunk {chunk_index} did not produce a result"
+        )
+
+    def _log_key_canonicalization(
+        self,
+        *,
+        chunk_index: int,
+        chunk_id: str,
+        diagnostics: list[_CandidateDiagnostic],
+    ) -> None:
+        if self.logger is None:
+            return
+        conflicting_keys = sorted(
+            {
+                diagnostic.requirement_key
+                for diagnostic in diagnostics
+                if diagnostic.category == _CATEGORY_KEY_COLLISION
+            }
+        )
+        self.logger.info(
+            "Repaired non-authoritative requirement_key collision deterministically",
+            step="discover_requirements.chunk",
+            chunk_index=chunk_index,
+            chunk_id=chunk_id,
+            conflicting_keys=conflicting_keys,
+            status="repaired",
         )
 
     def _log_chunk_completed(
@@ -240,7 +377,8 @@ class RequirementDiscoveryAgent:
 def _build_prompt(
     manifest: DocumentManifest,
     chunk: _NormalizedChunk,
-    validation_error: str | None = None,
+    validation_error: TraceValidationError | None = None,
+    previous_output: RequirementDiscoveryChunkOutput | None = None,
     ledger_section: str = "",
 ) -> str:
     chunk_json = json.dumps(
@@ -254,19 +392,10 @@ def _build_prompt(
 
     feedback = ""
     if validation_error:
-        feedback = (
-            f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
-            "Repair the invalid output by using quotes copied exactly from the normalized "
-            "chunk_text.\n"
-            "If a quote includes a section heading, category label, row title, or source "
-            "identifier before the actual requirement text, remove that leading label and keep "
-            "only the smallest exact contiguous body span that exists in chunk_text.\n"
-            "If a quote failed because it merged a heading with a bullet, table cell, "
-            "or nearby line, do not synthesize a combined quote. Instead, choose the "
-            "smallest exact contiguous source span that exists in chunk_text.\n"
-            "If no exact quote can be copied for a fact, remove that fact from the output.\n"
-            f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
-        )
+        if isinstance(validation_error, _SemanticValidationError):
+            feedback = _semantic_retry_feedback(validation_error, previous_output)
+        else:
+            feedback = _trace_retry_feedback(validation_error, previous_output)
 
     return (
         f"{PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value}"
@@ -276,6 +405,108 @@ def _build_prompt(
         f"Document version: {manifest.version}\n"
         f"Input chunk JSON:\n{chunk_json}"
     )
+
+
+def _previous_output_section(
+    previous_output: RequirementDiscoveryChunkOutput | None,
+) -> str:
+    if previous_output is None:
+        return ""
+    serialized = _bounded_json(
+        previous_output.model_dump(mode="json"),
+        limit=_PREVIOUS_OUTPUT_JSON_LIMIT,
+    )
+    return (
+        "Your previous structured output that failed validation (JSON), for reference "
+        "while you correct it — do not repeat its mistakes:\n"
+        f"{serialized}\n\n"
+    )
+
+
+def _semantic_retry_feedback(
+    error: _SemanticValidationError,
+    previous_output: RequirementDiscoveryChunkOutput | None,
+) -> str:
+    categories = set(error.categories)
+    instructions: list[str] = []
+    if _CATEGORY_SOURCE_SUPPORT in categories:
+        instructions.append(
+            "- source_support: rewrite req_text so it expresses ONLY meaning that is present "
+            "in its own exact quote (source_quote). Do not borrow details from adjacent facts, "
+            "other chunks, section headings, or ledger entries. Only minimal grammar completion "
+            "is allowed and it must add no new meaning. The listed missing_tokens do not appear "
+            "in the quote and must not appear in req_text unless the quote supports them. If a "
+            "supported atomic requirement cannot be derived from the quote, drop only that "
+            "requirement and keep every other valid requirement."
+        )
+    if _CATEGORY_MULTIPLE_ACTIONS in categories:
+        instructions.append(
+            "- multiple_actions: a single requirement must describe one action. Split a "
+            "requirement whose action joins independent actions into separate atomic "
+            "requirements, each with its own exact quote."
+        )
+    if _CATEGORY_MULTIPLE_ACTORS in categories:
+        instructions.append(
+            "- multiple_actors: split only genuinely independent numbered actors (for example "
+            "'Sensor-1 and Sensor-2') into separate requirements. Do NOT split an official "
+            "stakeholder, organization, department, team, or role name that merely contains a "
+            "conjunction — 'QA and Validation Teams' is ONE actor and must stay one requirement."
+        )
+    if _CATEGORY_KEY_COLLISION in categories:
+        instructions.append(
+            "- key_collision: you reused one requirement_key for incompatible atomic "
+            "requirements. Give incompatible requirements distinct stable keys derived from "
+            "semantic content and source provenance, not list position. Reuse a key only for an "
+            "equivalent atomic signature. Do not merge or delete a supported requirement."
+        )
+    return (
+        f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
+        "The previous response failed requirement discovery semantic validation. Return the "
+        "COMPLETE corrected chunk output (every fact and requirement), not a patch. Preserve "
+        "every source-supported atomic requirement and its exact contiguous quote. Keep a "
+        "document identifier in source_req_id only when it occurs in that same exact quote; "
+        "otherwise use an empty string.\n"
+        "Full per-candidate diagnostics (category, fact_index, requirement_index, "
+        "requirement_key, source_req_id, req_text, source_quote, semantic_field, support_ratio, "
+        "missing_tokens, normalized_atomic_signature):\n"
+        f"{error.diagnostics_json}\n"
+        "Apply these corrections:\n" + "\n".join(instructions) + "\n"
+        f"{_previous_output_section(previous_output)}"
+    )
+
+
+def _trace_retry_feedback(
+    validation_error: TraceValidationError,
+    previous_output: RequirementDiscoveryChunkOutput | None,
+) -> str:
+    return (
+        f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
+        "Repair the invalid output by using quotes copied exactly from the normalized "
+        "chunk_text.\n"
+        "If a quote includes a section heading, category label, row title, or source "
+        "identifier before the actual requirement text, remove that leading label and keep "
+        "only the smallest exact contiguous body span that exists in chunk_text.\n"
+        "If a quote failed because it merged a heading with a bullet, table cell, "
+        "or nearby line, do not synthesize a combined quote. Instead, choose the "
+        "smallest exact contiguous source span that exists in chunk_text.\n"
+        "If no exact quote can be copied for a fact, remove that fact from the output.\n"
+        f"{_previous_output_section(previous_output)}"
+        f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
+    )
+
+
+def _sanitize_diagnostic_text(value: str) -> str:
+    cleaned = _CONTROL_CHARS_RE.sub(" ", value).strip()
+    if len(cleaned) > _DIAGNOSTIC_TEXT_LIMIT:
+        return cleaned[:_DIAGNOSTIC_TEXT_LIMIT] + "…"
+    return cleaned
+
+
+def _bounded_json(payload: object, *, limit: int = _DIAGNOSTICS_JSON_LIMIT) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if len(serialized) > limit:
+        return serialized[:limit] + "…(truncated)"
+    return serialized
 
 
 def _normalized_context(chunk: DocumentChunk) -> _NormalizedChunk:
@@ -382,44 +613,164 @@ def _fact_to_candidate(
     )
 
 
-def _validate_candidate_semantics(output: RequirementDiscoveryChunkOutput) -> None:
-    signatures_by_key: dict[str, tuple[str, ...]] = {}
+def _candidate_signature(requirement: LLMDiscoveredRequirement) -> str:
+    return structured_requirement_signature(
+        statement=requirement.req_text,
+        requirement_type=requirement.requirement_type,
+        actor=requirement.actor,
+        modality=requirement.modality,
+        action=requirement.action,
+        object_text=requirement.object,
+        condition=requirement.condition,
+        polarity=requirement.polarity,
+        requirement_family=requirement.requirement_family,
+        entity_discriminators=requirement.entity_discriminators,
+        # A model-provided mutable list must not be able to erase a real
+        # actor/action/object/condition difference from collision validation.
+        mutable_parameters=[],
+    )
+
+
+def _has_multiple_actors(actor: str) -> bool:
+    """Return True only for genuinely independent numbered actors.
+
+    Splits the actor string on conjunctions and flags multiple actors only when at
+    least two conjuncts each name a *distinct numbered instance* discriminator
+    (``Sensor-1``/``Sensor-2``). Official stakeholder, organization, department,
+    team, or role names that merely contain a conjunction (``QA and Validation
+    Teams``) contain no numbered instances and stay a single actor. This never keys
+    off the enriched ``entity_discriminators`` list, which may include acronym parts
+    of a single proper name.
+    """
+    conjuncts = [part.strip() for part in _ACTOR_CONJUNCTION_RE.split(actor) if part.strip()]
+    if len(conjuncts) < 2:
+        return False
+    instances = {
+        match.group(0).casefold()
+        for part in conjuncts
+        if (match := _NUMBERED_INSTANCE_RE.search(part)) is not None
+    }
+    numbered_conjuncts = sum(
+        1 for part in conjuncts if _NUMBERED_INSTANCE_RE.search(part) is not None
+    )
+    return numbered_conjuncts >= 2 and len(instances) >= 2
+
+
+def _source_support(req_text: str, quote: str) -> tuple[float | None, list[str]]:
+    statement_tokens = _semantic_support_tokens(req_text)
+    if not statement_tokens:
+        return None, []
+    quote_tokens = _semantic_support_tokens(quote)
+    ratio = len(statement_tokens & quote_tokens) / len(statement_tokens)
+    missing = sorted(statement_tokens - quote_tokens)
+    return ratio, missing
+
+
+def _collect_semantic_diagnostics(
+    output: RequirementDiscoveryChunkOutput, *, chunk_id: str
+) -> list[_CandidateDiagnostic]:
+    """Aggregate every independent semantic error in one chunk (never fail-fast).
+
+    Returns actionable per-candidate diagnostics so a single corrective retry can
+    address all findings. Key collisions are reported per member of the conflicting
+    group. Diagnostics are returned in a deterministic order.
+    """
+    diagnostics: list[_CandidateDiagnostic] = []
+    observations_by_key: dict[str, list[_CandidateDiagnostic]] = {}
+    for fact_index, fact in enumerate(output.facts, start=1):
+        for requirement_index, requirement in enumerate(fact.requirements, start=1):
+            signature = _candidate_signature(requirement)
+            base: dict[str, Any] = {
+                "chunk_id": chunk_id,
+                "fact_index": fact_index,
+                "requirement_index": requirement_index,
+                "requirement_key": requirement.requirement_key or "",
+                "source_req_id": requirement.source_req_id,
+                "req_text": requirement.req_text,
+                "source_quote": fact.quote,
+                "normalized_atomic_signature": signature,
+            }
+
+            action_cf = requirement.action.casefold()
+            if (
+                " and " in action_cf
+                or " or " in action_cf
+                or requirement.object.casefold().startswith(("and ", "or "))
+            ):
+                diagnostics.append(
+                    _CandidateDiagnostic(
+                        category=_CATEGORY_MULTIPLE_ACTIONS, semantic_field="action", **base
+                    )
+                )
+            if _has_multiple_actors(requirement.actor):
+                diagnostics.append(
+                    _CandidateDiagnostic(
+                        category=_CATEGORY_MULTIPLE_ACTORS, semantic_field="actor", **base
+                    )
+                )
+            ratio, missing = _source_support(requirement.req_text, fact.quote)
+            if ratio is not None and ratio < _SUPPORT_RATIO_FLOOR:
+                diagnostics.append(
+                    _CandidateDiagnostic(
+                        category=_CATEGORY_SOURCE_SUPPORT,
+                        semantic_field="req_text",
+                        support_ratio=round(ratio, 3),
+                        missing_tokens=missing,
+                        **base,
+                    )
+                )
+            hint = (requirement.requirement_key or "").strip().casefold()
+            if hint:
+                observations_by_key.setdefault(hint, []).append(
+                    _CandidateDiagnostic(
+                        category=_CATEGORY_KEY_COLLISION,
+                        semantic_field="requirement_key",
+                        **base,
+                    )
+                )
+
+    for observations in observations_by_key.values():
+        signatures = {observation.normalized_atomic_signature for observation in observations}
+        if len(signatures) > 1:
+            diagnostics.extend(observations)
+
+    diagnostics.sort(
+        key=lambda diagnostic: (
+            diagnostic.fact_index,
+            diagnostic.requirement_index,
+            diagnostic.category,
+        )
+    )
+    return diagnostics
+
+
+def _canonicalize_conflicting_keys(
+    output: RequirementDiscoveryChunkOutput,
+    diagnostics: list[_CandidateDiagnostic],
+) -> None:
+    """Deterministically repair a surviving non-authoritative key collision.
+
+    Every candidate whose ``requirement_key`` participated in a collision is
+    rewritten to ``<key>:<8-hex signature token>``. The suffix derives from the
+    validated semantic signature, so it is stable across identical reruns and
+    independent of list position: equivalent atomic requirements keep the same
+    repaired key, incompatible ones get distinct keys. Permanent REQ/REQREV/REQEVID
+    IDs stay Python-owned and are unaffected.
+    """
+    conflict_keys = {
+        diagnostic.requirement_key.strip().casefold()
+        for diagnostic in diagnostics
+        if diagnostic.category == _CATEGORY_KEY_COLLISION
+    }
+    if not conflict_keys:
+        return
     for fact in output.facts:
         for requirement in fact.requirements:
-            if " and " in requirement.action.casefold() or " or " in requirement.action.casefold():
-                raise TraceValidationError("one candidate contains multiple independent actions")
-            if requirement.object.casefold().startswith(("and ", "or ")):
-                raise TraceValidationError("one candidate contains multiple independent actions")
-            if (
-                " and " in requirement.actor.casefold()
-                and len(requirement.entity_discriminators) > 1
-            ):
-                raise TraceValidationError("one candidate contains multiple independent actors")
-            statement_tokens = _semantic_support_tokens(requirement.req_text)
-            quote_tokens = _semantic_support_tokens(fact.quote)
-            if statement_tokens and (
-                len(statement_tokens & quote_tokens) / len(statement_tokens) < 0.5
-            ):
-                raise TraceValidationError(
-                    "source trace does not support the extracted requirement statement"
-                )
-            signature = (
-                requirement.requirement_family.casefold(),
-                requirement.actor.casefold(),
-                requirement.action.casefold(),
-                requirement.object.casefold(),
-                requirement.condition.casefold(),
-                requirement.polarity,
-                *sorted(value.casefold() for value in requirement.entity_discriminators),
-            )
-            hint = (requirement.requirement_key or "").strip().casefold()
-            previous = signatures_by_key.get(hint) if hint else None
-            if previous is not None and previous != signature:
-                raise TraceValidationError(
-                    "one requirement_key hint maps to incompatible atomic semantic signatures"
-                )
-            if hint:
-                signatures_by_key[hint] = signature
+            hint = (requirement.requirement_key or "").strip()
+            if not hint or hint.casefold() not in conflict_keys:
+                continue
+            suffix = stable_token(_candidate_signature(requirement), length=8)
+            object.__setattr__(requirement, "requirement_key", f"{hint}:{suffix}")
 
 
 def _semantic_support_tokens(value: str) -> set[str]:
