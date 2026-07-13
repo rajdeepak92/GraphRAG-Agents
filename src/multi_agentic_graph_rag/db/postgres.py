@@ -39,12 +39,14 @@ from multi_agentic_graph_rag.domain.schemas import (
     UserStoryArtifact,
     UserStoryBuildResult,
     UserStoryRecord,
+    VerifiedRequirement,
     normalize_priority_label,
 )
 from multi_agentic_graph_rag.services.local_lock import LocalFileLock
 from multi_agentic_graph_rag.services.master_projection import materialize_master
 from multi_agentic_graph_rag.services.requirement_builder import (
     build_canonical_requirements_artifact,
+    validate_requirement_revision_lifecycle,
 )
 
 _MANAGED_TABLES = (
@@ -1168,6 +1170,7 @@ class PostgresStore:
             separate connection would self-deadlock against the caller's already-held session lock
             (same key, shared advisory-lock space).
         """
+        active_by_requirement = validate_requirement_revision_lifecycle(artifact.requirements)
         public_payload = build_canonical_requirements_artifact(artifact).model_dump(mode="json")
         if self.settings.postgres.mode == "local_json":
             self._upsert_local(
@@ -1180,7 +1183,7 @@ class PostgresStore:
                     "artifact": public_payload,
                 },
             )
-            self._persist_requirement_ledger_local(artifact)
+            self._persist_requirement_ledger_local(artifact, active_by_requirement)
             self.refresh_stage_master(
                 project=artifact.project,
                 stage="requirements",
@@ -1207,7 +1210,11 @@ class PostgresStore:
                         json.dumps(public_payload),
                     ),
                 )
-                self._persist_requirement_ledger_postgres(cursor, artifact)
+                self._persist_requirement_ledger_postgres(
+                    cursor,
+                    artifact,
+                    active_by_requirement,
+                )
                 self.refresh_stage_master(
                     project=artifact.project,
                     stage="requirements",
@@ -3162,12 +3169,15 @@ class PostgresStore:
         self,
         cursor: Any,
         artifact: RequirementArtifact,
+        active_by_requirement: dict[str, VerifiedRequirement],
     ) -> None:
         """Persist requirement ledger postgres through the owning storage boundary.
 
         Args:
             cursor (Any): Cursor required by the operation's typed contract.
             artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+            active_by_requirement (dict[str, VerifiedRequirement]): Validated active revision for
+                                                                    every represented lineage.
 
         Side Effects:
             May write transactional or derivative state through the configured store.
@@ -3220,7 +3230,28 @@ class PostgresStore:
                 ),
             )
 
-        for requirement in artifact.requirements:
+        superseded_revision_ids = {
+            requirement.revision_id
+            for requirement in artifact.requirements
+            if requirement.status == "superseded"
+        }
+        superseded_revision_ids.update(
+            event.revision_id
+            for event in artifact.delta_events
+            if event.event_type == "superseded" and event.revision_id
+        )
+        for revision_id in superseded_revision_ids:
+            cursor.execute(
+                """
+                update requirement_revisions
+                set status = 'superseded',
+                    updated_at = now()
+                where revision_id = %s
+                """,
+                (revision_id,),
+            )
+
+        for requirement in active_by_requirement.values():
             cursor.execute(
                 """
                 insert into requirements
@@ -3248,6 +3279,8 @@ class PostgresStore:
                     requirement.revision_id,
                 ),
             )
+
+        for requirement in artifact.requirements:
             cursor.execute(
                 """
                 insert into requirement_revisions
@@ -3255,7 +3288,7 @@ class PostgresStore:
                    normalized_statement_hash, semantic_signature, requirement_type,
                    requirement_family, priority, source_req_id, id_generation_type, confidence,
                    status, first_seen_document_version_id)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (revision_id) do update
                 set statement = excluded.statement,
                     normalized_statement = excluded.normalized_statement,
@@ -3267,7 +3300,7 @@ class PostgresStore:
                     source_req_id = excluded.source_req_id,
                     id_generation_type = excluded.id_generation_type,
                     confidence = excluded.confidence,
-                    status = 'active',
+                    status = excluded.status,
                     updated_at = now()
                 """,
                 (
@@ -3286,6 +3319,7 @@ class PostgresStore:
                     requirement.source_req_id,
                     requirement.id_generation_type,
                     requirement.confidence,
+                    requirement.status,
                     artifact.document_version_id,
                 ),
             )
@@ -3401,11 +3435,17 @@ class PostgresStore:
                 ),
             )
 
-    def _persist_requirement_ledger_local(self, artifact: RequirementArtifact) -> None:
+    def _persist_requirement_ledger_local(
+        self,
+        artifact: RequirementArtifact,
+        active_by_requirement: dict[str, VerifiedRequirement],
+    ) -> None:
         """Persist requirement ledger local through the owning storage boundary.
 
         Args:
             artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+            active_by_requirement (dict[str, VerifiedRequirement]): Validated active revision for
+                                                                    every represented lineage.
         """
         for canonical_fact in artifact.canonical_facts:
             self._upsert_local(
@@ -3433,7 +3473,20 @@ class PostgresStore:
                 },
             )
 
-        for requirement in artifact.requirements:
+        superseded_revision_ids = {
+            requirement.revision_id
+            for requirement in artifact.requirements
+            if requirement.status == "superseded"
+        }
+        superseded_revision_ids.update(
+            event.revision_id
+            for event in artifact.delta_events
+            if event.event_type == "superseded" and event.revision_id
+        )
+        for revision_id in superseded_revision_ids:
+            self._update_local_revision_status(revision_id, "superseded")
+
+        for requirement in active_by_requirement.values():
             self._upsert_local(
                 "requirement",
                 requirement.requirement_id,
@@ -3451,6 +3504,8 @@ class PostgresStore:
                     "first_seen_document_version_id": artifact.document_version_id,
                 },
             )
+
+        for requirement in artifact.requirements:
             self._upsert_local(
                 "requirement_revision",
                 requirement.revision_id,
@@ -3460,7 +3515,7 @@ class PostgresStore:
                     "document_id": artifact.document_id,
                     "document_version_id": artifact.document_version_id,
                     "requirement": requirement.model_dump(mode="json"),
-                    "status": "active",
+                    "status": requirement.status,
                 },
             )
             for evidence in requirement.evidence:

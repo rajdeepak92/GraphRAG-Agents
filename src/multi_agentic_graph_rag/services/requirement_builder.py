@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
+from multi_agentic_graph_rag.domain.errors import IngestionError
 from multi_agentic_graph_rag.domain.identifiers import (
     canonical_fact_id,
     fact_occurrence_id,
@@ -380,6 +381,26 @@ def build_requirement_artifact(
         prior_revisions or {},
     )
 
+    verified_requirements = [
+        _to_verified_requirement(accumulator) for accumulator in ordered_requirements
+    ]
+    superseded_revision_ids = {
+        event.revision_id
+        for event in delta_events
+        if event.event_type == "superseded" and event.revision_id
+    }
+    verified_requirements = [
+        requirement.model_copy(
+            update={
+                "status": (
+                    "superseded" if requirement.revision_id in superseded_revision_ids else "active"
+                )
+            }
+        )
+        for requirement in verified_requirements
+    ]
+    validate_requirement_revision_lifecycle(verified_requirements)
+
     artifact = RequirementArtifact(
         project=project,
         document_id=document_id,
@@ -389,9 +410,7 @@ def build_requirement_artifact(
         source_checksum=source_checksum,
         canonical_facts=list(canonical_facts.values()),
         facts=list(fact_occurrences.values()),
-        requirements=[
-            _to_verified_requirement(accumulator) for accumulator in ordered_requirements
-        ],
+        requirements=verified_requirements,
         delta_events=delta_events,
         identity_resolutions=identity_resolutions,
     )
@@ -411,11 +430,6 @@ def build_canonical_requirements_artifact(
     artifact: RequirementArtifact,
 ) -> CanonicalRequirementsArtifact:
     """Project the audit ledger to the canonical, non-duplicating public contract."""
-    superseded_revision_ids = {
-        event.revision_id
-        for event in artifact.delta_events
-        if event.event_type == "superseded" and event.revision_id
-    }
     requirements = [
         CanonicalRequirement(
             requirement_id=requirement.requirement_id,
@@ -436,9 +450,7 @@ def build_canonical_requirements_artifact(
             entity_discriminators=list(requirement.entity_discriminators),
             mutable_parameters=list(requirement.mutable_parameters),
             priority=_compact_priority(requirement.priority),
-            status=(
-                "Superseded" if requirement.revision_id in superseded_revision_ids else "Active"
-            ),
+            status="Superseded" if requirement.status == "superseded" else "Active",
             evidence=[
                 CanonicalRequirementEvidence(
                     evidence_id=evidence.evidence_id,
@@ -465,6 +477,36 @@ def build_canonical_requirements_artifact(
         generated_at=artifact.generated_at,
         requirements=requirements,
     )
+
+
+def validate_requirement_revision_lifecycle(
+    requirements: list[VerifiedRequirement],
+) -> dict[str, VerifiedRequirement]:
+    """Validate and group active revisions at an artifact boundary.
+
+    Args:
+        requirements (list[VerifiedRequirement]): Revisions represented by one internal artifact.
+
+    Returns:
+        dict[str, VerifiedRequirement]: The sole active revision for each represented lineage.
+
+    Raises:
+        IngestionError: If a represented lineage has zero or multiple active revisions.
+    """
+    grouped: dict[str, list[VerifiedRequirement]] = {}
+    for requirement in requirements:
+        grouped.setdefault(requirement.requirement_id, []).append(requirement)
+
+    active_by_requirement: dict[str, VerifiedRequirement] = {}
+    for requirement_id, revisions in grouped.items():
+        active = [revision for revision in revisions if revision.status == "active"]
+        if len(active) != 1:
+            raise IngestionError(
+                "requirement revision lifecycle invariant failed: each represented "
+                "lineage must contain exactly one active revision"
+            )
+        active_by_requirement[requirement_id] = active[0]
+    return active_by_requirement
 
 
 def _compact_priority(priority: str) -> _CompactPriority:

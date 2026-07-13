@@ -52,6 +52,7 @@ class IngestionPersistenceBoundaryTests(unittest.TestCase):
         self.assertIn("check (requirement_id ~*", schema_sql)
         self.assertIn("check (revision_id ~*", schema_sql)
         self.assertIn("check (evidence_id ~*", schema_sql)
+        self.assertIn("requirement_one_active_revision_idx", schema_sql)
         connection.commit.assert_called_once()
 
     def test_postgres_identity_lock_contention_fails_immediately(self) -> None:

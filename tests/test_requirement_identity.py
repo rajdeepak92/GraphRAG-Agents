@@ -326,6 +326,44 @@ class BuilderIdentityTests(unittest.TestCase):
         self.assertEqual(v1.requirements[0].requirement_id, v2.requirements[0].requirement_id)
         self.assertNotEqual(v1.requirements[0].revision_id, v2.requirements[0].revision_id)
 
+    def test_same_run_statement_variants_materialize_one_active_revision(self) -> None:
+        artifact = _build(
+            _chunk(
+                "CHUNK-1",
+                _req(
+                    statement="The controller shall trip at 70°C.",
+                    chunk_id="CHUNK-1",
+                    quote="trip at 70C",
+                ),
+                _req(
+                    statement="The controller shall trip at 80°C.",
+                    chunk_id="CHUNK-1",
+                    quote="trip at 80C",
+                ),
+            )
+        )
+
+        self.assertEqual(len(artifact.requirements), 2)
+        self.assertEqual(len({row.requirement_id for row in artifact.requirements}), 1)
+        self.assertEqual(len({row.revision_id for row in artifact.requirements}), 2)
+        self.assertEqual(
+            [row.status for row in artifact.requirements],
+            ["superseded", "active"],
+        )
+        self.assertEqual(
+            [event.event_type for event in artifact.delta_events],
+            ["new", "changed", "superseded"],
+        )
+        self.assertEqual(
+            artifact.delta_events[-1].superseded_by_revision_id,
+            artifact.requirements[-1].revision_id,
+        )
+        public = build_canonical_requirements_artifact(artifact)
+        self.assertEqual(
+            [row.status for row in public.requirements],
+            ["Superseded", "Active"],
+        )
+
 
 class ActiveRevisionSelectionTests(unittest.TestCase):
     def _payload(self, requirements: list[dict]) -> dict:

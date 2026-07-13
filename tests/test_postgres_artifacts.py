@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from multi_agentic_graph_rag.config.settings import (
     AppSettings,
@@ -13,6 +14,7 @@ from multi_agentic_graph_rag.config.settings import (
     PostgresSettings,
 )
 from multi_agentic_graph_rag.db.postgres import _MANAGED_TABLES, PostgresStore
+from multi_agentic_graph_rag.domain.errors import IngestionError
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementArtifact,
     RequirementDeltaEvent,
@@ -187,6 +189,116 @@ class PostgresArtifactTests(unittest.TestCase):
 
         self.assertIsNone(payload)
 
+    def test_local_requirement_lifecycle_is_order_independent_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = PostgresStore(_settings(root))
+            artifact = _lifecycle_artifact(include_superseded_revision=True)
+            artifact.requirements.reverse()
+
+            store.persist_artifact(artifact, str(root / "requirements.json"), "RUN-1")
+            first_rows = store._read_local_rows()
+            store.persist_artifact(artifact, str(root / "requirements.json"), "RUN-1")
+            replayed_rows = store._read_local_rows()
+
+        parent = next(row for row in replayed_rows if row.get("kind") == "requirement")
+        revisions = {
+            row["_local_key"]: row
+            for row in replayed_rows
+            if row.get("kind") == "requirement_revision"
+        }
+        self.assertEqual(parent["active_revision_id"], "REQREV-NEW")
+        self.assertEqual(revisions["REQREV-OLD"]["status"], "superseded")
+        self.assertEqual(revisions["REQREV-NEW"]["status"], "active")
+        self.assertEqual(len(replayed_rows), len(first_rows))
+
+    def test_local_cross_version_replacement_supersedes_existing_active_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = PostgresStore(_settings(root))
+            original = _artifact()
+            replacement = _lifecycle_artifact(
+                include_superseded_revision=False,
+                old_revision_id="REQREV-1",
+            )
+
+            store.persist_artifact(original, str(root / "v1.json"), "RUN-1")
+            store.persist_artifact(replacement, str(root / "v2.json"), "RUN-2")
+            rows = store._read_local_rows()
+
+        parent = next(row for row in rows if row.get("kind") == "requirement")
+        revisions = {
+            row["_local_key"]: row for row in rows if row.get("kind") == "requirement_revision"
+        }
+        self.assertEqual(parent["active_revision_id"], "REQREV-NEW")
+        self.assertEqual(revisions["REQREV-1"]["status"], "superseded")
+        self.assertEqual(revisions["REQREV-NEW"]["status"], "active")
+
+    def test_invalid_revision_lifecycle_fails_before_local_writes(self) -> None:
+        for statuses in (("superseded",), ("active", "active")):
+            with self.subTest(statuses=statuses), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                artifact = _artifact()
+                revisions = []
+                for ordinal, status in enumerate(statuses, start=1):
+                    revisions.append(
+                        artifact.requirements[0].model_copy(
+                            update={
+                                "revision_id": f"REQREV-{ordinal}",
+                                "status": status,
+                            },
+                            deep=True,
+                        )
+                    )
+                invalid = artifact.model_copy(update={"requirements": revisions}, deep=True)
+                store = PostgresStore(_settings(root))
+
+                with self.assertRaisesRegex(
+                    IngestionError,
+                    "exactly one active revision",
+                ):
+                    store.persist_artifact(invalid, str(root / "requirements.json"), "RUN-1")
+
+                self.assertFalse(store.settings.postgres.local_path.exists())
+
+    def test_postgres_supersedes_before_active_insert_and_upserts_parent_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = PostgresStore(_settings(Path(temp_dir)))
+            artifact = _lifecycle_artifact(include_superseded_revision=True)
+            artifact.requirements.reverse()
+            active = next(row for row in artifact.requirements if row.status == "active")
+            cursor = MagicMock()
+
+            store._persist_requirement_ledger_postgres(
+                cursor,
+                artifact,
+                {active.requirement_id: active},
+            )
+
+        calls = cursor.execute.call_args_list
+        statements = [call.args[0] for call in calls]
+        supersede_index = next(
+            index for index, sql in enumerate(statements) if "update requirement_revisions" in sql
+        )
+        revision_insert_indexes = [
+            index
+            for index, sql in enumerate(statements)
+            if "insert into requirement_revisions" in sql
+        ]
+        parent_calls = [call for call in calls if "insert into requirements" in call.args[0]]
+        revision_calls = [
+            call for call in calls if "insert into requirement_revisions" in call.args[0]
+        ]
+
+        self.assertLess(supersede_index, min(revision_insert_indexes))
+        self.assertEqual(len(parent_calls), 1)
+        self.assertEqual(parent_calls[0].args[1][-1], "REQREV-NEW")
+        persisted_statuses = {call.args[1][0]: call.args[1][-2] for call in revision_calls}
+        self.assertEqual(
+            persisted_statuses,
+            {"REQREV-NEW": "active", "REQREV-OLD": "superseded"},
+        )
+
 
 def _settings(root: Path) -> AppSettings:
     return AppSettings(
@@ -263,6 +375,53 @@ def _artifact(
             )
         ],
         delta_events=delta_events or [],
+    )
+
+
+def _lifecycle_artifact(
+    *,
+    include_superseded_revision: bool,
+    old_revision_id: str = "REQREV-OLD",
+) -> RequirementArtifact:
+    artifact = _artifact()
+    template = artifact.requirements[0]
+    old = template.model_copy(
+        update={
+            "revision_id": old_revision_id,
+            "statement": "The controller shall trip at 70C.",
+            "normalized_statement": "the controller shall trip at 70c.",
+            "status": "superseded",
+        },
+        deep=True,
+    )
+    old.evidence[0].evidence_id = "REQEVID-OLD"
+    new = template.model_copy(
+        update={
+            "revision_id": "REQREV-NEW",
+            "statement": "The controller shall trip at 80C.",
+            "normalized_statement": "the controller shall trip at 80c.",
+            "status": "active",
+        },
+        deep=True,
+    )
+    new.evidence[0].evidence_id = "REQEVID-NEW"
+    event = RequirementDeltaEvent(
+        event_id=f"EVENT-{old_revision_id}",
+        event_type="superseded",
+        requirement_id=template.requirement_id,
+        revision_id=old_revision_id,
+        superseded_by_revision_id=new.revision_id,
+        document_version_id="DOC-v2",
+    )
+    requirements = [old, new] if include_superseded_revision else [new]
+    return artifact.model_copy(
+        update={
+            "document_version_id": "DOC-v2",
+            "version": "2.0",
+            "requirements": requirements,
+            "delta_events": [event],
+        },
+        deep=True,
     )
 
 
