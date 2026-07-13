@@ -55,7 +55,9 @@
     "graph_min_assertions": 3
   },
   "requirement_identity": {
-    "candidate_top_k": 8,
+    "candidate_top_k": 2,
+    "max_entailment_calls": 200,
+    "max_structured_attempts": 2,
     "recall_cosine_threshold": 0.62,
     "token_overlap_threshold": 0.6,
     "use_reranker": true,

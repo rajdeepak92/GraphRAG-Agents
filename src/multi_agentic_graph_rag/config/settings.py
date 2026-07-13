@@ -120,7 +120,9 @@ class RequirementIdentitySettings(BaseModel):
     reranker score alone (structured signatures + bidirectional entailment decide).
     """
 
-    candidate_top_k: int = 8
+    candidate_top_k: int = 2
+    max_entailment_calls: int = 200
+    max_structured_attempts: int = 2
     recall_cosine_threshold: float = 0.62
     token_overlap_threshold: float = 0.6
     use_reranker: bool = True

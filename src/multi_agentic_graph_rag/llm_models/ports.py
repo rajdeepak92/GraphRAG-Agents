@@ -19,6 +19,10 @@ class ReasoningModel(Protocol):
         *,
         prompt: str,
         schema: type[T],
+        system_message: str,
+        operation: str,
+        request_id: str,
+        max_attempts: int = 2,
     ) -> T:
         """Return structured data validated against the supplied Pydantic schema."""
 

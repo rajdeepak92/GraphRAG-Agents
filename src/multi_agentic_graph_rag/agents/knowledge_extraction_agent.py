@@ -158,6 +158,11 @@ class KnowledgeExtractionAgent:
                 chunk_output = self.reasoning_model.generate_structured(
                     prompt=prompt,
                     schema=KnowledgeExtractionChunkOutput,
+                    system_message=(
+                        PromptKnowledgeExtraction.SYS_PROMPT_KNOWLEDGE_EXTRACTION.value
+                    ),
+                    operation="knowledge_extraction.chunk",
+                    request_id=chunk.chunk_id,
                 )
                 try:
                     candidates = _validate_chunk_output(context, chunk_output)

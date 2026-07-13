@@ -10,7 +10,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from multi_agentic_graph_rag.config.settings import AppSettings
-from multi_agentic_graph_rag.domain.errors import SchemaMismatchError, VersionConflictError
+from multi_agentic_graph_rag.domain.errors import (
+    SchemaMismatchError,
+    StoreUnavailableError,
+    VersionConflictError,
+)
 from multi_agentic_graph_rag.domain.identifiers import (
     requirement_evidence_occurrence_key,
     stable_token,
@@ -397,9 +401,14 @@ class PostgresStore:
             return
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "select pg_advisory_lock(hashtextextended(%s, 0))",
+                "select pg_try_advisory_lock(hashtextextended(%s, 0))",
                 (lock_key,),
             )
+            lock_result = cursor.fetchone()
+            if lock_result is None or not bool(lock_result[0]):
+                raise StoreUnavailableError(
+                    "document ingest already running for this project and document"
+                )
             try:
                 yield
             finally:

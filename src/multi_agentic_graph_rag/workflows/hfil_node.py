@@ -9,7 +9,10 @@ from typing import Any, Literal
 
 from langgraph.types import interrupt
 
-from multi_agentic_graph_rag.common_prompt_defs import FEEDBACK_STRICT_SCENARIO_PROMPT
+from multi_agentic_graph_rag.common_prompt_defs import (
+    FEEDBACK_STRICT_SCENARIO_PROMPT,
+    PromptTestScenarioGeneration,
+)
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.domain.identifiers import test_scenario_id
 from multi_agentic_graph_rag.domain.schemas import (
@@ -421,6 +424,9 @@ def _generate_feedback_scenario(
     output = runtime.reasoner.generate_structured(
         prompt=prompt,
         schema=TestScenarioGenerationOutput,
+        system_message=PromptTestScenarioGeneration.SYS_PROMPT_TEST_SCENARIO_GENERATION.value,
+        operation="test_scenario_feedback.story",
+        request_id=story.story_id,
     )
     scenario = output.test_scenarios[0]
     ordinal = sum(

@@ -10,14 +10,18 @@ unrelated content because of its position in the regenerated batch.
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
+from multi_agentic_graph_rag.common_prompt_defs import PromptScenarioDedup
 from multi_agentic_graph_rag.domain.schemas import (
+    CanonicalScenario,
     TestScenarioBuildResult,
     TestScenarioRecord,
     UserStoryBuildResult,
     UserStoryRecord,
     UserStoryStatement,
 )
+from multi_agentic_graph_rag.services.scenario_dedup import DedupConfig, DedupEngine
 from multi_agentic_graph_rag.services.story_scenario_identity import (
     StoryScenarioIdentityResolver,
 )
@@ -44,8 +48,62 @@ class _KeywordJudge:
     def __init__(self, keyword: str) -> None:
         self.keyword = keyword.lower()
 
-    def entails(self, premise: str, hypothesis: str) -> bool:
+    def equivalent(self, premise: str, hypothesis: str) -> bool:
         return self.keyword in premise.lower() and self.keyword in hypothesis.lower()
+
+
+class _CapturingDedupReasoner:
+    provider_name = "fake"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+
+    def generate_structured(self, **kwargs: Any) -> Any:
+        self.calls.append(
+            {
+                "system_message": kwargs["system_message"],
+                "operation": kwargs["operation"],
+                "request_id": kwargs["request_id"],
+            }
+        )
+        schema = kwargs["schema"]
+        if schema.__name__ == "CanonicalScenario":
+            return schema.model_validate(_canonical_payload())
+        return schema.model_validate(
+            {
+                "a_entails_b": True,
+                "b_entails_a": True,
+                "verdict": "DUPLICATE",
+                "reason": "same behavior",
+            }
+        )
+
+
+class ScenarioDedupPromptTests(unittest.TestCase):
+    def test_dedup_operations_use_dedicated_system_messages(self) -> None:
+        reasoner = _CapturingDedupReasoner()
+        engine = DedupEngine(
+            embedder=object(),  # type: ignore[arg-type]
+            reranker=None,
+            reasoner=reasoner,
+            cfg=DedupConfig(),
+        )
+        canonical = engine.canonicalize("The alarm is raised when the limit is exceeded.")
+
+        engine._judge(canonical, CanonicalScenario.model_validate(_canonical_payload()))
+
+        self.assertEqual(
+            [call["system_message"] for call in reasoner.calls],
+            [
+                PromptScenarioDedup.SYS_PROMPT_SCENARIO_CANONICALIZATION.value,
+                PromptScenarioDedup.SYS_PROMPT_DUPLICATE_JUDGE.value,
+            ],
+        )
+        self.assertEqual(
+            [call["operation"] for call in reasoner.calls],
+            ["scenario_dedup.canonicalize", "scenario_dedup.judge"],
+        )
+        self.assertTrue(all(call["request_id"] for call in reasoner.calls))
 
 
 class StoryIdentityTests(unittest.TestCase):
@@ -271,6 +329,19 @@ def _scenario_build(records: list[TestScenarioRecord]) -> TestScenarioBuildResul
         coverage=coverage,
         requirement_coverage=requirement_coverage,
     )
+
+
+def _canonical_payload() -> dict[str, str]:
+    return {
+        "entity": "alarm",
+        "action": "raise",
+        "condition": "limit exceeded",
+        "expected_behavior": "alarm raised",
+        "given": "a configured limit",
+        "when": "the limit is exceeded",
+        "then": "the alarm is raised",
+        "canonical_text": "raise alarm when limit exceeded",
+    }
 
 
 if __name__ == "__main__":

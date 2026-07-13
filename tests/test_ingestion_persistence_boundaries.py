@@ -5,7 +5,7 @@ import unittest
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from multi_agentic_graph_rag.config.settings import (
     AppSettings,
@@ -14,6 +14,8 @@ from multi_agentic_graph_rag.config.settings import (
     PathsSettings,
     PostgresSettings,
 )
+from multi_agentic_graph_rag.db.postgres import PostgresStore
+from multi_agentic_graph_rag.domain.errors import StoreUnavailableError
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentChunk,
     IngestionRequest,
@@ -27,6 +29,52 @@ from multi_agentic_graph_rag.workflows.ingestion_graph import _run_pipeline
 
 
 class IngestionPersistenceBoundaryTests(unittest.TestCase):
+    def test_postgres_identity_lock_contention_fails_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = PostgresStore(
+                _settings(
+                    Path(temp_dir),
+                    postgres_mode="postgres",
+                    neo4j_mode="neo4j",
+                )
+            )
+            connection = MagicMock()
+            cursor = connection.cursor.return_value.__enter__.return_value
+            cursor.fetchone.return_value = (False,)
+
+            with (
+                patch.object(store, "_connect", return_value=nullcontext(connection)),
+                self.assertRaisesRegex(StoreUnavailableError, "document ingest already running"),
+                store.document_identity_lock("PROJECT", "DOC"),
+            ):
+                self.fail("contended lock must not enter the protected section")
+
+        self.assertIn("pg_try_advisory_lock", cursor.execute.call_args.args[0])
+
+    def test_postgres_identity_lock_unlocks_when_protected_work_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = PostgresStore(
+                _settings(
+                    Path(temp_dir),
+                    postgres_mode="postgres",
+                    neo4j_mode="neo4j",
+                )
+            )
+            connection = MagicMock()
+            cursor = connection.cursor.return_value.__enter__.return_value
+            cursor.fetchone.return_value = (True,)
+
+            with (
+                patch.object(store, "_connect", return_value=nullcontext(connection)),
+                self.assertRaisesRegex(RuntimeError, "protected work failed"),
+                store.document_identity_lock("PROJECT", "DOC"),
+            ):
+                raise RuntimeError("protected work failed")
+
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertIn("pg_try_advisory_lock", statements[0])
+        self.assertIn("pg_advisory_unlock", statements[-1])
+
     def test_ingestion_persists_chunks_and_requirements_to_separate_stores(self) -> None:
         events: list[str] = []
         artifact = _artifact()

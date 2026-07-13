@@ -101,6 +101,11 @@ class UserStoryGenerationAgent:
                 output = self.reasoning_model.generate_structured(
                     prompt=prompt,
                     schema=UserStoryGenerationOutput,
+                    system_message=(
+                        PromptUserStoryGeneration.SYS_PROMPT_USER_STORY_GENERATION.value
+                    ),
+                    operation="user_story_generation.requirement",
+                    request_id=requirement.requirement_id,
                 )
                 try:
                     _verify_user_stories(requirement, output)

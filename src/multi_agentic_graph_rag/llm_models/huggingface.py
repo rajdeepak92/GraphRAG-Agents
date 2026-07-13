@@ -9,7 +9,6 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
-from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.config.settings import HuggingFaceSettings
 from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.llm_models.json_output import (
@@ -20,7 +19,6 @@ from multi_agentic_graph_rag.observability.logging import sanitized_exception_su
 
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
-_DEFAULT_SYSTEM_MESSAGE = PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value
 
 
 class HuggingFaceReasoningModel:
@@ -50,22 +48,17 @@ class HuggingFaceReasoningModel:
         self._last_completion: str | None = None
         self._last_prompt: str | None = None
         self._last_parse_attempt = 0
+        self._last_operation = "structured_generation"
+        self._last_request_id = "request"
+        self._last_call_index = 0
+        self._structured_call_count = 0
         self._response_context: dict[str, Any] = {}
-        self._system_message = _DEFAULT_SYSTEM_MESSAGE
         self._tokenizer: Any | None = None
         self._model: Any | None = None
 
     def warmup(self) -> None:
         """Warm up warmup."""
         self._load_components()
-
-    def set_system_message(self, text: str) -> None:
-        """Execute the set system message operation within its declared architectural boundary.
-
-        Args:
-            text (str): Input text processed in memory and excluded from diagnostic logs.
-        """
-        self._system_message = text
 
     def set_response_context(
         self,
@@ -112,6 +105,9 @@ class HuggingFaceReasoningModel:
                 self._last_prompt or "",
                 self._last_parse_attempt,
                 self._response_context,
+                operation=self._last_operation,
+                request_id=self._last_request_id,
+                call_index=self._last_call_index,
             )
         response_path = self.run_dir / Path(response_name).name
         response_path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,12 +115,25 @@ class HuggingFaceReasoningModel:
         self.last_response_path = response_path
         return response_path
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[T],
+        system_message: str,
+        operation: str,
+        request_id: str,
+        max_attempts: int = 2,
+    ) -> T:
         """Generate structured.
 
         Args:
             prompt (str): Prompt text passed only to the selected model provider and never logged.
             schema (type[T]): Schema required by the operation's typed contract.
+            system_message (str): Operation-scoped system instruction retained across retries.
+            operation (str): Safe operation label used for diagnostics.
+            request_id (str): Safe request anchor used for diagnostics.
+            max_attempts (int): Hard ceiling for structured generation attempts.
 
         Returns:
             T: The typed result produced by the operation.
@@ -137,7 +146,10 @@ class HuggingFaceReasoningModel:
         self.last_response_path = None
         if not self.settings.reasoning_model:
             raise RuntimeError("Hugging Face reasoning model is not configured")
-        first_completion = self._generate_completion(prompt)
+        self._structured_call_count += 1
+        call_index = self._structured_call_count
+        attempt_limit = max(1, min(max_attempts, 2))
+        first_completion = self._generate_completion(prompt, system_message=system_message)
         try:
             parsed = self._parse_completion(first_completion, schema)
         except (ValueError, ValidationError) as first_error:
@@ -147,7 +159,17 @@ class HuggingFaceReasoningModel:
                 attempt=1,
                 parse_failed=True,
                 error=first_error,
+                operation=operation,
+                request_id=request_id,
+                max_attempts=attempt_limit,
+                call_index=call_index,
             )
+            if attempt_limit == 1:
+                raise ModelOutputError(
+                    "Hugging Face model output could not be validated within the attempt limit: "
+                    f"{sanitized_exception_summary(first_error)}; "
+                    f"diagnostic={sanitized_output_preview(first_completion)}"
+                ) from first_error
             retry_prompt = _build_retry_prompt(prompt, first_error)
         else:
             self._record_response(
@@ -156,9 +178,16 @@ class HuggingFaceReasoningModel:
                 attempt=1,
                 parse_failed=False,
                 error=None,
+                operation=operation,
+                request_id=request_id,
+                max_attempts=attempt_limit,
+                call_index=call_index,
             )
             return parsed
-        retry_completion = self._generate_completion(retry_prompt)
+        retry_completion = self._generate_completion(
+            retry_prompt,
+            system_message=system_message,
+        )
         try:
             parsed = self._parse_completion(retry_completion, schema)
         except (ValueError, ValidationError) as retry_error:
@@ -168,6 +197,10 @@ class HuggingFaceReasoningModel:
                 attempt=2,
                 parse_failed=True,
                 error=retry_error,
+                operation=operation,
+                request_id=request_id,
+                max_attempts=attempt_limit,
+                call_index=call_index,
             )
             raise ModelOutputError(
                 "Hugging Face model output could not be validated after retry: "
@@ -180,20 +213,25 @@ class HuggingFaceReasoningModel:
             attempt=2,
             parse_failed=False,
             error=None,
+            operation=operation,
+            request_id=request_id,
+            max_attempts=attempt_limit,
+            call_index=call_index,
         )
         return parsed
 
-    def _generate_completion(self, prompt: str) -> str:
+    def _generate_completion(self, prompt: str, *, system_message: str) -> str:
         """Generate completion.
 
         Args:
             prompt (str): Prompt text passed only to the selected model provider and never logged.
+            system_message (str): Operation-scoped system instruction for this request.
 
         Returns:
             str: The typed result produced by the operation.
         """
         tokenizer, model = self._load_components()
-        rendered_prompt = _build_chat_prompt(tokenizer, prompt, self._system_message)
+        rendered_prompt = _build_chat_prompt(tokenizer, prompt, system_message)
         inputs = tokenizer(rendered_prompt, return_tensors="pt")
         inputs = _move_inputs_to_model(inputs, model)
         generate_kwargs: dict[str, Any] = {
@@ -231,6 +269,10 @@ class HuggingFaceReasoningModel:
         attempt: int,
         parse_failed: bool,
         error: Exception | None,
+        operation: str,
+        request_id: str,
+        max_attempts: int,
+        call_index: int,
     ) -> None:
         """Record response through the owning storage boundary.
 
@@ -241,6 +283,10 @@ class HuggingFaceReasoningModel:
             parse_failed (bool): Parse failed required by the operation's typed contract.
             error (Exception | None): Failure being classified or converted without exposing its
                                       message.
+            operation (str): Safe operation label used for diagnostics.
+            request_id (str): Safe request anchor used for diagnostics.
+            max_attempts (int): Hard ceiling for structured generation attempts.
+            call_index (int): Unique adapter invocation number for diagnostic file isolation.
 
         Side Effects:
             Emits sanitized run-scoped diagnostics when a logger is available.
@@ -248,6 +294,9 @@ class HuggingFaceReasoningModel:
         self._last_completion = completion
         self._last_prompt = prompt
         self._last_parse_attempt = attempt
+        self._last_operation = operation
+        self._last_request_id = request_id
+        self._last_call_index = call_index
         self.last_response_path = None
 
         if not parse_failed and not self.settings.log_llm_responses:
@@ -263,21 +312,24 @@ class HuggingFaceReasoningModel:
         if parse_failed:
             self.logger.warning(
                 "Hugging Face response failed structured parsing",
-                step="discover_requirements.llm_response",
-                operation="huggingface.parse_structured",
+                step=f"{operation}.llm_response",
+                operation=f"{operation}.parse_structured",
+                request_id=request_id,
                 attempt=attempt,
-                max_attempts=2,
+                max_attempts=max_attempts,
                 retry_delay_seconds=0.0,
                 response_path=str(response_path) if response_path else None,
                 exception_type=error.__class__.__name__ if error else None,
                 error_summary=sanitized_exception_summary(error) if error else None,
                 raw_response=completion,
-                status="retrying" if attempt < 2 else "failed",
+                status="retrying" if attempt < max_attempts else "failed",
             )
         else:
             self.logger.info(
                 "Hugging Face response diagnostic captured",
-                step="discover_requirements.llm_response",
+                step=f"{operation}.llm_response",
+                operation=operation,
+                request_id=request_id,
                 attempt=attempt,
                 response_path=str(response_path) if response_path else None,
                 status="captured",
@@ -479,23 +531,14 @@ def _prompt_token_count(input_ids: Any) -> int:
     return len(input_ids[0])
 
 
-def _extract_chunks(prompt: str) -> list[tuple[str, str]]:
-    """Extract chunks.
-
-    Args:
-        prompt (str): Prompt text passed only to the selected model provider and never logged.
-
-    Returns:
-        list[tuple[str, str]]: The typed result produced by the operation.
-    """
-    matches = re.findall(r"<chunk id=\"([^\"]+)\">\n(.*?)\n</chunk>", prompt, flags=re.S)
-    return [(chunk_id, text.strip()) for chunk_id, text in matches]
-
-
 def _response_filename(
     prompt: str,
     attempt: int,
     context: dict[str, Any] | None = None,
+    *,
+    operation: str = "structured_generation",
+    request_id: str = "request",
+    call_index: int = 0,
 ) -> str:
     """Execute the response filename operation within its declared architectural boundary.
 
@@ -503,10 +546,21 @@ def _response_filename(
         prompt (str): Prompt text passed only to the selected model provider and never logged.
         attempt (int): Bounded attempt used for deterministic processing.
         context (dict[str, Any] | None): Context required by the operation's typed contract.
+        operation (str): Safe operation label used for diagnostics.
+        request_id (str): Safe request anchor used for diagnostics.
+        call_index (int): Unique adapter invocation number for diagnostic file isolation.
 
     Returns:
         str: The typed result produced by the operation.
     """
+    if operation != "structured_generation" or request_id != "request":
+        safe_operation = _SAFE_RESPONSE_NAME.sub("_", operation).strip("._") or "operation"
+        safe_request_id = _SAFE_RESPONSE_NAME.sub("_", request_id).strip("._") or "request"
+        return (
+            f"llm_response_{safe_operation}_{safe_request_id}_"
+            f"call-{call_index:06d}_attempt-{attempt}.txt"
+        )
+
     if context:
         batch_index = context.get("batch_index")
         validation_attempt = context.get("validation_attempt")
@@ -516,12 +570,4 @@ def _response_filename(
                 suffix = f"{suffix}_parse{attempt}"
             return f"llm_response_{suffix}.txt"
 
-    chunks = _extract_chunks(prompt)
-    if len(chunks) == 1:
-        chunk_id = chunks[0][0]
-    elif chunks:
-        chunk_id = f"batch_{chunks[0][0]}_{chunks[-1][0]}"
-    else:
-        chunk_id = "unknown"
-    safe_chunk_id = _SAFE_RESPONSE_NAME.sub("_", chunk_id).strip("._") or "unknown"
-    return f"llm_response_{safe_chunk_id}_{attempt}.txt"
+    return f"llm_response_structured_generation_request_{attempt}.txt"

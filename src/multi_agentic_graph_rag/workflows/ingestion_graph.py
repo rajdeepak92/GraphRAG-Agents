@@ -512,7 +512,15 @@ def _resolve_and_persist_requirements(
             settings=settings.requirement_identity,
             embedder=embedding_model,
             reranker=reranker_model,
-            judge=ModelEntailmentJudge(reasoning_model),
+            judge=(
+                ModelEntailmentJudge(
+                    reasoning_model,
+                    max_attempts=settings.requirement_identity.max_structured_attempts,
+                )
+                if settings.requirement_identity.require_entailment_for_merge
+                else None
+            ),
+            logger=logger,
         )
         requirement_memory.seed(
             MemoryEntry(
@@ -522,6 +530,7 @@ def _resolve_and_persist_requirements(
                 normalized_statement=snapshot.normalized_statement,
                 requirement_type=snapshot.requirement_type,
                 signature=snapshot.semantic_signature,
+                semantic_recall_enabled=True,
             )
             for snapshot in prior_revisions.values()
         )

@@ -301,6 +301,11 @@ class RequirementDiscoveryAgent:
                 chunk_output = self.reasoning_model.generate_structured(
                     prompt=prompt,
                     schema=RequirementDiscoveryChunkOutput,
+                    system_message=(
+                        PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value
+                    ),
+                    operation="requirement_discovery.chunk",
+                    request_id=chunk.chunk_id,
                 )
                 try:
                     diagnostics = _collect_semantic_diagnostics(

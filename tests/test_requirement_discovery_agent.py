@@ -14,6 +14,7 @@ from multi_agentic_graph_rag.agents.requirement_discovery_agent import (
     _collect_semantic_diagnostics,
     _has_multiple_actors,
 )
+from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.domain.schemas import (
     DocumentChunk,
@@ -36,6 +37,10 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
 
         self.assertEqual(reasoner.prompts, 2)
         self.assertEqual([chunk.chunk_id for chunk in output.chunks], ["CHUNK-1", "CHUNK-2"])
+        self.assertEqual(
+            reasoner.system_messages,
+            [PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value] * 2,
+        )
 
     def test_missing_provider_batch_size_still_uses_one_chunk_per_call(self) -> None:
         manifest = _manifest(["The system shall import files.", "The system shall export files."])
@@ -887,10 +892,19 @@ class _ChunkReasoner:
             self.discovery_batch_size = discovery_batch_size
         self.prompts = 0
         self.last_prompt = ""
+        self.system_messages: list[str] = []
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[T],
+        system_message: str,
+        **_: object,
+    ) -> T:
         self.prompts += 1
         self.last_prompt = prompt
+        self.system_messages.append(system_message)
         chunk_text = _chunk_text(prompt)
         quote = _requirement_quote(chunk_text)
         return schema.model_validate({"facts": [_fact(quote)]})
@@ -904,7 +918,7 @@ class _StaticReasoner:
         self.facts = facts
         self.prompts = 0
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         return schema.model_validate({"facts": self.facts})
 
@@ -917,7 +931,7 @@ class _CollisionRepairReasoner:
         self.quote = quote
         self.prompts: list[str] = []
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts.append(prompt)
         keys = (
             ("system_files", "system_files")
@@ -937,7 +951,7 @@ class _PersistingCollisionReasoner:
         self.prompts = 0
         self.last_response_path: Path | None = None
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         return schema.model_validate(
             {"facts": _collision_facts(self.quote, ("system_files", "system_files"))}
@@ -960,7 +974,7 @@ class _RetryReasoner:
         self.facts_per_attempt = facts_per_attempt
         self.prompts: list[str] = []
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts.append(prompt)
         index = min(len(self.prompts) - 1, len(self.facts_per_attempt) - 1)
         return schema.model_validate({"facts": self.facts_per_attempt[index]})
@@ -978,7 +992,7 @@ class _PersistingReasoner:
         self.prompts = 0
         self.last_response_path: Path | None = None
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         return schema.model_validate({"facts": self.facts})
 
@@ -996,7 +1010,7 @@ class _QuoteRetryReasoner:
     def __init__(self) -> None:
         self.prompts = 0
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         quote = "not present in the source chunk"
         if self.prompts == 2:
@@ -1011,7 +1025,7 @@ class _EmptyReasoner:
     def __init__(self) -> None:
         self.prompts = 0
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         return schema.model_validate({"facts": []})
 
@@ -1026,7 +1040,7 @@ class _PersistingWrongQuoteReasoner:
         self.last_response_path: Path | None = None
         self._last_response = ""
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         self._last_response = f"raw response {self.prompts}"
         return schema.model_validate({"facts": [_fact("not present in the source chunk")]})
@@ -1045,7 +1059,7 @@ class _PromptCapturingReasoner:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts.append(prompt)
         chunk_text = _chunk_text(prompt)
         quote = _requirement_quote(chunk_text)
@@ -1060,7 +1074,7 @@ class _LedgerRetryReasoner:
         self.prompts: list[str] = []
         self._export_attempts = 0
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts.append(prompt)
         chunk_text = _chunk_text(prompt)
         if "export" in chunk_text:
@@ -1082,7 +1096,7 @@ class _AlwaysBadQuoteReasoner:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts.append(prompt)
         return schema.model_validate({"facts": [_fact("not present in the source chunk")]})
 
@@ -1094,7 +1108,7 @@ class _AlarmThresholdReasoner:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts.append(prompt)
         chunk_text = _chunk_text(prompt)
         return schema.model_validate(

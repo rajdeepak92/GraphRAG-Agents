@@ -103,7 +103,7 @@ class UserStoryWorkflowTests(unittest.TestCase):
 class _FakeReasoner:
     provider_name = "huggingface"
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         return schema.model_validate({"user_stories": [_story_payload()]})
 
 

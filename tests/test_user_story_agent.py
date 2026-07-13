@@ -8,6 +8,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGenerationAgent
+from multi_agentic_graph_rag.common_prompt_defs import PromptUserStoryGeneration
 from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.domain.schemas import RequirementInput
 from multi_agentic_graph_rag.services.retrieval import RetrievedChunk, RetrievedContext
@@ -30,6 +31,10 @@ class UserStoryAgentTests(unittest.TestCase):
         self.assertEqual(len(output.user_stories), 1)
         self.assertIn("warning threshold context", reasoner.last_prompt)
         self.assertIn("Users shall configure warning thresholds", reasoner.last_prompt)
+        self.assertEqual(
+            reasoner.system_messages,
+            [PromptUserStoryGeneration.SYS_PROMPT_USER_STORY_GENERATION.value],
+        )
 
     def test_temp_ids_replaced_and_requirement_id_attached(self) -> None:
         reasoner = _StoryReasoner([_story_payload("Configure warning thresholds")])
@@ -82,10 +87,19 @@ class _StoryReasoner:
         self.stories = stories
         self.prompts = 0
         self.last_prompt = ""
+        self.system_messages: list[str] = []
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[T],
+        system_message: str,
+        **_: object,
+    ) -> T:
         self.prompts += 1
         self.last_prompt = prompt
+        self.system_messages.append(system_message)
         return schema.model_validate({"user_stories": self.stories})
 
 
@@ -97,7 +111,7 @@ class _RetryStoryReasoner:
         self.good = good
         self.prompts = 0
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         story = self.good if self.prompts == 2 else self.bad
         return schema.model_validate({"user_stories": [story]})
@@ -113,7 +127,7 @@ class _PersistingBadReasoner:
         self.last_response_path: Path | None = None
         self._last_response = ""
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(self, *, prompt: str, schema: type[T], **_: object) -> T:
         self.prompts += 1
         self._last_response = f"raw response {self.prompts}"
         return schema.model_validate({"user_stories": [self.story]})

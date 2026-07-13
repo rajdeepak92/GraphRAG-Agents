@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import unittest
 
+from multi_agentic_graph_rag.config.settings import RequirementIdentitySettings
 from multi_agentic_graph_rag.domain.errors import ConfigurationError
 from multi_agentic_graph_rag.domain.identifiers import (
     is_requirement_uuid7,
@@ -35,6 +36,7 @@ from multi_agentic_graph_rag.services.requirement_identity_resolver import (
     requirement_lineage_signature,
     resolve_requirement_identity,
 )
+from multi_agentic_graph_rag.services.requirement_memory import RequirementMemory
 from multi_agentic_graph_rag.services.requirement_source import (
     load_requirement_source_from_full_payload,
 )
@@ -79,6 +81,7 @@ def _build(
     *requirements_per_chunk: LLMChunkExtraction,
     version: str = "1.0",
     prior: RequirementArtifact | None = None,
+    requirement_memory: RequirementMemory | None = None,
 ) -> RequirementArtifact:
     prior_revisions = None
     if prior is not None:
@@ -111,7 +114,22 @@ def _build(
         source_checksum="chk",
         discovery=RequirementDiscoveryOutput(chunks=list(requirements_per_chunk)),
         prior_revisions=prior_revisions,
+        requirement_memory=requirement_memory,
     )
+
+
+class _ConstantEmbedder:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+
+class _CountingJudge:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def equivalent(self, premise: str, hypothesis: str) -> bool:
+        self.calls += 1
+        return False
 
 
 class SignatureTests(unittest.TestCase):
@@ -125,6 +143,40 @@ class SignatureTests(unittest.TestCase):
         self.assertNotEqual(s1, s2)
         self.assertIn("sensor-1", s1)
         self.assertIn("sensor-2", s2)
+
+    def test_first_version_builder_makes_no_same_run_semantic_judge_calls(self) -> None:
+        judge = _CountingJudge()
+        memory = RequirementMemory(
+            settings=RequirementIdentitySettings(
+                use_reranker=False,
+                require_entailment_for_merge=True,
+            ),
+            embedder=_ConstantEmbedder(),
+            judge=judge,
+        )
+        statements = [
+            (
+                f"Device-{chr(65 + index // 26)}{chr(65 + index % 26)} shall publish "
+                f"telemetry on channel-{chr(65 + index // 26)}{chr(65 + index % 26)}."
+            )
+            for index in range(216)
+        ]
+        requirements = [
+            _req(
+                statement=statement,
+                chunk_id="CHUNK-1",
+                quote=statement,
+            )
+            for statement in statements
+        ]
+
+        _build(
+            _chunk("CHUNK-1", *requirements),
+            requirement_memory=memory,
+        )
+
+        self.assertEqual(judge.calls, 0)
+        self.assertEqual(memory.size, 216)
 
     def test_mutable_parameters_are_masked(self) -> None:
         s70 = requirement_lineage_signature(

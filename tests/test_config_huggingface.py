@@ -134,6 +134,21 @@ class HuggingFaceConfigTests(unittest.TestCase):
         settings, _ = self._load("KNOWLEDGE_GRAPH_ENABLED=false")
         self.assertFalse(settings.knowledge_graph.enabled)
 
+    def test_requirement_entailment_limits_load_from_env(self) -> None:
+        settings, _ = self._load(
+            "\n".join(
+                [
+                    "REQUIREMENT_CANDIDATE_TOP_K=3",
+                    "REQUIREMENT_MAX_ENTAILMENT_CALLS=77",
+                    "REQUIREMENT_MAX_STRUCTURED_ATTEMPTS=1",
+                ]
+            )
+        )
+
+        self.assertEqual(settings.requirement_identity.candidate_top_k, 3)
+        self.assertEqual(settings.requirement_identity.max_entailment_calls, 77)
+        self.assertEqual(settings.requirement_identity.max_structured_attempts, 1)
+
     def test_local_providers_are_rejected_by_factories(self) -> None:
         settings, _ = self._load(
             "\n".join(

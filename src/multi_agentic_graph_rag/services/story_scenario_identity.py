@@ -28,9 +28,9 @@ from multi_agentic_graph_rag.services.semantic_matcher import _cosine
 
 
 class EntailmentJudge(Protocol):
-    """Strict directional entailment: does ``premise`` fully entail ``hypothesis``?"""
+    """Strict bidirectional equivalence judge."""
 
-    def entails(self, premise: str, hypothesis: str) -> bool: ...
+    def equivalent(self, premise: str, hypothesis: str) -> bool: ...
 
 
 class StoryScenarioIdentityResolver:
@@ -88,8 +88,6 @@ class StoryScenarioIdentityResolver:
         for (candidate_id, candidate_text), vector in ranked[: self.recall_top_k]:
             if _cosine(query, vector) < self.recall_floor:
                 break
-            if self.judge.entails(new_text, candidate_text) and self.judge.entails(
-                candidate_text, new_text
-            ):
+            if self.judge.equivalent(new_text, candidate_text):
                 return candidate_id
         return None

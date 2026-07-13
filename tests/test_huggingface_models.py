@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementIdentity
 from multi_agentic_graph_rag.config.settings import HuggingFaceSettings
 from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.domain.schemas import RequirementDiscoveryChunkOutput
@@ -109,6 +110,9 @@ class HuggingFaceModelTests(unittest.TestCase):
             result = HuggingFaceReasoningModel(settings).generate_structured(
                 prompt="extract requirements",
                 schema=RequirementDiscoveryChunkOutput,
+                system_message="discovery system",
+                operation="requirement_discovery.chunk",
+                request_id="CHUNK-1",
             )
 
         self.assertEqual(result.facts, [])
@@ -146,7 +150,7 @@ class HuggingFaceModelTests(unittest.TestCase):
         )
         self.assertEqual(order, [1, 0])
 
-    def test_failed_reasoning_output_is_persisted_per_attempt(self) -> None:
+    def test_identity_retry_preserves_system_prompt_and_persists_each_attempt(self) -> None:
         settings = HuggingFaceSettings(reasoning_model="reasoning-model")
         prompt = '<chunk id="CHUNK-1">\nThe system shall import files.\n</chunk>'
 
@@ -154,12 +158,54 @@ class HuggingFaceModelTests(unittest.TestCase):
             model = _FailingReasoningModel(settings, run_dir=Path(temp_dir))
 
             with self.assertRaises(ModelOutputError):
-                model.generate_structured(prompt=prompt, schema=RequirementDiscoveryChunkOutput)
+                model.generate_structured(
+                    prompt=prompt,
+                    schema=RequirementDiscoveryChunkOutput,
+                    system_message=(
+                        PromptRequirementIdentity.SYS_PROMPT_REQUIREMENT_IDENTITY.value
+                    ),
+                    operation="requirement_identity.entailment",
+                    request_id="pair-1",
+                )
 
-            first = Path(temp_dir) / "llm_response_CHUNK-1_1.txt"
-            second = Path(temp_dir) / "llm_response_CHUNK-1_2.txt"
+            first = Path(temp_dir) / (
+                "llm_response_requirement_identity.entailment_pair-1_call-000001_attempt-1.txt"
+            )
+            second = Path(temp_dir) / (
+                "llm_response_requirement_identity.entailment_pair-1_call-000001_attempt-2.txt"
+            )
             self.assertEqual(first.read_text(encoding="utf-8"), '{"chunks": [')
             self.assertEqual(second.read_text(encoding="utf-8"), '{"chunks": [')
+            self.assertEqual(
+                model.system_messages,
+                [PromptRequirementIdentity.SYS_PROMPT_REQUIREMENT_IDENTITY.value] * 2,
+            )
+
+    def test_structured_attempt_limit_can_disable_schema_repair_retry(self) -> None:
+        settings = HuggingFaceSettings(reasoning_model="reasoning-model")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model = _FailingReasoningModel(settings, run_dir=Path(temp_dir))
+
+            with self.assertRaises(ModelOutputError):
+                model.generate_structured(
+                    prompt="prompt",
+                    schema=RequirementDiscoveryChunkOutput,
+                    system_message="discovery system",
+                    operation="requirement_discovery.chunk",
+                    request_id="CHUNK-1",
+                    max_attempts=1,
+                )
+
+            first = Path(temp_dir) / (
+                "llm_response_requirement_discovery.chunk_CHUNK-1_call-000001_attempt-1.txt"
+            )
+            second = Path(temp_dir) / (
+                "llm_response_requirement_discovery.chunk_CHUNK-1_call-000001_attempt-2.txt"
+            )
+            self.assertTrue(first.exists())
+            self.assertFalse(second.exists())
+            self.assertEqual(model.system_messages, ["discovery system"])
 
 
 class _Encoded:
@@ -171,7 +217,12 @@ class _Encoded:
 
 
 class _FailingReasoningModel(HuggingFaceReasoningModel):
-    def _generate_completion(self, prompt: str) -> str:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.system_messages: list[str] = []
+
+    def _generate_completion(self, prompt: str, *, system_message: str) -> str:
+        self.system_messages.append(system_message)
         return '{"chunks": ['
 
 

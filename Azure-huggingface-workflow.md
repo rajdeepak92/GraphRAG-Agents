@@ -120,9 +120,11 @@ GRAPH_PRIMARY_SCENARIO=true
 KNOWLEDGE_GRAPH_EXPANSION_K=6
 KNOWLEDGE_GRAPH_MIN_ASSERTIONS=3
 
-# Reranker-assisted requirement identity recall remains enabled.
+# Requirement recall and structured classification remain strictly bounded.
 REQUIREMENT_USE_RERANKER=true
-REQUIREMENT_CANDIDATE_TOP_K=8
+REQUIREMENT_CANDIDATE_TOP_K=2
+REQUIREMENT_MAX_ENTAILMENT_CALLS=200
+REQUIREMENT_MAX_STRUCTURED_ATTEMPTS=2
 REQUIREMENT_RECALL_COSINE_THRESHOLD=0.62
 
 # Optional retrieval bounds.
@@ -242,13 +244,12 @@ status metadata.
 @'
 from typing import Literal
 
-from pydantic import BaseModel
-
 from multi_agentic_graph_rag.config.config_loader import load_config
+from multi_agentic_graph_rag.domain.schemas import StrictModel
 from multi_agentic_graph_rag.llm_models.factory import create_reasoning_model
 
 
-class AzureReasoningProbe(BaseModel):
+class AzureReasoningProbe(StrictModel):
     status: Literal["ok"]
 
 
@@ -256,16 +257,32 @@ settings = load_config()
 assert settings.reasoning_model.provider == "azure_openai"
 model = create_reasoning_model(settings)
 result = model.generate_structured(
-    prompt='Return exactly this JSON object and nothing else: {"status":"ok"}',
+    prompt='{"requested_status":"ok"}',
     schema=AzureReasoningProbe,
+    system_message=(
+        "Return only the fields required by the supplied response schema. "
+        "Set status to ok."
+    ),
+    operation="health.reasoning_probe",
+    request_id="azure-structured-output",
+    max_attempts=1,
 )
 assert result.status == "ok"
 print(f"PASS reasoning provider={model.provider_name} structured_output=true")
 '@ | uv run python -
 ```
 
-If this fails, verify the Azure endpoint, API version, reasoning deployment name, deployment
-availability, and API-key authorization. Do not print the key or full exception payload.
+If this fails, verify the Azure endpoint, API version, reasoning deployment name and model version
+support Structured Outputs, deployment availability, and API-key authorization. Do not print the
+key or full exception payload.
+
+Ingestion also runs the adapter readiness check before reading the source document. Azure API
+versions older than `2024-08-01-preview` fail configuration immediately. A deployment that rejects
+`response_format=json_schema` with `strict=true` also fails with a capability-specific
+configuration error; it is never downgraded to prompt-only JSON parsing. Refusals and content
+filtering are terminal for that structured request. Diagnostic filenames contain the safe
+operation, request ID, unique adapter call number, and structured attempt number so separate calls
+cannot overwrite one another.
 
 ## 6. Check the Azure Embedding Deployment
 

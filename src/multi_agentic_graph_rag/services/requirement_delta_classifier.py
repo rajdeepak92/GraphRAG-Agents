@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Literal
 
+from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDelta
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementDeltaDecision,
     RequirementDeltaEvent,
@@ -87,7 +88,13 @@ class RequirementDeltaClassifier:
             f"Prior active requirement:\n{json.dumps(prior.model_dump(mode='json'), indent=2)}\n\n"
             f"Incoming requirement:\n{json.dumps(incoming.model_dump(mode='json'), indent=2)}\n"
         )
-        result = self.reasoner.generate_structured(prompt=prompt, schema=RequirementDeltaDecision)
+        result = self.reasoner.generate_structured(
+            prompt=prompt,
+            schema=RequirementDeltaDecision,
+            system_message=PromptRequirementDelta.SYS_PROMPT_REQUIREMENT_DELTA.value,
+            operation="requirement_delta.classify",
+            request_id=incoming.revision_id,
+        )
         if result.label == "new":
             return result.model_copy(update={"label": "updated"})
         return result

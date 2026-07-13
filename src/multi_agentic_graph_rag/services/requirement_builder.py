@@ -131,6 +131,9 @@ def build_requirement_artifact(
     allocated_revisions: dict[tuple[str, str], str] = {}
     evidence_occurrences: dict[tuple[object, ...], str] = {}
     identity_resolutions: list[RequirementIdentityResolutionRecord] = []
+    identity_total = sum(
+        len(fact.requirements) for chunk_output in discovery.chunks for fact in chunk_output.facts
+    )
     prior_by_signature = {
         (
             snapshot.semantic_signature
@@ -212,6 +215,8 @@ def build_requirement_artifact(
                         requirement_type=requirement_candidate.requirement_type,
                         normalized_statement=normalized_statement,
                         source_req_id=source_req_id,
+                        identity_index=requirement_ordinal,
+                        identity_total=identity_total,
                     )
                     if requirement_memory is not None
                     else None
@@ -225,7 +230,9 @@ def build_requirement_artifact(
                         "Requirement identity was ambiguous; allocated a distinct lineage",
                         step="resolve_requirement_identity",
                         candidate_ids=list(reconciliation.candidate_ids),
-                        statement=requirement_candidate.statement,
+                        identity_index=requirement_ordinal,
+                        identity_total=identity_total,
+                        reason=reconciliation.reasons[0],
                     )
                 if reconciliation is not None and reconciliation.requirement_id is not None:
                     lineage_id = reconciliation.requirement_id
@@ -285,6 +292,7 @@ def build_requirement_artifact(
                                 requirement_type=accumulator.requirement_type,
                                 source_req_id=source_req_id,
                                 signature=signature,
+                                semantic_recall_enabled=False,
                             )
                         )
                 else:

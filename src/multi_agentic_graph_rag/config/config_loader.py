@@ -367,7 +367,21 @@ def load_config(
                 EnvVar.REQUIREMENT_CANDIDATE_TOP_K.value,
                 requirement_identity_cfg.get("candidate_top_k"),
             ),
-            default=8,
+            default=2,
+        ),
+        max_entailment_calls=_positive_int(
+            env.get(
+                EnvVar.REQUIREMENT_MAX_ENTAILMENT_CALLS.value,
+                requirement_identity_cfg.get("max_entailment_calls"),
+            ),
+            default=200,
+        ),
+        max_structured_attempts=_positive_int(
+            env.get(
+                EnvVar.REQUIREMENT_MAX_STRUCTURED_ATTEMPTS.value,
+                requirement_identity_cfg.get("max_structured_attempts"),
+            ),
+            default=2,
         ),
         recall_cosine_threshold=_float(
             env.get(

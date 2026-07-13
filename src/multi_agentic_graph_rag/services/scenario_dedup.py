@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from multi_agentic_graph_rag.common_prompt_defs import (
     DUPLICATE_JUDGE_PROMPT,
     SCENARIO_CANONICALIZATION_PROMPT,
+    PromptScenarioDedup,
 )
 from multi_agentic_graph_rag.domain.schemas import (
     CanonicalScenario,
@@ -64,7 +66,14 @@ class DedupEngine:
             May invoke configured model or workflow providers.
         """
         prompt = f"{SCENARIO_CANONICALIZATION_PROMPT}\n\nScenario:\n{scenario_text.strip()}\n"
-        return self.reasoner.generate_structured(prompt=prompt, schema=CanonicalScenario)
+        request_id = "canonical-" + hashlib.sha256(scenario_text.encode()).hexdigest()[:16]
+        return self.reasoner.generate_structured(
+            prompt=prompt,
+            schema=CanonicalScenario,
+            system_message=(PromptScenarioDedup.SYS_PROMPT_SCENARIO_CANONICALIZATION.value),
+            operation="scenario_dedup.canonicalize",
+            request_id=request_id,
+        )
 
     def candidate_pairs(self, scenarios: list[TestScenarioRecord]) -> list[DuplicateCandidate]:
         """Execute the candidate pairs operation within its declared architectural boundary.
@@ -245,7 +254,18 @@ class DedupEngine:
             f"Scenario A:\n{json.dumps(left.model_dump(mode='json'), indent=2)}\n\n"
             f"Scenario B:\n{json.dumps(right.model_dump(mode='json'), indent=2)}\n"
         )
-        return self.reasoner.generate_structured(prompt=prompt, schema=DuplicateJudgeResult)
+        request_payload = json.dumps(
+            [left.model_dump(mode="json"), right.model_dump(mode="json")],
+            sort_keys=True,
+        )
+        request_id = "judge-" + hashlib.sha256(request_payload.encode()).hexdigest()[:16]
+        return self.reasoner.generate_structured(
+            prompt=prompt,
+            schema=DuplicateJudgeResult,
+            system_message=PromptScenarioDedup.SYS_PROMPT_DUPLICATE_JUDGE.value,
+            operation="scenario_dedup.judge",
+            request_id=request_id,
+        )
 
     def _rerank_candidates(
         self,

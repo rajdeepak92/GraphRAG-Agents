@@ -26,6 +26,7 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Literal, Protocol
 
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementIdentity
@@ -55,30 +56,34 @@ class Reranker(Protocol):
 
 
 class EntailmentJudge(Protocol):
-    """Strict directional entailment: does ``premise`` fully entail ``hypothesis``?"""
+    """Strict bidirectional equivalence judge."""
 
-    def entails(self, premise: str, hypothesis: str) -> bool: ...
+    def equivalent(self, premise: str, hypothesis: str) -> bool: ...
 
 
-class _EntailmentOutput(StrictModel):
-    """Define the validated entailment output data contract."""
+class _BidirectionalEntailmentOutput(StrictModel):
+    """Define the validated bidirectional entailment output data contract."""
 
-    entails: bool
+    premise_entails_hypothesis: bool
+    hypothesis_entails_premise: bool
 
 
 class ModelEntailmentJudge:
     """Provider-neutral strict entailment judge backed by the configured reasoner."""
 
-    def __init__(self, model: ReasoningModel) -> None:
+    def __init__(self, model: ReasoningModel, *, max_attempts: int = 2) -> None:
         """Execute the init operation within its declared architectural boundary.
 
         Args:
             model (ReasoningModel): Provider-neutral model adapter used by the operation.
+            max_attempts (int): Hard ceiling for structured generation attempts.
         """
         self._model = model
+        self._max_attempts = max(1, min(max_attempts, 2))
+        self._request_count = 0
 
-    def entails(self, premise: str, hypothesis: str) -> bool:
-        """Execute the entails operation within its declared architectural boundary.
+    def equivalent(self, premise: str, hypothesis: str) -> bool:
+        """Return whether both requirements entail each other.
 
         Args:
             premise (str): Premise required by the operation's typed contract.
@@ -90,14 +95,23 @@ class ModelEntailmentJudge:
         Side Effects:
             May invoke configured model or workflow providers.
         """
-        prompt = (
-            PromptRequirementIdentity.BIDIRECTIONAL_ENTAILMENT.value
-            + "PREMISE: "
-            + json.dumps(premise)
-            + "\nHYPOTHESIS: "
-            + json.dumps(hypothesis)
+        prompt = json.dumps(
+            {"premise": premise, "hypothesis": hypothesis},
+            ensure_ascii=False,
         )
-        return self._model.generate_structured(prompt=prompt, schema=_EntailmentOutput).entails
+        self._request_count += 1
+        pair_fingerprint = hashlib.sha256(
+            f"{_norm(premise)}\n{_norm(hypothesis)}".encode()
+        ).hexdigest()[:16]
+        result = self._model.generate_structured(
+            prompt=prompt,
+            schema=_BidirectionalEntailmentOutput,
+            system_message=PromptRequirementIdentity.SYS_PROMPT_REQUIREMENT_IDENTITY.value,
+            operation="requirement_identity.entailment",
+            request_id=f"pair-{self._request_count:06d}-{pair_fingerprint}",
+            max_attempts=self._max_attempts,
+        )
+        return result.premise_entails_hypothesis and result.hypothesis_entails_premise
 
 
 @dataclass
@@ -112,6 +126,7 @@ class MemoryEntry:
     source_req_id: str | None = None
     signature: str = ""
     embedding: list[float] | None = None
+    semantic_recall_enabled: bool = True
 
     def __post_init__(self) -> None:
         """Execute the post init operation within its declared architectural boundary."""
@@ -227,6 +242,7 @@ class RequirementMemory:
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         judge: EntailmentJudge | None = None,
+        logger: object | None = None,
     ) -> None:
         """Execute the init operation within its declared architectural boundary.
 
@@ -235,14 +251,20 @@ class RequirementMemory:
             embedder (Embedder | None): Provider-neutral model adapter used by the operation.
             reranker (Reranker | None): Provider-neutral model adapter used by the operation.
             judge (EntailmentJudge | None): Judge required by the operation's typed contract.
+            logger (object | None): Optional run-scoped logger used for sanitized diagnostics.
         """
         self._settings = settings
         self._embedder = embedder
         self._reranker = reranker if settings.use_reranker else None
         self._judge = judge
+        self._logger = logger
         self._entries: list[MemoryEntry] = []
         self._by_hash: dict[str, MemoryEntry] = {}
         self._by_signature: dict[str, MemoryEntry] = {}
+        self._entailment_cache: dict[tuple[str, str], bool] = {}
+        self._entailment_calls_used = 0
+        self._entailment_cache_hits = 0
+        self._budget_warning_emitted = False
 
     @property
     def size(self) -> int:
@@ -252,6 +274,16 @@ class RequirementMemory:
             int: The typed result produced by the operation.
         """
         return len(self._entries)
+
+    @property
+    def entailment_calls_used(self) -> int:
+        """Return the number of uncached directional entailment calls used by this memory."""
+        return self._entailment_calls_used
+
+    @property
+    def entailment_cache_hits(self) -> int:
+        """Return the number of cached pairwise decisions reused by this memory."""
+        return self._entailment_cache_hits
 
     def seed(self, entries: Iterable[MemoryEntry]) -> None:
         """Seed seed.
@@ -341,6 +373,8 @@ class RequirementMemory:
                 current[1].append(reason)
 
         for entry in self._entries:
+            if not entry.semantic_recall_enabled:
+                continue
             if entry.signature == signature:
                 _bump(entry, 1.0, "signature")
             if source_req_id and entry.source_req_id and entry.source_req_id == source_req_id:
@@ -373,28 +407,54 @@ class RequirementMemory:
         requirement_type: str,
         normalized_statement: str,
         source_req_id: str | None = None,
+        identity_index: int | None = None,
+        identity_total: int | None = None,
     ) -> ReconcileResult:
         """Decide identity for one candidate against memory; never merges on score."""
+        started = perf_counter()
+        calls_before = self._entailment_calls_used
+        cache_hits_before = self._entailment_cache_hits
+        candidate_count = 0
+
+        def _finish(result: ReconcileResult) -> ReconcileResult:
+            """Emit the terminal safe metrics for this identity and return its result."""
+            self._log_decision(
+                result=result,
+                identity_index=identity_index,
+                identity_total=identity_total,
+                candidate_count=candidate_count,
+                model_call_count=self._entailment_calls_used - calls_before,
+                cache_hits=self._entailment_cache_hits - cache_hits_before,
+                elapsed_ms=(perf_counter() - started) * 1000.0,
+            )
+            return result
+
         family = normalize_requirement_family(requirement_type)
 
         exact = self.exact_statement_match(normalized_statement or statement, requirement_type)
         if exact is not None:
-            return ReconcileResult(
-                decision="EXACT",
-                requirement_id=exact.requirement_id,
-                revision_id=exact.revision_id,
-                reasons=("exact_normalized_statement",),
-                candidate_ids=(exact.requirement_id,),
+            candidate_count = 1
+            return _finish(
+                ReconcileResult(
+                    decision="EXACT",
+                    requirement_id=exact.requirement_id,
+                    revision_id=exact.revision_id,
+                    reasons=("exact_normalized_statement",),
+                    candidate_ids=(exact.requirement_id,),
+                )
             )
 
         signature_match = self.exact_signature_match(statement, requirement_type)
         if signature_match is not None:
-            return ReconcileResult(
-                decision="SAME_LINEAGE_REVISION",
-                requirement_id=signature_match.requirement_id,
-                revision_id=None,
-                reasons=("exact_signature",),
-                candidate_ids=(signature_match.requirement_id,),
+            candidate_count = 1
+            return _finish(
+                ReconcileResult(
+                    decision="SAME_LINEAGE_REVISION",
+                    requirement_id=signature_match.requirement_id,
+                    revision_id=None,
+                    reasons=("exact_signature",),
+                    candidate_ids=(signature_match.requirement_id,),
+                )
             )
 
         pool = self.candidates(
@@ -410,79 +470,194 @@ class RequirementMemory:
             for candidate in pool
             if normalize_requirement_family(candidate.entry.requirement_type) == family
         ]
+        candidate_count = len(eligible)
         if not eligible:
-            return ReconcileResult(
-                decision="DISTINCT",
-                requirement_id=None,
-                revision_id=None,
-                reasons=("no_recall_candidate",),
-                candidate_scores=candidate_scores,
-                reranker_order=reranker_order,
+            return _finish(
+                ReconcileResult(
+                    decision="DISTINCT",
+                    requirement_id=None,
+                    revision_id=None,
+                    reasons=("no_recall_candidate",),
+                    candidate_scores=candidate_scores,
+                    reranker_order=reranker_order,
+                )
             )
 
-        if self._settings.require_entailment_for_merge and self._judge is None:
+        if not self._settings.require_entailment_for_merge:
+            return _finish(
+                ReconcileResult(
+                    decision="DISTINCT",
+                    requirement_id=None,
+                    revision_id=None,
+                    reasons=("semantic_merge_disabled",),
+                    candidate_ids=tuple(c.entry.requirement_id for c in eligible),
+                    candidate_scores=candidate_scores,
+                    reranker_order=reranker_order,
+                )
+            )
+
+        if self._judge is None:
             # No judge available: recall alone must not merge. Fail closed.
-            return ReconcileResult(
-                decision="DISTINCT",
-                requirement_id=None,
-                revision_id=None,
-                reasons=("recall_only_no_judge_fail_closed",),
-                candidate_ids=tuple(c.entry.requirement_id for c in eligible),
-                candidate_scores=candidate_scores,
-                reranker_order=reranker_order,
+            return _finish(
+                ReconcileResult(
+                    decision="DISTINCT",
+                    requirement_id=None,
+                    revision_id=None,
+                    reasons=("recall_only_no_judge_fail_closed",),
+                    candidate_ids=tuple(c.entry.requirement_id for c in eligible),
+                    candidate_scores=candidate_scores,
+                    reranker_order=reranker_order,
+                )
             )
 
         if self._judge is not None:
             # Complete-linkage against canonical representatives only. More than
             # one mutually-entailing lineage is ambiguous, never a reason to union
             # those lineages transitively.
-            matches = [
-                candidate
-                for candidate in eligible
-                if self._judge.entails(statement, candidate.entry.statement)
-                and self._judge.entails(candidate.entry.statement, statement)
-            ]
-            matched_ids = {candidate.entry.requirement_id for candidate in matches}
-            if len(matched_ids) > 1:
-                return ReconcileResult(
-                    decision="AMBIGUOUS",
-                    requirement_id=None,
-                    revision_id=None,
-                    reasons=("multiple_mutual_entailment_matches_fail_closed",),
-                    candidate_ids=tuple(sorted(matched_ids)),
-                    candidate_scores=candidate_scores,
-                    reranker_order=reranker_order,
-                    judge_result="multiple_mutual_matches",
-                )
+            matches: list[Candidate] = []
+            for candidate in eligible:
+                equivalent = self._equivalent(statement, candidate.entry.statement)
+                if equivalent is None:
+                    return _finish(
+                        self._budget_exhausted_result(
+                            eligible=eligible,
+                            candidate_scores=candidate_scores,
+                            reranker_order=reranker_order,
+                        )
+                    )
+                if equivalent:
+                    matches.append(candidate)
+                    matched_ids = {match.entry.requirement_id for match in matches}
+                    if len(matched_ids) > 1:
+                        return _finish(
+                            ReconcileResult(
+                                decision="AMBIGUOUS",
+                                requirement_id=None,
+                                revision_id=None,
+                                reasons=("multiple_mutual_entailment_matches_fail_closed",),
+                                candidate_ids=tuple(sorted(matched_ids)),
+                                candidate_scores=candidate_scores,
+                                reranker_order=reranker_order,
+                                judge_result="multiple_mutual_matches",
+                            )
+                        )
             if matches:
                 best = matches[0]
-                return ReconcileResult(
-                    decision="EXACT",
-                    requirement_id=best.entry.requirement_id,
-                    revision_id=best.entry.revision_id,
-                    reasons=("bidirectional_entailment", *best.reasons),
-                    candidate_ids=(best.entry.requirement_id,),
+                return _finish(
+                    ReconcileResult(
+                        decision="EXACT",
+                        requirement_id=best.entry.requirement_id,
+                        revision_id=best.entry.revision_id,
+                        reasons=("bidirectional_entailment", *best.reasons),
+                        candidate_ids=(best.entry.requirement_id,),
+                        candidate_scores=candidate_scores,
+                        reranker_order=reranker_order,
+                        judge_result="mutual_entailment",
+                    )
+                )
+            return _finish(
+                ReconcileResult(
+                    decision="DISTINCT",
+                    requirement_id=None,
+                    revision_id=None,
+                    reasons=("entailment_not_mutual_fail_closed",),
+                    candidate_ids=tuple(c.entry.requirement_id for c in eligible),
                     candidate_scores=candidate_scores,
                     reranker_order=reranker_order,
-                    judge_result="mutual_entailment",
+                    judge_result="not_mutual",
                 )
-            return ReconcileResult(
-                decision="DISTINCT",
-                requirement_id=None,
-                revision_id=None,
-                reasons=("entailment_not_mutual_fail_closed",),
-                candidate_ids=tuple(c.entry.requirement_id for c in eligible),
-                candidate_scores=candidate_scores,
-                reranker_order=reranker_order,
-                judge_result="not_mutual",
             )
 
+    def _equivalent(self, premise: str, hypothesis: str) -> bool | None:
+        """Return a cached equivalence judgment or None when the run budget is exhausted."""
+        normalized_premise = _norm(premise)
+        normalized_hypothesis = _norm(hypothesis)
+        key = (
+            (normalized_premise, normalized_hypothesis)
+            if normalized_premise <= normalized_hypothesis
+            else (normalized_hypothesis, normalized_premise)
+        )
+        cached = self._entailment_cache.get(key)
+        if cached is not None:
+            self._entailment_cache_hits += 1
+            return cached
+        if self._entailment_calls_used >= self._settings.max_entailment_calls:
+            self._warn_budget_exhausted()
+            return None
+        if self._judge is None:
+            return None
+        self._entailment_calls_used += 1
+        result = self._judge.equivalent(premise, hypothesis)
+        self._entailment_cache[key] = result
+        return result
+
+    def _budget_exhausted_result(
+        self,
+        *,
+        eligible: list[Candidate],
+        candidate_scores: dict[str, float],
+        reranker_order: tuple[str, ...],
+    ) -> ReconcileResult:
+        """Return the canonical fail-closed decision for an exhausted call budget."""
         return ReconcileResult(
             decision="DISTINCT",
             requirement_id=None,
             revision_id=None,
-            reasons=("fail_closed",),
-            candidate_ids=tuple(c.entry.requirement_id for c in eligible),
+            reasons=("entailment_budget_exhausted",),
+            candidate_ids=tuple(candidate.entry.requirement_id for candidate in eligible),
             candidate_scores=candidate_scores,
             reranker_order=reranker_order,
+            judge_result="budget_exhausted",
         )
+
+    def _warn_budget_exhausted(self) -> None:
+        """Emit one sanitized warning when the run-wide entailment budget is exhausted."""
+        if self._budget_warning_emitted:
+            return
+        self._budget_warning_emitted = True
+        warning = getattr(self._logger, "warning", None)
+        if callable(warning):
+            warning(
+                "Requirement identity entailment budget exhausted; remaining matches fail closed",
+                step="resolve_requirement_identity",
+                operation="requirement_identity.entailment",
+                entailment_calls_used=self._entailment_calls_used,
+                max_entailment_calls=self._settings.max_entailment_calls,
+                status="degraded",
+            )
+
+    def _log_decision(
+        self,
+        *,
+        result: ReconcileResult,
+        identity_index: int | None,
+        identity_total: int | None,
+        candidate_count: int,
+        model_call_count: int,
+        cache_hits: int,
+        elapsed_ms: float,
+    ) -> None:
+        """Emit one safe terminal reconciliation record for a requirement identity."""
+        if identity_index is None or identity_total is None:
+            return
+        debug = getattr(self._logger, "debug", None)
+        if callable(debug):
+            debug(
+                "Requirement identity reconciliation completed",
+                step="resolve_requirement_identity",
+                operation="requirement_identity.reconcile",
+                identity_index=identity_index,
+                identity_total=identity_total,
+                candidate_count=candidate_count,
+                cache_hits=cache_hits,
+                model_call_count=model_call_count,
+                entailment_calls_used=self._entailment_calls_used,
+                budget_remaining=max(
+                    0,
+                    self._settings.max_entailment_calls - self._entailment_calls_used,
+                ),
+                decision=result.decision,
+                reason=result.reasons[0] if result.reasons else "unspecified",
+                elapsed_ms=round(elapsed_ms, 3),
+                status="completed",
+            )

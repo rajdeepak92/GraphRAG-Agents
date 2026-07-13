@@ -3,33 +3,44 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from datetime import date
 from importlib import import_module
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
-from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.config.settings import AzureOpenAISettings
-from multi_agentic_graph_rag.domain.errors import ModelOutputError
-from multi_agentic_graph_rag.llm_models.json_output import (
-    parse_json_object,
-    sanitized_output_preview,
-)
+from multi_agentic_graph_rag.domain.errors import ConfigurationError, ModelOutputError
 from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
-_DEFAULT_SYSTEM_MESSAGE = PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value
-
-
-class _ChatCompletionRequest(TypedDict):
-    """Describe the chat completion request state exchanged between typed workflow nodes."""
-
-    model: str
-    messages: list[dict[str, str]]
-    temperature: NotRequired[float]
+_SAFE_SCHEMA_NAME = re.compile(r"[^A-Za-z0-9_-]+")
+_AZURE_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
+    {
+        "default",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
+        "minimum",
+        "maximum",
+        "multipleOf",
+        "patternProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "minProperties",
+        "maxProperties",
+        "unevaluatedItems",
+        "contains",
+        "minContains",
+        "maxContains",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    }
+)
 
 
 class AzureOpenAIReasoningModel:
@@ -64,20 +75,16 @@ class AzureOpenAIReasoningModel:
         self._last_completion: str | None = None
         self._last_prompt: str | None = None
         self._last_parse_attempt = 0
+        self._last_operation = "structured_generation"
+        self._last_request_id = "request"
+        self._last_call_index = 0
+        self._structured_call_count = 0
         self._response_context: dict[str, Any] = {}
-        self._system_message = _DEFAULT_SYSTEM_MESSAGE
-        # Once a deployment rejects an explicit temperature, remember it so every
-        # later call omits the parameter up front instead of paying a failing
-        # round-trip per chunk. Reset only by constructing a new model.
-        self._omit_temperature = False
 
-    def set_system_message(self, text: str) -> None:
-        """Execute the set system message operation within its declared architectural boundary.
-
-        Args:
-            text (str): Input text processed in memory and excluded from diagnostic logs.
-        """
-        self._system_message = text
+    def warmup(self) -> None:
+        """Fail fast when the configured Azure API cannot enforce strict outputs."""
+        if not _supports_structured_outputs_api(self.settings.api_version):
+            raise ConfigurationError(_structured_outputs_capability_message(self.settings))
 
     def set_response_context(
         self,
@@ -124,6 +131,9 @@ class AzureOpenAIReasoningModel:
                 self._last_prompt or "",
                 self._last_parse_attempt,
                 self._response_context,
+                operation=self._last_operation,
+                request_id=self._last_request_id,
+                call_index=self._last_call_index,
             )
         response_path = self.run_dir / Path(response_name).name
         response_path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,12 +141,25 @@ class AzureOpenAIReasoningModel:
         self.last_response_path = response_path
         return response_path
 
-    def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+    def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[T],
+        system_message: str,
+        operation: str,
+        request_id: str,
+        max_attempts: int = 2,
+    ) -> T:
         """Generate structured.
 
         Args:
             prompt (str): Prompt text passed only to the selected model provider and never logged.
             schema (type[T]): Schema required by the operation's typed contract.
+            system_message (str): Operation-scoped system instruction retained across retries.
+            operation (str): Safe operation label used for diagnostics.
+            request_id (str): Safe request anchor used for diagnostics.
+            max_attempts (int): Hard ceiling for provider transport attempts.
 
         Returns:
             T: The typed result produced by the operation.
@@ -146,65 +169,49 @@ class AzureOpenAIReasoningModel:
             contract.
         """
         self.last_response_path = None
-        first_completion = self._generate_completion(prompt)
-        try:
-            parsed = self._parse_completion(first_completion, schema)
-        except (ValueError, ValidationError) as first_error:
-            self._record_response(
-                prompt=prompt,
-                completion=first_completion,
-                attempt=1,
-                parse_failed=True,
-                error=first_error,
-            )
-            retry_prompt = _build_retry_prompt(prompt, first_error)
-        else:
-            self._record_response(
-                prompt=prompt,
-                completion=first_completion,
-                attempt=1,
-                parse_failed=False,
-                error=None,
-            )
-            return parsed
-
-        retry_completion = self._generate_completion(retry_prompt)
-        try:
-            parsed = self._parse_completion(retry_completion, schema)
-        except (ValueError, ValidationError) as retry_error:
-            self._record_response(
-                prompt=prompt,
-                completion=retry_completion,
-                attempt=2,
-                parse_failed=True,
-                error=retry_error,
-            )
-            raise ModelOutputError(
-                "Azure OpenAI model output could not be validated after retry: "
-                f"{sanitized_exception_summary(retry_error)}; "
-                f"diagnostic={sanitized_output_preview(retry_completion)}"
-            ) from retry_error
-
+        self.warmup()
+        self._structured_call_count += 1
+        call_index = self._structured_call_count
+        parsed, completion = self._generate_completion(
+            prompt,
+            schema=schema,
+            system_message=system_message,
+            max_attempts=max_attempts,
+        )
         self._record_response(
             prompt=prompt,
-            completion=retry_completion,
-            attempt=2,
+            completion=completion,
+            attempt=1,
             parse_failed=False,
             error=None,
+            operation=operation,
+            request_id=request_id,
+            call_index=call_index,
         )
         return parsed
 
-    def _generate_completion(self, prompt: str) -> str:
-        """Generate completion.
+    def _generate_completion(
+        self,
+        prompt: str,
+        *,
+        schema: type[T],
+        system_message: str,
+        max_attempts: int,
+    ) -> tuple[T, str]:
+        """Generate one natively schema-constrained completion.
 
         Args:
             prompt (str): Prompt text passed only to the selected model provider and never logged.
+            schema (type[T]): Strict Pydantic response contract supplied to Azure.
+            system_message (str): Operation-scoped system instruction for this request.
+            max_attempts (int): Hard ceiling for provider transport attempts.
 
         Returns:
-            str: The typed result produced by the operation.
+            tuple[T, str]: Validated value and raw JSON retained for diagnostics.
 
         Raises:
-            RuntimeError: If validated inputs or required dependencies cannot satisfy the contract.
+            ModelOutputError: If Azure refuses or omits the parsed structured response.
+            RuntimeError: If the Azure provider is not configured.
         """
         if not all(
             [
@@ -222,43 +229,50 @@ class AzureOpenAIReasoningModel:
             azure_endpoint=self.settings.endpoint,
             api_key=self.settings.api_key,
             api_version=self.settings.api_version,
-        )
-        request = _chat_completion_request(
-            model=self.settings.reasoning_deployment,
-            messages=[
-                {
-                    "role": "system",
-                    "content": self._system_message,
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=None if self._omit_temperature else self.settings.reasoning_temperature,
+            max_retries=max(0, min(max_attempts, 2) - 1),
         )
         try:
-            response = client.chat.completions.create(**request)
-        except openai.BadRequestError as error:
-            if "temperature" not in request or not _is_unsupported_temperature_error(error):
-                raise
-            # Azure reasoning deployments may reject any explicit temperature. Retry
-            # exactly once with only that optional parameter removed; all other 400s
-            # and any second failure propagate unchanged. Remember the rejection so
-            # subsequent calls skip the doomed round-trip entirely.
-            request.pop("temperature")
-            self._omit_temperature = True
-            response = client.chat.completions.create(**request)
-        return cast(str, response.choices[0].message.content or "{}")
-
-    def _parse_completion(self, completion: str, schema: type[T]) -> T:
-        """Parse completion.
-
-        Args:
-            completion (str): Completion required by the operation's typed contract.
-            schema (type[T]): Schema required by the operation's typed contract.
-
-        Returns:
-            T: The typed result produced by the operation.
-        """
-        return schema.model_validate(parse_json_object(completion))
+            response = client.chat.completions.create(
+                model=self.settings.reasoning_deployment,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_message,
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format=_strict_response_format(schema),
+            )
+        except Exception as error:
+            if _is_content_filter_error(error):
+                raise ModelOutputError(
+                    "Azure OpenAI content filtering blocked the request"
+                ) from error
+            if _is_azure_configuration_error(error, openai):
+                raise ConfigurationError(
+                    _structured_outputs_capability_message(self.settings)
+                ) from error
+            raise
+        if not response.choices:
+            raise ModelOutputError("Azure OpenAI returned no structured response choice")
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "content_filter":
+            raise ModelOutputError("Azure OpenAI content filtering blocked the response")
+        message = choice.message
+        if getattr(message, "refusal", None):
+            raise ModelOutputError("Azure OpenAI refused the structured request")
+        content = getattr(message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise ModelOutputError("Azure OpenAI returned no parsed structured response content")
+        completion = content
+        try:
+            parsed = schema.model_validate_json(completion)
+        except (ValueError, ValidationError) as error:
+            raise ModelOutputError(
+                "Azure OpenAI structured output violated the Python schema: "
+                f"{sanitized_exception_summary(error)}"
+            ) from error
+        return parsed, completion
 
     def _record_response(
         self,
@@ -268,6 +282,9 @@ class AzureOpenAIReasoningModel:
         attempt: int,
         parse_failed: bool,
         error: Exception | None,
+        operation: str,
+        request_id: str,
+        call_index: int,
     ) -> None:
         """Record response through the owning storage boundary.
 
@@ -278,6 +295,9 @@ class AzureOpenAIReasoningModel:
             parse_failed (bool): Parse failed required by the operation's typed contract.
             error (Exception | None): Failure being classified or converted without exposing its
                                       message.
+            operation (str): Safe operation label used for diagnostics.
+            request_id (str): Safe request anchor used for diagnostics.
+            call_index (int): Unique adapter invocation number for diagnostic file isolation.
 
         Side Effects:
             Emits sanitized run-scoped diagnostics when a logger is available.
@@ -285,6 +305,9 @@ class AzureOpenAIReasoningModel:
         self._last_completion = completion
         self._last_prompt = prompt
         self._last_parse_attempt = attempt
+        self._last_operation = operation
+        self._last_request_id = request_id
+        self._last_call_index = call_index
         self.last_response_path = None
 
         if not parse_failed and not self.log_llm_responses:
@@ -300,8 +323,9 @@ class AzureOpenAIReasoningModel:
         if parse_failed:
             self.logger.warning(
                 "Azure OpenAI response failed structured parsing",
-                step="discover_requirements.llm_response",
-                operation="azure_openai.parse_structured",
+                step=f"{operation}.llm_response",
+                operation=f"{operation}.parse_structured",
+                request_id=request_id,
                 attempt=attempt,
                 max_attempts=2,
                 retry_delay_seconds=0.0,
@@ -314,7 +338,9 @@ class AzureOpenAIReasoningModel:
         else:
             self.logger.info(
                 "Azure OpenAI response diagnostic captured",
-                step="discover_requirements.llm_response",
+                step=f"{operation}.llm_response",
+                operation=operation,
+                request_id=request_id,
                 attempt=attempt,
                 response_path=str(response_path) if response_path else None,
                 status="captured",
@@ -375,85 +401,116 @@ class AzureOpenAIEmbeddingModel:
         return [item.embedding for item in response.data]
 
 
-def _chat_completion_request(
-    *,
-    model: str,
-    messages: list[dict[str, str]],
-    temperature: float | None,
-) -> _ChatCompletionRequest:
-    """Execute the chat completion request operation within its declared architectural boundary.
+def _strict_response_format(schema: type[BaseModel]) -> dict[str, Any]:
+    """Build Azure's supported strict JSON Schema envelope for a Pydantic model.
+
+    Pydantic constraints unsupported by Azure remain enforced by the second,
+    local ``model_validate_json`` boundary after generation.
 
     Args:
-        model (str): Provider-neutral model adapter used by the operation.
-        messages (list[dict[str, str]]): Messages required by the operation's typed contract.
-        temperature (float | None): Temperature required by the operation's typed contract.
+        schema (type[BaseModel]): Pydantic response contract for the operation.
 
     Returns:
-        _ChatCompletionRequest: The typed result produced by the operation.
+        dict[str, Any]: Native ``json_schema`` response-format payload.
     """
-    request: _ChatCompletionRequest = {"model": model, "messages": messages}
-    if temperature is not None:
-        request["temperature"] = temperature
-    return request
+    json_schema = schema.model_json_schema()
+    _normalize_azure_schema(json_schema)
+    schema_name = _SAFE_SCHEMA_NAME.sub("_", schema.__name__).strip("_") or "response"
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": json_schema,
+        },
+    }
 
 
-def _is_unsupported_temperature_error(error: Exception) -> bool:
-    """Return whether unsupported temperature error.
-
-    Args:
-        error (Exception): Failure being classified or converted without exposing its message.
-
-    Returns:
-        bool: The typed result produced by the operation.
-    """
-    param = getattr(error, "param", None)
-    code = getattr(error, "code", None)
-    body = getattr(error, "body", None)
-    if isinstance(body, Mapping):
-        payload: Mapping[str, Any] = body
-        nested = body.get("error")
-        if isinstance(nested, Mapping):
-            payload = nested
-        param = param or payload.get("param")
-        code = code or payload.get("code")
-    return param == "temperature" and code == "unsupported_value"
+def _supports_structured_outputs_api(api_version: str) -> bool:
+    """Return whether an Azure API version can enforce strict Structured Outputs."""
+    normalized = api_version.strip().lower()
+    if normalized == "v1":
+        return True
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?:-preview)?", normalized)
+    if match is None:
+        return False
+    try:
+        configured = date.fromisoformat(match.group(1))
+    except ValueError:
+        return False
+    return configured >= date(2024, 8, 1)
 
 
-def _build_retry_prompt(prompt: str, error: Exception) -> str:
-    """Build retry prompt.
-
-    Args:
-        prompt (str): Prompt text passed only to the selected model provider and never logged.
-        error (Exception): Failure being classified or converted without exposing its message.
-
-    Returns:
-        str: The typed result produced by the operation.
-    """
+def _structured_outputs_capability_message(settings: AzureOpenAISettings) -> str:
+    """Build the non-secret strict-output readiness failure message."""
     return (
-        f"{prompt}\n\n"
-        "The previous response failed validation. "
-        "Return one corrected JSON object only.\n"
-        f"Validation error: {error}"
+        "Azure strict Structured Outputs readiness failed for deployment "
+        f"'{settings.reasoning_deployment}' with API version '{settings.api_version}'. "
+        "The deployment model/version and API must support "
+        "response_format=json_schema with strict=true; use API 2024-08-01-preview or newer "
+        "(or GA v1) and a supported Azure model deployment."
     )
 
 
-def _extract_chunks(prompt: str) -> list[tuple[str, str]]:
-    """Extract chunks.
+def _is_azure_configuration_error(error: Exception, openai: Any) -> bool:
+    """Classify provider errors that indicate an unsupported deployment/API contract."""
+    error_types = tuple(
+        error_type
+        for name in ("BadRequestError", "NotFoundError")
+        if isinstance((error_type := getattr(openai, name, None)), type)
+    )
+    return bool(error_types) and isinstance(error, error_types)
+
+
+def _is_content_filter_error(error: Exception) -> bool:
+    """Detect Azure content-filter provider failures without logging their payload."""
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code.lower() in {"content_filter", "contentfilter"}:
+        return True
+    body = getattr(error, "body", None)
+    if not isinstance(body, dict):
+        return False
+    nested = body.get("error")
+    values = [body.get("code")]
+    if isinstance(nested, dict):
+        values.append(nested.get("code"))
+    return any(
+        isinstance(value, str) and value.lower() in {"content_filter", "contentfilter"}
+        for value in values
+    )
+
+
+def _normalize_azure_schema(node: Any) -> None:
+    """Normalize a Pydantic schema in place to Azure's strict supported subset.
 
     Args:
-        prompt (str): Prompt text passed only to the selected model provider and never logged.
-
-    Returns:
-        list[tuple[str, str]]: The typed result produced by the operation.
+        node (Any): Current JSON Schema node being normalized recursively.
     """
-    matches = re.findall(r"<chunk id=\"([^\"]+)\">\n(.*?)\n</chunk>", prompt, flags=re.S)
-    return [(chunk_id, text.strip()) for chunk_id, text in matches]
+    if isinstance(node, list):
+        for item in node:
+            _normalize_azure_schema(item)
+        return
+    if not isinstance(node, dict):
+        return
+    for key in list(node):
+        if key in _AZURE_UNSUPPORTED_SCHEMA_KEYWORDS:
+            node.pop(key)
+            continue
+        _normalize_azure_schema(node[key])
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        node["required"] = list(properties)
+        node["additionalProperties"] = False
 
 
 def _response_filename(
     prompt: str,
     attempt: int,
     context: dict[str, Any] | None = None,
+    *,
+    operation: str = "structured_generation",
+    request_id: str = "request",
+    call_index: int = 0,
 ) -> str:
     """Execute the response filename operation within its declared architectural boundary.
 
@@ -461,10 +518,21 @@ def _response_filename(
         prompt (str): Prompt text passed only to the selected model provider and never logged.
         attempt (int): Bounded attempt used for deterministic processing.
         context (dict[str, Any] | None): Context required by the operation's typed contract.
+        operation (str): Safe operation label used for diagnostics.
+        request_id (str): Safe request anchor used for diagnostics.
+        call_index (int): Unique adapter invocation number for diagnostic file isolation.
 
     Returns:
         str: The typed result produced by the operation.
     """
+    if operation != "structured_generation" or request_id != "request":
+        safe_operation = _SAFE_RESPONSE_NAME.sub("_", operation).strip("._") or "operation"
+        safe_request_id = _SAFE_RESPONSE_NAME.sub("_", request_id).strip("._") or "request"
+        return (
+            f"llm_response_{safe_operation}_{safe_request_id}_"
+            f"call-{call_index:06d}_attempt-{attempt}.txt"
+        )
+
     if context:
         batch_index = context.get("batch_index")
         validation_attempt = context.get("validation_attempt")
@@ -474,12 +542,4 @@ def _response_filename(
                 suffix = f"{suffix}_parse{attempt}"
             return f"llm_response_{suffix}.txt"
 
-    chunks = _extract_chunks(prompt)
-    if len(chunks) == 1:
-        chunk_id = chunks[0][0]
-    elif chunks:
-        chunk_id = f"batch_{chunks[0][0]}_{chunks[-1][0]}"
-    else:
-        chunk_id = "unknown"
-    safe_chunk_id = _SAFE_RESPONSE_NAME.sub("_", chunk_id).strip("._") or "unknown"
-    return f"llm_response_{safe_chunk_id}_{attempt}.txt"
+    return f"llm_response_structured_generation_request_{attempt}.txt"

@@ -101,6 +101,11 @@ class TestScenarioGenerationAgent:
                 output = self.reasoning_model.generate_structured(
                     prompt=prompt,
                     schema=TestScenarioGenerationOutput,
+                    system_message=(
+                        PromptTestScenarioGeneration.SYS_PROMPT_TEST_SCENARIO_GENERATION.value
+                    ),
+                    operation="test_scenario_generation.story",
+                    request_id=story.story_id,
                 )
                 try:
                     _verify_test_scenarios(story, output)

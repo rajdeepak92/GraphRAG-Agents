@@ -15,7 +15,6 @@ from pydantic import ValidationError
 
 from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGenerationAgent
 from multi_agentic_graph_rag.common_defs import ModeName, ProviderName, RuntimeCommand
-from multi_agentic_graph_rag.common_prompt_defs import PromptTestScenarioGeneration
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
@@ -300,7 +299,6 @@ def _generate(
     embedding_model = create_embedding_model(settings)
     reranker_model = create_reranker_model(settings)
     _warmup_reasoning_model(reasoning_model)
-    _apply_test_scenario_system_message(reasoning_model)
     neo4j.ensure_search_index()
     if logger is not None:
         logger.info(
@@ -626,7 +624,6 @@ def _run_pipeline(
         embedding_model = create_embedding_model(settings)
         reranker_model = create_reranker_model(settings)
         _warmup_reasoning_model(reasoning_model)
-        _apply_test_scenario_system_message(reasoning_model)
         neo4j.ensure_search_index()
         if logger is not None:
             logger.info(
@@ -1188,7 +1185,6 @@ def _build_hfil_runtime(settings: AppSettings, session: RunSession) -> HFILRunti
     embedding_model = create_embedding_model(settings)
     reranker_model = create_reranker_model(settings)
     _warmup_reasoning_model(reasoning_model)
-    _apply_test_scenario_system_message(reasoning_model)
     matcher = SemanticMatcher(
         embedding_model,
         cos_floor=settings.hfil_cos_floor,
@@ -1840,17 +1836,6 @@ def _validate_required_test_scenario_stack(settings: AppSettings) -> None:
         raise ConfigurationError("POSTGRES_MODE=postgres is required for test-scenario generation")
     if settings.neo4j.mode != ModeName.NEO4J.value:
         raise ConfigurationError("NEO4J_MODE=neo4j is required for test-scenario generation")
-
-
-def _apply_test_scenario_system_message(reasoning_model: Any) -> None:
-    """Apply test scenario system message.
-
-    Args:
-        reasoning_model (Any): Provider-neutral model adapter used by the operation.
-    """
-    setter = getattr(reasoning_model, "set_system_message", None)
-    if callable(setter):
-        setter(PromptTestScenarioGeneration.SYS_PROMPT_TEST_SCENARIO_GENERATION.value)
 
 
 def _check_store(logger: Any | None, step: str, check: Any) -> None:
