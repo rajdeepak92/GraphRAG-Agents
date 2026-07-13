@@ -35,6 +35,20 @@ def canonicalize_assertions(
     extraction: KnowledgeExtractionOutput,
     resolution: EntityResolutionResult,
 ) -> tuple[list[AssertionRecord], list[AssertionEvidenceRecord]]:
+    """Execute the canonicalize assertions operation within its declared architectural boundary.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        extraction (KnowledgeExtractionOutput): Extraction required by the operation's typed
+                                                contract.
+        resolution (EntityResolutionResult): Resolution required by the operation's typed contract.
+
+    Returns:
+        tuple[list[AssertionRecord], list[AssertionEvidenceRecord]]: The typed result produced
+        by the operation.
+    """
     entity_names = resolution.entity_names_by_id()
     records_by_key: dict[str, AssertionRecord] = {}
     evidence_by_id: dict[str, AssertionEvidenceRecord] = {}
@@ -69,6 +83,23 @@ def _to_record(
     resolution: EntityResolutionResult,
     entity_names: dict[str, str],
 ) -> AssertionRecord:
+    """Convert the value to record without mutating its source.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        candidate (AssertionCandidate): Candidate required by the operation's typed contract.
+        resolution (EntityResolutionResult): Resolution required by the operation's typed contract.
+        entity_names (dict[str, str]): Entity names required by the operation's typed contract.
+
+    Returns:
+        AssertionRecord: The typed result produced by the operation.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     subject_entity_id = resolution.resolve_reference(candidate.chunk_id, candidate.subject_name)
     if subject_entity_id is None:
         raise TraceValidationError(
@@ -154,6 +185,16 @@ def _to_evidence(
     assertion_identifier: str,
     candidate: AssertionCandidate,
 ) -> AssertionEvidenceRecord:
+    """Convert the value to evidence without mutating its source.
+
+    Args:
+        assertion_identifier (str): Canonical assertion identifier used as a safe operational
+                                    anchor.
+        candidate (AssertionCandidate): Candidate required by the operation's typed contract.
+
+    Returns:
+        AssertionEvidenceRecord: The typed result produced by the operation.
+    """
     trace = candidate.source_trace
     return AssertionEvidenceRecord(
         evidence_id=assertion_evidence_id(
@@ -177,6 +218,19 @@ def _display_text(
     polarity: str,
     condition: str | None,
 ) -> str:
+    """Execute the display text operation within its declared architectural boundary.
+
+    Args:
+        subject_name (str): Subject name required by the operation's typed contract.
+        predicate (str): Predicate required by the operation's typed contract.
+        object_name (str): Object name required by the operation's typed contract.
+        object_literal (str | None): Object literal required by the operation's typed contract.
+        polarity (str): Polarity required by the operation's typed contract.
+        condition (str | None): Condition required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     target = object_name or (object_literal or "")
     parts = [subject_name, predicate, target]
     if polarity == "negative":

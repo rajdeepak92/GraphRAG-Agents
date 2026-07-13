@@ -40,6 +40,8 @@ from multi_agentic_graph_rag.services.requirement_identity_resolver import (
 
 @dataclass(frozen=True)
 class LedgerEntry:
+    """Coordinate ledger entry behavior within the services boundary."""
+
     requirement_key: str
     statement: str
     normalized_statement: str
@@ -63,6 +65,16 @@ class CoverageLedger:
         injection_top_k: int,
         embedder: EmbeddingModel | None = None,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            max_entries (int): Max entries required by the operation's typed contract.
+            injection_top_k (int): Injection top k required by the operation's typed contract.
+            embedder (EmbeddingModel | None): Provider-neutral model adapter used by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         if max_entries <= 0:
             raise ValueError("max_entries must be positive")
         if injection_top_k <= 0:
@@ -76,6 +88,11 @@ class CoverageLedger:
 
     @property
     def size(self) -> int:
+        """Execute the size operation within its declared architectural boundary.
+
+        Returns:
+            int: The typed result produced by the operation.
+        """
         return len(self._entries)
 
     def record(self, output: RequirementDiscoveryOutput) -> int:
@@ -125,6 +142,15 @@ class CoverageLedger:
         return added
 
     def prime_prior_revisions(self, revisions: Iterable[RequirementRevisionSnapshot]) -> int:
+        """Prime prior revisions.
+
+        Args:
+            revisions (Iterable[RequirementRevisionSnapshot]): Revisions required by the operation's
+                                                               typed contract.
+
+        Returns:
+            int: The typed result produced by the operation.
+        """
         added = 0
         for revision in revisions:
             text = revision.statement.strip()
@@ -193,6 +219,14 @@ class CoverageLedger:
         return f"{PromptRequirementDiscovery.LEDGER_SECTION_HEADER.value}{body}\n\n"
 
     def _ensure_vectors(self, embedder: EmbeddingModel) -> None:
+        """Ensure vectors.
+
+        Args:
+            embedder (EmbeddingModel): Provider-neutral model adapter used by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         missing = [entry for entry in self._entries if self._identity(entry) not in self._vectors]
         if not missing:
             return
@@ -201,6 +235,7 @@ class CoverageLedger:
             self._vectors[self._identity(entry)] = vector
 
     def _evict_overflow(self) -> None:
+        """Execute the evict overflow operation within its declared architectural boundary."""
         while len(self._entries) > self._max_entries:
             evicted = self._entries.pop(0)
             identity = self._identity(evicted)
@@ -209,10 +244,26 @@ class CoverageLedger:
 
     @staticmethod
     def _identity(entry: LedgerEntry) -> tuple[str, str]:
+        """Execute the identity operation within its declared architectural boundary.
+
+        Args:
+            entry (LedgerEntry): Entry required by the operation's typed contract.
+
+        Returns:
+            tuple[str, str]: The typed result produced by the operation.
+        """
         return (entry.requirement_key, entry.normalized_statement)
 
 
 def _entries_from_output(output: RequirementDiscoveryOutput) -> list[LedgerEntry]:
+    """Execute the entries from output operation within its declared architectural boundary.
+
+    Args:
+        output (RequirementDiscoveryOutput): Output required by the operation's typed contract.
+
+    Returns:
+        list[LedgerEntry]: The typed result produced by the operation.
+    """
     entries: list[LedgerEntry] = []
     for chunk_output in output.chunks:
         for fact in chunk_output.facts:
@@ -234,6 +285,15 @@ def _entries_from_output(output: RequirementDiscoveryOutput) -> list[LedgerEntry
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
+    """Execute the cosine operation within its declared architectural boundary.
+
+    Args:
+        left (list[float]): Left required by the operation's typed contract.
+        right (list[float]): Right required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     numerator = sum(a * b for a, b in zip(left, right, strict=True))
     left_norm = math.sqrt(sum(value * value for value in left))
     right_norm = math.sqrt(sum(value * value for value in right))

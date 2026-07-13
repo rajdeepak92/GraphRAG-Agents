@@ -27,6 +27,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     SourceTrace,
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger, LedgerEntry
 from multi_agentic_graph_rag.services.requirement_identity_resolver import (
     structured_requirement_signature,
@@ -54,6 +55,8 @@ _QUOTE_LEADING_LABELS = re.compile(
 
 @dataclass(frozen=True)
 class _NormalizedChunk:
+    """Coordinate normalized chunk behavior within the agents boundary."""
+
     chunk: DocumentChunk
     text: str
     char_map: list[int]
@@ -122,6 +125,11 @@ class _CandidateDiagnostic:
     missing_tokens: list[str] = field(default_factory=list)
 
     def to_payload(self) -> dict[str, object]:
+        """Convert the value to payload without mutating its source.
+
+        Returns:
+            dict[str, object]: The typed result produced by the operation.
+        """
         payload: dict[str, object] = {
             "category": self.category,
             "chunk_id": self.chunk_id,
@@ -153,6 +161,12 @@ class _SemanticValidationError(TraceValidationError):
     """
 
     def __init__(self, diagnostics: list[_CandidateDiagnostic]) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            diagnostics (list[_CandidateDiagnostic]): Diagnostics required by the operation's typed
+                                                      contract.
+        """
         self.diagnostics = diagnostics
         self.categories = sorted({diagnostic.category for diagnostic in diagnostics})
         self.diagnostics_json = _bounded_json([d.to_payload() for d in diagnostics])
@@ -165,14 +179,26 @@ class _SemanticValidationError(TraceValidationError):
 
     @property
     def terminal_diagnostics(self) -> list[_CandidateDiagnostic]:
+        """Execute the terminal diagnostics operation within its declared architectural boundary.
+
+        Returns:
+            list[_CandidateDiagnostic]: The typed result produced by the operation.
+        """
         return [d for d in self.diagnostics if d.category != _CATEGORY_KEY_COLLISION]
 
     @property
     def has_terminal(self) -> bool:
+        """Return whether terminal.
+
+        Returns:
+            bool: The typed result produced by the operation.
+        """
         return bool(self.terminal_diagnostics)
 
 
 class RequirementDiscoveryAgent:
+    """Coordinate requirement discovery agent behavior within the agents boundary."""
+
     def __init__(
         self,
         reasoning_model: ReasoningModel,
@@ -180,11 +206,26 @@ class RequirementDiscoveryAgent:
         logger: Any | None = None,
         coverage_ledger: CoverageLedger | None = None,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+            logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+            coverage_ledger (CoverageLedger | None): Optional cross-chunk coverage memory.
+        """
         self.reasoning_model = reasoning_model
         self.logger = logger
         self.coverage_ledger = coverage_ledger
 
     def run(self, manifest: DocumentManifest) -> RequirementDiscoveryOutput:
+        """Run run.
+
+        Args:
+            manifest (DocumentManifest): Manifest required by the operation's typed contract.
+
+        Returns:
+            RequirementDiscoveryOutput: The typed result produced by the operation.
+        """
         outputs: list[RequirementDiscoveryOutput] = []
         for chunk_index, chunk in enumerate(manifest.chunks, start=1):
             chunk_manifest = manifest.model_copy(update={"chunks": [chunk]})
@@ -204,6 +245,26 @@ class RequirementDiscoveryAgent:
         chunk: DocumentChunk,
         chunk_index: int,
     ) -> RequirementDiscoveryOutput:
+        """Run chunk.
+
+        Args:
+            manifest (DocumentManifest): Manifest required by the operation's typed contract.
+            chunk (DocumentChunk): Chunk required by the operation's typed contract.
+            chunk_index (int): Chunk index required by the operation's typed contract.
+
+        Returns:
+            RequirementDiscoveryOutput: The typed result produced by the operation.
+
+        Raises:
+            semantic_error: If validated inputs or required dependencies cannot satisfy the
+            contract.
+            ModelOutputError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         context = _normalized_context(chunk)
         ledger_entries: list[LedgerEntry] = []
         ledger_section = ""
@@ -214,6 +275,16 @@ class RequirementDiscoveryAgent:
         previous_output: RequirementDiscoveryChunkOutput | None = None
         try:
             for attempt in (1, 2):
+                if self.logger is not None:
+                    self.logger.debug(
+                        "retry.attempt_started",
+                        step="discover_requirements.chunk",
+                        operation="requirement_discovery.chunk",
+                        chunk_id=chunk.chunk_id,
+                        attempt=attempt,
+                        max_attempts=2,
+                        status="attempting",
+                    )
                 prompt = _build_prompt(
                     manifest,
                     context,
@@ -267,7 +338,8 @@ class RequirementDiscoveryAgent:
                         raise ModelOutputError(
                             "Requirement discovery chunk "
                             f"{chunk_index} failed validation after retry "
-                            f"for {chunk.chunk_id}: attempt={attempt}; {error}"
+                            f"for {chunk.chunk_id}: attempt={attempt}; "
+                            f"{sanitized_exception_summary(error)}"
                             f"; raw_response_path={response_path}"
                         ) from error
                     validation_error = error
@@ -309,6 +381,17 @@ class RequirementDiscoveryAgent:
         chunk_id: str,
         diagnostics: list[_CandidateDiagnostic],
     ) -> None:
+        """Log deterministic repair of a non-authoritative key collision.
+
+        Args:
+            chunk_index (int): Chunk index required by the operation's typed contract.
+            chunk_id (str): Canonical chunk id used as a safe operational anchor.
+            diagnostics (list[_CandidateDiagnostic]): Diagnostics required by the operation's typed
+                                                      contract.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         conflicting_keys = sorted(
@@ -337,6 +420,19 @@ class RequirementDiscoveryAgent:
         retry_count: int,
         response_path: str | None,
     ) -> None:
+        """Execute the log chunk completed operation within its declared architectural boundary.
+
+        Args:
+            chunk_index (int): Chunk index required by the operation's typed contract.
+            chunk_id (str): Canonical chunk id used as a safe operational anchor.
+            fact_count (int): Bounded fact count used for deterministic processing.
+            requirement_count (int): Bounded requirement count used for deterministic processing.
+            retry_count (int): Bounded retry count used for deterministic processing.
+            response_path (str | None): Filesystem location authorized for this operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.info(
@@ -360,6 +456,19 @@ class RequirementDiscoveryAgent:
         error: TraceValidationError,
         response_path: str | None,
     ) -> None:
+        """Execute the log validation failure operation within its declared architectural boundary.
+
+        Args:
+            chunk_index (int): Chunk index required by the operation's typed contract.
+            chunk_id (str): Canonical chunk id used as a safe operational anchor.
+            attempt (int): Bounded attempt used for deterministic processing.
+            error (TraceValidationError): Failure being classified or converted without exposing its
+                                          message.
+            response_path (str | None): Filesystem location authorized for this operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.warning(
@@ -368,8 +477,10 @@ class RequirementDiscoveryAgent:
             chunk_index=chunk_index,
             chunk_id=chunk_id,
             attempt=attempt,
-            retry_count=attempt - 1,
-            error=str(error),
+            max_attempts=2,
+            retry_delay_seconds=0.0,
+            exception_type=error.__class__.__name__,
+            error_summary=sanitized_exception_summary(error),
             raw_response_path=response_path,
             status="failed" if attempt == 2 else "retrying",
         )
@@ -384,6 +495,20 @@ class RequirementDiscoveryAgent:
         exact_converged_count: int,
         new_entries: int,
     ) -> None:
+        """Execute the log ledger state operation within its declared architectural boundary.
+
+        Args:
+            chunk_index (int): Chunk index required by the operation's typed contract.
+            chunk_id (str): Canonical chunk id used as a safe operational anchor.
+            ledger_size (int): Ledger size required by the operation's typed contract.
+            injected_count (int): Bounded injected count used for deterministic processing.
+            exact_converged_count (int): Bounded exact converged count used for deterministic
+                                         processing.
+            new_entries (int): New entries required by the operation's typed contract.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.info(
@@ -406,6 +531,20 @@ def _build_prompt(
     previous_output: RequirementDiscoveryChunkOutput | None = None,
     ledger_section: str = "",
 ) -> str:
+    """Build prompt.
+
+    Args:
+        manifest (DocumentManifest): Manifest required by the operation's typed contract.
+        chunk (_NormalizedChunk): Chunk required by the operation's typed contract.
+        validation_error (TraceValidationError | None): Validation error required by the operation's
+                                                        typed contract.
+        previous_output (RequirementDiscoveryChunkOutput | None): Previous output required by the
+                                                                  operation's typed contract.
+        ledger_section (str): Ledger section required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     chunk_json = json.dumps(
         {
             "chunk_id": chunk.chunk.chunk_id,
@@ -435,6 +574,15 @@ def _build_prompt(
 def _previous_output_section(
     previous_output: RequirementDiscoveryChunkOutput | None,
 ) -> str:
+    """Execute the previous output section operation within its declared architectural boundary.
+
+    Args:
+        previous_output (RequirementDiscoveryChunkOutput | None): Previous output required by the
+                                                                  operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     if previous_output is None:
         return ""
     serialized = _bounded_json(
@@ -452,6 +600,17 @@ def _semantic_retry_feedback(
     error: _SemanticValidationError,
     previous_output: RequirementDiscoveryChunkOutput | None,
 ) -> str:
+    """Execute the semantic retry feedback operation within its declared architectural boundary.
+
+    Args:
+        error (_SemanticValidationError): Failure being classified or converted without exposing its
+                                          message.
+        previous_output (RequirementDiscoveryChunkOutput | None): Previous output required by the
+                                                                  operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     categories = set(error.categories)
     instructions: list[str] = []
     if _CATEGORY_SOURCE_SUPPORT in categories:
@@ -504,6 +663,17 @@ def _trace_retry_feedback(
     validation_error: TraceValidationError,
     previous_output: RequirementDiscoveryChunkOutput | None,
 ) -> str:
+    """Execute the trace retry feedback operation within its declared architectural boundary.
+
+    Args:
+        validation_error (TraceValidationError): Validation error required by the operation's typed
+                                                 contract.
+        previous_output (RequirementDiscoveryChunkOutput | None): Previous output required by the
+                                                                  operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return (
         f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
         "Repair the invalid output by using quotes copied exactly from the normalized "
@@ -521,6 +691,14 @@ def _trace_retry_feedback(
 
 
 def _sanitize_diagnostic_text(value: str) -> str:
+    """Sanitize diagnostic text.
+
+    Args:
+        value (str): Value required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     cleaned = _CONTROL_CHARS_RE.sub(" ", value).strip()
     if len(cleaned) > _DIAGNOSTIC_TEXT_LIMIT:
         return cleaned[:_DIAGNOSTIC_TEXT_LIMIT] + "…"
@@ -528,6 +706,15 @@ def _sanitize_diagnostic_text(value: str) -> str:
 
 
 def _bounded_json(payload: object, *, limit: int = _DIAGNOSTICS_JSON_LIMIT) -> str:
+    """Execute the bounded json operation within its declared architectural boundary.
+
+    Args:
+        payload (object): Validated structured data for the operation.
+        limit (int): Bounded limit used for deterministic processing.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if len(serialized) > limit:
         return serialized[:limit] + "…(truncated)"
@@ -535,11 +722,27 @@ def _bounded_json(payload: object, *, limit: int = _DIAGNOSTICS_JSON_LIMIT) -> s
 
 
 def _normalized_context(chunk: DocumentChunk) -> _NormalizedChunk:
+    """Execute the normalized context operation within its declared architectural boundary.
+
+    Args:
+        chunk (DocumentChunk): Chunk required by the operation's typed contract.
+
+    Returns:
+        _NormalizedChunk: The typed result produced by the operation.
+    """
     normalized_text, char_map = _normalize_for_prompt(chunk.text)
     return _NormalizedChunk(chunk=chunk, text=normalized_text, char_map=char_map)
 
 
 def _normalize_for_prompt(text: str) -> tuple[str, list[int]]:
+    """Normalize for prompt deterministically within the active scope.
+
+    Args:
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        tuple[str, list[int]]: The typed result produced by the operation.
+    """
     chars: list[str] = []
     char_map: list[int] = []
     in_whitespace = False
@@ -564,6 +767,16 @@ def _normalize_for_prompt(text: str) -> tuple[str, list[int]]:
 
 
 def _is_split_identifier_boundary(chars: list[str], text: str, whitespace_index: int) -> bool:
+    """Return whether split identifier boundary.
+
+    Args:
+        chars (list[str]): Chars required by the operation's typed contract.
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+        whitespace_index (int): Whitespace index required by the operation's typed contract.
+
+    Returns:
+        bool: The typed result produced by the operation.
+    """
     next_char = _next_non_whitespace(text, whitespace_index)
     if next_char is None or not next_char.isalnum():
         return False
@@ -572,6 +785,15 @@ def _is_split_identifier_boundary(chars: list[str], text: str, whitespace_index:
 
 
 def _next_non_whitespace(text: str, start_index: int) -> str | None:
+    """Execute the next non whitespace operation within its declared architectural boundary.
+
+    Args:
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+        start_index (int): Start index required by the operation's typed contract.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     for char in text[start_index + 1 :]:
         if not char.isspace():
             return char
@@ -582,6 +804,19 @@ def _chunk_to_nested(
     context: _NormalizedChunk,
     output: RequirementDiscoveryChunkOutput,
 ) -> RequirementDiscoveryOutput:
+    """Execute the chunk to nested operation within its declared architectural boundary.
+
+    Args:
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        output (RequirementDiscoveryChunkOutput): Output required by the operation's typed contract.
+
+    Returns:
+        RequirementDiscoveryOutput: The typed result produced by the operation.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     if not output.facts:
         if _chunk_looks_requirement_bearing(context.text):
             raise TraceValidationError(
@@ -606,6 +841,16 @@ def _fact_to_candidate(
     # Temp ids are synthesized by ordinal (not returned by the model); they are used
     # only as human-readable labels in validation error messages. Permanent ids are
     # assigned later by requirement_builder.
+    """Execute the fact to candidate operation within its declared architectural boundary.
+
+    Args:
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        fact (LLMDiscoveredFact): Fact required by the operation's typed contract.
+        fact_index (int): Fact index required by the operation's typed contract.
+
+    Returns:
+        LLMFactCandidate: The typed result produced by the operation.
+    """
     fact_label = f"F{fact_index}"
     trace = _source_trace_from_quote(fact, context, fact_label)
     requirements = [
@@ -639,6 +884,15 @@ def _fact_to_candidate(
 
 
 def _candidate_signature(requirement: LLMDiscoveredRequirement) -> str:
+    """Execute the candidate signature operation within its declared architectural boundary.
+
+    Args:
+        requirement (LLMDiscoveredRequirement): Requirement required by the operation's typed
+                                                contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return structured_requirement_signature(
         statement=requirement.req_text,
         requirement_type=requirement.requirement_type,
@@ -691,6 +945,15 @@ def _source_support(req_text: str, quote: str) -> tuple[float | None, list[str]]
     # requirement. Meaning-bearing verbs are deliberately excluded from this set so a
     # real inversion ("shall delete data" vs a quote that says "store data") is still
     # caught.
+    """Execute the source support operation within its declared architectural boundary.
+
+    Args:
+        req_text (str): Input text processed in memory and excluded from diagnostic logs.
+        quote (str): Quote required by the operation's typed contract.
+
+    Returns:
+        tuple[float | None, list[str]]: The typed result produced by the operation.
+    """
     statement_tokens = _semantic_support_tokens(req_text) - _REQUIREMENT_SCAFFOLDING
     if not statement_tokens:
         return None, []
@@ -808,6 +1071,14 @@ def _canonicalize_conflicting_keys(
 
 
 def _semantic_support_tokens(value: str) -> set[str]:
+    """Execute the semantic support tokens operation within its declared architectural boundary.
+
+    Args:
+        value (str): Value required by the operation's typed contract.
+
+    Returns:
+        set[str]: The typed result produced by the operation.
+    """
     ignored = {
         "a",
         "an",
@@ -831,6 +1102,20 @@ def _semantic_support_tokens(value: str) -> set[str]:
 def _source_trace_from_quote(
     fact: LLMDiscoveredFact, context: _NormalizedChunk, fact_label: str
 ) -> SourceTrace:
+    """Execute the source trace from quote operation within its declared architectural boundary.
+
+    Args:
+        fact (LLMDiscoveredFact): Fact required by the operation's typed contract.
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        fact_label (str): Fact label required by the operation's typed contract.
+
+    Returns:
+        SourceTrace: The typed result produced by the operation.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     normalized_quote, _ = _normalize_for_prompt(fact.quote)
     if not normalized_quote:
         raise TraceValidationError(f"empty source quote for fact {fact_label}")
@@ -868,6 +1153,14 @@ def _source_trace_from_quote(
 
 
 def _quote_search_candidates(normalized_quote: str) -> list[str]:
+    """Execute the quote search candidates operation within its declared architectural boundary.
+
+    Args:
+        normalized_quote (str): Normalized quote required by the operation's typed contract.
+
+    Returns:
+        list[str]: The typed result produced by the operation.
+    """
     candidates = [normalized_quote]
     stripped = _QUOTE_LEADING_LABELS.sub("", normalized_quote).strip()
     if stripped and stripped not in candidates:
@@ -882,6 +1175,14 @@ def _quote_search_candidates(normalized_quote: str) -> list[str]:
 
 
 def _chunk_looks_requirement_bearing(text: str) -> bool:
+    """Return whether a chunk appears to contain normative requirement language.
+
+    Args:
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        bool: The typed result produced by the operation.
+    """
     return bool(_REQUIREMENT_HINT.search(text))
 
 
@@ -892,12 +1193,25 @@ def _set_response_context(
     attempt: int,
     chunk_ids: list[str],
 ) -> None:
+    """Execute the set response context operation within its declared architectural boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+        batch_index (int): Batch index required by the operation's typed contract.
+        attempt (int): Bounded attempt used for deterministic processing.
+        chunk_ids (list[str]): Chunk ids required by the operation's typed contract.
+    """
     setter = getattr(reasoning_model, "set_response_context", None)
     if callable(setter):
         setter(batch_index=batch_index, attempt=attempt, chunk_ids=chunk_ids)
 
 
 def _clear_response_context(reasoning_model: ReasoningModel) -> None:
+    """Execute the clear response context operation within its declared architectural boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+    """
     clearer = getattr(reasoning_model, "clear_response_context", None)
     if callable(clearer):
         clearer()
@@ -909,6 +1223,16 @@ def _persist_last_response(
     batch_index: int,
     attempt: int,
 ) -> str | None:
+    """Persist last response through the owning storage boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+        batch_index (int): Batch index required by the operation's typed contract.
+        attempt (int): Bounded attempt used for deterministic processing.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     persister = getattr(reasoning_model, "persist_last_response", None)
     if not callable(persister):
         return _last_response_path(reasoning_model)
@@ -917,11 +1241,28 @@ def _persist_last_response(
 
 
 def _last_response_path(reasoning_model: ReasoningModel) -> str | None:
+    """Execute the last response path operation within its declared architectural boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     response_path = getattr(reasoning_model, "last_response_path", None)
     return str(response_path) if response_path else None
 
 
 def _merge_outputs(outputs: Iterable[RequirementDiscoveryOutput]) -> RequirementDiscoveryOutput:
+    """Merge outputs.
+
+    Args:
+        outputs (Iterable[RequirementDiscoveryOutput]): Outputs required by the operation's typed
+                                                        contract.
+
+    Returns:
+        RequirementDiscoveryOutput: The typed result produced by the operation.
+    """
     chunk_outputs: list[LLMChunkExtraction] = []
     for output in outputs:
         chunk_outputs.extend(output.chunks)
@@ -929,6 +1270,14 @@ def _merge_outputs(outputs: Iterable[RequirementDiscoveryOutput]) -> Requirement
 
 
 def _output_requirement_count(output: RequirementDiscoveryOutput) -> int:
+    """Execute the output requirement count operation within its declared architectural boundary.
+
+    Args:
+        output (RequirementDiscoveryOutput): Output required by the operation's typed contract.
+
+    Returns:
+        int: The typed result produced by the operation.
+    """
     return sum(
         len(fact.requirements) for chunk_output in output.chunks for fact in chunk_output.facts
     )
@@ -938,6 +1287,16 @@ def _verify_traces(
     manifest: DocumentManifest,
     output: RequirementDiscoveryOutput,
 ) -> None:
+    """Verify traces against the enforced runtime contract.
+
+    Args:
+        manifest (DocumentManifest): Manifest required by the operation's typed contract.
+        output (RequirementDiscoveryOutput): Output required by the operation's typed contract.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     chunks = {chunk.chunk_id: chunk for chunk in manifest.chunks}
     for chunk_output in output.chunks:
         chunk = chunks.get(chunk_output.chunk_id)
@@ -950,6 +1309,17 @@ def _verify_traces(
 
 
 def _verify_trace(chunk: DocumentChunk, trace: SourceTrace, label: str) -> None:
+    """Verify trace against the enforced runtime contract.
+
+    Args:
+        chunk (DocumentChunk): Chunk required by the operation's typed contract.
+        trace (SourceTrace): Trace required by the operation's typed contract.
+        label (str): Label required by the operation's typed contract.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     if trace.chunk_id != chunk.chunk_id:
         raise TraceValidationError(
             f"{label} source trace points to {trace.chunk_id}, expected {chunk.chunk_id}"

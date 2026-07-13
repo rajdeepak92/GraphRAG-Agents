@@ -10,6 +10,8 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class ReasoningModel(Protocol):
+    """Specify the provider-neutral reasoning model interface required by this boundary."""
+
     provider_name: str
 
     def generate_structured(
@@ -22,6 +24,8 @@ class ReasoningModel(Protocol):
 
 
 class EmbeddingModel(Protocol):
+    """Specify the provider-neutral embedding model interface required by this boundary."""
+
     provider_name: str
     embedding_fingerprint: str
 
@@ -30,6 +34,8 @@ class EmbeddingModel(Protocol):
 
 
 class RerankerModel(Protocol):
+    """Specify the provider-neutral reranker model interface required by this boundary."""
+
     provider_name: str
 
     def rerank(self, query: str, documents: list[str]) -> list[int]:

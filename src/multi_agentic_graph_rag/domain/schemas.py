@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class StrictModel(BaseModel):
+    """Define the validated strict model data contract."""
+
     __test__: ClassVar[bool] = False
 
     model_config = ConfigDict(extra="forbid")
@@ -75,6 +77,8 @@ def normalize_source_req_id(value: object) -> str | None:
 
 
 class IngestionRequest(StrictModel):
+    """Define the validated ingestion request data contract."""
+
     project: str
     document: Path
     version: str
@@ -86,6 +90,17 @@ class IngestionRequest(StrictModel):
     @field_validator("project", "version")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -93,6 +108,8 @@ class IngestionRequest(StrictModel):
 
 
 class SourceTrace(StrictModel):
+    """Define the validated source trace data contract."""
+
     chunk_id: str
     quote: str
     start_char: int
@@ -103,6 +120,17 @@ class SourceTrace(StrictModel):
     @field_validator("quote")
     @classmethod
     def quote_is_not_empty(cls, value: str) -> str:
+        """Execute the quote is not empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("quote must not be empty")
@@ -110,12 +138,22 @@ class SourceTrace(StrictModel):
 
     @model_validator(mode="after")
     def validate_span(self) -> SourceTrace:
+        """Validate span against the enforced runtime contract.
+
+        Returns:
+            SourceTrace: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         if self.end_char < self.start_char:
             raise ValueError("end_char must be greater than or equal to start_char")
         return self
 
 
 class ParsedBlock(StrictModel):
+    """Define the validated parsed block data contract."""
+
     block_id: str
     original_text: str
     normalized_text: str
@@ -128,6 +166,8 @@ class ParsedBlock(StrictModel):
 
 
 class DocumentChunk(StrictModel):
+    """Define the validated document chunk data contract."""
+
     chunk_id: str
     ordinal: int
     text: str
@@ -140,6 +180,8 @@ class DocumentChunk(StrictModel):
 
 
 class DocumentManifest(StrictModel):
+    """Define the validated document manifest data contract."""
+
     project: str
     document_id: str
     document_version_id: str
@@ -167,6 +209,12 @@ class RequirementSemanticFields(StrictModel):
     mutable_parameters: list[str] = Field(default_factory=list)
 
     def populate_from_statement(self, statement: str, requirement_type: str) -> None:
+        """Execute the populate from statement operation within its declared architectural boundary.
+
+        Args:
+            statement (str): Statement required by the operation's typed contract.
+            requirement_type (str): Requirement type required by the operation's typed contract.
+        """
         text = " ".join(statement.strip().split())
         modal_match = _SEMANTIC_MODAL_RE.search(text)
         if modal_match is not None:
@@ -212,6 +260,8 @@ class RequirementSemanticFields(StrictModel):
 
 
 class LLMRequirementCandidate(RequirementSemanticFields):
+    """Coordinate llmrequirement candidate behavior within the domain boundary."""
+
     temp_id: str
     statement: str
     requirement_type: str = "functional"
@@ -223,6 +273,8 @@ class LLMRequirementCandidate(RequirementSemanticFields):
 
 
 class LLMFactCandidate(StrictModel):
+    """Define the validated llmfact candidate data contract."""
+
     temp_id: str
     text: str
     source_trace: SourceTrace
@@ -230,6 +282,8 @@ class LLMFactCandidate(StrictModel):
 
 
 class LLMDiscoveredRequirement(RequirementSemanticFields):
+    """Coordinate llmdiscovered requirement behavior within the domain boundary."""
+
     req_text: str
     requirement_type: str = "Functional Requirement"
     priority: str = "Medium"
@@ -239,6 +293,14 @@ class LLMDiscoveredRequirement(RequirementSemanticFields):
 
     @model_validator(mode="after")
     def validate_atomic_semantics(self) -> LLMDiscoveredRequirement:
+        """Validate atomic semantics against the enforced runtime contract.
+
+        Returns:
+            LLMDiscoveredRequirement: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         modal_count = len(_SEMANTIC_MODAL_RE.findall(self.req_text))
         if modal_count > 1:
             raise ValueError(
@@ -252,11 +314,27 @@ class LLMDiscoveredRequirement(RequirementSemanticFields):
     @field_validator("source_req_id", mode="before")
     @classmethod
     def normalize_source_identifier(cls, value: object) -> str | None:
+        """Normalize source identifier deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str | None: The typed result produced by the operation.
+        """
         return normalize_source_req_id(value)
 
     @field_validator("priority", mode="before")
     @classmethod
     def normalize_priority(cls, value: object) -> str:
+        """Normalize priority deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         if value is None:
             return "Medium"
 
@@ -277,6 +355,14 @@ class LLMDiscoveredRequirement(RequirementSemanticFields):
     @field_validator("requirement_type", mode="before")
     @classmethod
     def normalize_requirement_type(cls, value: object) -> str:
+        """Normalize requirement type deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         if value is None:
             return "Functional Requirement"
 
@@ -315,6 +401,18 @@ class LLMDiscoveredRequirement(RequirementSemanticFields):
     @field_validator("req_text")
     @classmethod
     def meaningful_requirement_text(cls, value: str) -> str:
+        """Execute the meaningful requirement text operation within its declared architectural
+        boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("req_text must not be empty")
@@ -326,6 +424,8 @@ class LLMDiscoveredRequirement(RequirementSemanticFields):
 
 
 class LLMDiscoveredFact(StrictModel):
+    """Define the validated llmdiscovered fact data contract."""
+
     fact_text: str
     quote: str
     requirements: list[LLMDiscoveredRequirement] = Field(default_factory=list)
@@ -333,6 +433,17 @@ class LLMDiscoveredFact(StrictModel):
     @field_validator("fact_text", "quote")
     @classmethod
     def non_empty_text(cls, value: str) -> str:
+        """Execute the non empty text operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -340,25 +451,35 @@ class LLMDiscoveredFact(StrictModel):
 
 
 class RequirementDiscoveryChunkOutput(StrictModel):
+    """Define the validated requirement discovery chunk output data contract."""
+
     facts: list[LLMDiscoveredFact] = Field(default_factory=list)
 
 
 class LLMChunkExtraction(StrictModel):
+    """Define the validated llmchunk extraction data contract."""
+
     chunk_id: str
     facts: list[LLMFactCandidate] = Field(default_factory=list)
 
 
 class RequirementDiscoveryOutput(StrictModel):
+    """Define the validated requirement discovery output data contract."""
+
     chunks: list[LLMChunkExtraction] = Field(default_factory=list)
 
 
 class CanonicalFact(StrictModel):
+    """Define the validated canonical fact data contract."""
+
     canonical_fact_id: str
     normalized_text: str
     representative_text: str
 
 
 class VerifiedFact(StrictModel):
+    """Define the validated verified fact data contract."""
+
     fact_id: str
     canonical_fact_id: str = ""
     text: str
@@ -366,12 +487,16 @@ class VerifiedFact(StrictModel):
 
 
 class RequirementEvidence(StrictModel):
+    """Define the validated requirement evidence data contract."""
+
     evidence_id: str
     fact_ids: list[str]
     source_trace: SourceTrace
 
 
 class VerifiedRequirement(RequirementSemanticFields):
+    """Coordinate verified requirement behavior within the domain boundary."""
+
     requirement_id: str
     revision_id: str = ""
     requirement_key: str = ""
@@ -390,6 +515,8 @@ class VerifiedRequirement(RequirementSemanticFields):
 
 
 class RequirementDeltaEvent(StrictModel):
+    """Define the validated requirement delta event data contract."""
+
     event_id: str
     event_type: Literal[
         "new",
@@ -410,6 +537,8 @@ class RequirementDeltaEvent(StrictModel):
 
 
 class RequirementRevisionSnapshot(StrictModel):
+    """Define the validated requirement revision snapshot data contract."""
+
     requirement_id: str
     revision_id: str
     statement: str
@@ -420,6 +549,8 @@ class RequirementRevisionSnapshot(StrictModel):
 
 
 class RequirementIdentityResolutionRecord(StrictModel):
+    """Define the validated requirement identity resolution record data contract."""
+
     incoming_fingerprint: str
     document_version_id: str
     chunk_id: str
@@ -435,6 +566,8 @@ class RequirementIdentityResolutionRecord(StrictModel):
 
 
 class RequirementIdentityResolutionArtifact(StrictModel):
+    """Define the validated requirement identity resolution artifact data contract."""
+
     artifact_schema_version: Literal["1.0-requirement-identity-resolution"] = (
         "1.0-requirement-identity-resolution"
     )
@@ -446,6 +579,8 @@ class RequirementIdentityResolutionArtifact(StrictModel):
 
 
 class RequirementArtifact(StrictModel):
+    """Define the validated requirement artifact data contract."""
+
     artifact_schema_version: Literal["1.0", "2.0", "2.1"] = "2.1"
     project: str
     document_id: str
@@ -520,11 +655,30 @@ class RequirementInput(StrictModel):
     @field_validator("priority", mode="before")
     @classmethod
     def normalize_priority(cls, value: object) -> str:
+        """Normalize priority deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         return normalize_priority_label(value)
 
     @field_validator("requirement_id", "requirement_text")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -532,6 +686,8 @@ class RequirementInput(StrictModel):
 
 
 class UserStoryStatement(StrictModel):
+    """Define the validated user story statement data contract."""
+
     as_a: str
     i_want: str
     so_that: str
@@ -539,6 +695,17 @@ class UserStoryStatement(StrictModel):
     @field_validator("as_a", "i_want", "so_that")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -546,6 +713,8 @@ class UserStoryStatement(StrictModel):
 
 
 class AcceptanceCriterion(StrictModel):
+    """Define the validated acceptance criterion data contract."""
+
     id: str = ""
     title: str
     given: str
@@ -555,6 +724,17 @@ class AcceptanceCriterion(StrictModel):
     @field_validator("title", "given", "when", "then")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -562,12 +742,25 @@ class AcceptanceCriterion(StrictModel):
 
 
 class BusinessRule(StrictModel):
+    """Define the validated business rule data contract."""
+
     id: str = ""
     rule: str
 
     @field_validator("rule")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -575,12 +768,25 @@ class BusinessRule(StrictModel):
 
 
 class TestScenario(StrictModel):
+    """Define the validated test scenario data contract."""
+
     id: str = ""
     scenario: str
 
     @field_validator("scenario")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -588,6 +794,8 @@ class TestScenario(StrictModel):
 
 
 class _UserStoryContent(StrictModel):
+    """Define the validated user story content data contract."""
+
     title: str
     priority: Literal["High", "Medium", "Low"] = "Medium"
     persona: str
@@ -598,11 +806,30 @@ class _UserStoryContent(StrictModel):
     @field_validator("priority", mode="before")
     @classmethod
     def normalize_priority(cls, value: object) -> str:
+        """Normalize priority deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         return normalize_priority_label(value)
 
     @field_validator("title", "persona")
     @classmethod
     def meaningful_text(cls, value: str) -> str:
+        """Execute the meaningful text operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -613,6 +840,18 @@ class _UserStoryContent(StrictModel):
     @field_validator("acceptance_criteria")
     @classmethod
     def non_empty_acceptance_criteria(cls, values: list[str]) -> list[str]:
+        """Execute the non empty acceptance criteria operation within its declared architectural
+        boundary.
+
+        Args:
+            values (list[str]): Ordered values processed without changing their identities.
+
+        Returns:
+            list[str]: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         cleaned = [value.strip() for value in values]
         if any(not value for value in cleaned):
             raise ValueError("acceptance_criteria entries must not be empty")
@@ -628,6 +867,8 @@ class UserStoryModel(_UserStoryContent):
 
 
 class UserStoryGenerationOutput(StrictModel):
+    """Define the validated user story generation output data contract."""
+
     user_stories: list[UserStoryModel] = Field(min_length=1)
 
 
@@ -655,6 +896,8 @@ class UserStoryRecord(_UserStoryContent):
 
 
 class UserStoryProjection(_UserStoryContent):
+    """Coordinate user story projection behavior within the domain boundary."""
+
     story_id: str
     requirement_id: str
     revision_id: str = ""
@@ -662,6 +905,8 @@ class UserStoryProjection(_UserStoryContent):
 
 
 class UserStoryTraceability(StrictModel):
+    """Define the validated user story traceability data contract."""
+
     story_id: str
     requirement_id: str
     revision_id: str = ""
@@ -674,6 +919,8 @@ class UserStoryTraceability(StrictModel):
 
 
 class UserStoryArtifact(StrictModel):
+    """Define the validated user story artifact data contract."""
+
     artifact_schema_version: Literal["3.0-user-stories"] = "3.0-user-stories"
     project: str
     document_id: str
@@ -686,12 +933,16 @@ class UserStoryArtifact(StrictModel):
 
 
 class UserStoryBuildResult(StrictModel):
+    """Define the validated user story build result data contract."""
+
     artifact: UserStoryArtifact
     records: dict[str, UserStoryRecord]
     coverage: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class UserStoryRequest(StrictModel):
+    """Define the validated user story request data contract."""
+
     requirements_path: Path | None = None
     project: str | None = None
     document_version_id: str | None = None
@@ -702,6 +953,8 @@ class UserStoryRequest(StrictModel):
 
 
 class UserStoryResult(StrictModel):
+    """Define the validated user story result data contract."""
+
     run_id: str
     status: str
     project: str
@@ -771,6 +1024,8 @@ def normalize_scenario_type_label(value: object) -> ScenarioTypeLabel:
 
 
 class _TestScenarioContent(StrictModel):
+    """Define the validated test scenario content data contract."""
+
     title: str
     description: str
     scenario_type: ScenarioTypeLabel = "Positive"
@@ -782,16 +1037,43 @@ class _TestScenarioContent(StrictModel):
     @field_validator("priority", mode="before")
     @classmethod
     def normalize_priority(cls, value: object) -> str:
+        """Normalize priority deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         return normalize_priority_label(value)
 
     @field_validator("scenario_type", mode="before")
     @classmethod
     def normalize_scenario_type(cls, value: object) -> str:
+        """Normalize scenario type deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         return normalize_scenario_type_label(value)
 
     @field_validator("title", "description", "expected_result")
     @classmethod
     def meaningful_text(cls, value: str) -> str:
+        """Execute the meaningful text operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -808,6 +1090,8 @@ class TestScenarioModel(_TestScenarioContent):
 
 
 class TestScenarioGenerationOutput(StrictModel):
+    """Define the validated test scenario generation output data contract."""
+
     test_scenarios: list[TestScenarioModel] = Field(min_length=1)
 
 
@@ -836,6 +1120,8 @@ class TestScenarioRecord(_TestScenarioContent):
 
 
 class TestScenarioProjection(_TestScenarioContent):
+    """Coordinate test scenario projection behavior within the domain boundary."""
+
     scenario_id: str
     story_id: str
     requirement_id: str
@@ -844,6 +1130,8 @@ class TestScenarioProjection(_TestScenarioContent):
 
 
 class TestScenarioTraceability(StrictModel):
+    """Define the validated test scenario traceability data contract."""
+
     scenario_id: str
     story_id: str
     requirement_id: str
@@ -857,6 +1145,8 @@ class TestScenarioTraceability(StrictModel):
 
 
 class TestScenarioArtifact(StrictModel):
+    """Define the validated test scenario artifact data contract."""
+
     artifact_schema_version: Literal["3.0-test-scenarios"] = "3.0-test-scenarios"
     project: str
     document_id: str
@@ -869,6 +1159,8 @@ class TestScenarioArtifact(StrictModel):
 
 
 class TestScenarioBuildResult(StrictModel):
+    """Define the validated test scenario build result data contract."""
+
     artifact: TestScenarioArtifact
     records: dict[str, TestScenarioRecord]
     coverage: dict[str, list[str]] = Field(default_factory=dict)
@@ -876,6 +1168,8 @@ class TestScenarioBuildResult(StrictModel):
 
 
 class TestScenarioRequest(StrictModel):
+    """Define the validated test scenario request data contract."""
+
     user_stories_path: Path | None = None
     requirements_path: Path | None = None
     project: str | None = None
@@ -890,6 +1184,8 @@ class TestScenarioRequest(StrictModel):
 
 
 class TestScenarioResult(StrictModel):
+    """Define the validated test scenario result data contract."""
+
     run_id: str
     status: str
     project: str
@@ -914,6 +1210,8 @@ class FeedbackRequest(StrictModel):
 
 
 class CanonicalScenario(StrictModel):
+    """Define the validated canonical scenario data contract."""
+
     entity: str
     action: str
     condition: str
@@ -925,6 +1223,8 @@ class CanonicalScenario(StrictModel):
 
 
 class DuplicateCandidate(StrictModel):
+    """Define the validated duplicate candidate data contract."""
+
     left_id: str
     right_id: str
     cosine: float
@@ -932,6 +1232,8 @@ class DuplicateCandidate(StrictModel):
 
 
 class DuplicateGroup(StrictModel):
+    """Define the validated duplicate group data contract."""
+
     scenario_ids: list[str]
     scenarios: list[TestScenarioRecord]
     story_ids: list[str]
@@ -941,6 +1243,8 @@ class DuplicateGroup(StrictModel):
 
 
 class DuplicateJudgeResult(StrictModel):
+    """Define the validated duplicate judge result data contract."""
+
     a_entails_b: bool
     b_entails_a: bool
     verdict: Literal["DUPLICATE", "DISTINCT"]
@@ -948,6 +1252,8 @@ class DuplicateJudgeResult(StrictModel):
 
 
 class HFILTurn(StrictModel):
+    """Define the validated hfilturn data contract."""
+
     command: str
     message: str = ""
     deleted_scenario_ids: list[str] = Field(default_factory=list)
@@ -955,6 +1261,8 @@ class HFILTurn(StrictModel):
 
 
 class HFILState(StrictModel):
+    """Define the validated hfilstate data contract."""
+
     hfil_enabled: bool = False
     hfil_done: bool = False
     hfil_phase: str = "start"
@@ -966,6 +1274,8 @@ class HFILState(StrictModel):
 
 
 class RequirementDeltaDecision(StrictModel):
+    """Define the validated requirement delta decision data contract."""
+
     requirement_id: str
     revision_id: str
     label: Literal["new", "updated", "strictly_outdated", "unchanged"]
@@ -974,6 +1284,8 @@ class RequirementDeltaDecision(StrictModel):
 
 
 class ArtifactReadResult(StrictModel):
+    """Define the validated artifact read result data contract."""
+
     source: Literal["local_json", "postgres"]
     valid_local: bool
     artifact_path: str | None = None
@@ -983,6 +1295,8 @@ class ArtifactReadResult(StrictModel):
 
 
 class ReconcileReport(StrictModel):
+    """Define the validated reconcile report data contract."""
+
     project: str
     document_version_id: str | None = None
     repaired_paths: list[str] = Field(default_factory=list)
@@ -1048,6 +1362,8 @@ class KnowledgeGraphStateRecord(StrictModel):
 
 
 class IngestionResult(StrictModel):
+    """Define the validated ingestion result data contract."""
+
     run_id: str
     status: str
     project: str
@@ -1086,6 +1402,17 @@ _ASSERTION_MODALITIES = ("fact", "shall", "must", "should", "may", "must_not")
 
 
 def _normalize_assertion_modality(value: object) -> str:
+    """Normalize assertion modality deterministically within the active scope.
+
+    Args:
+        value (object): Value required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     if value is None:
         return "fact"
     text = str(value).strip().lower().replace(" ", "_").replace("-", "_")
@@ -1113,6 +1440,17 @@ class LLMExtractedEntity(StrictModel):
     @field_validator("name")
     @classmethod
     def meaningful_name(cls, value: str) -> str:
+        """Execute the meaningful name operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("entity name must not be empty")
@@ -1123,6 +1461,14 @@ class LLMExtractedEntity(StrictModel):
     @field_validator("entity_type", mode="before")
     @classmethod
     def default_entity_type(cls, value: object) -> str:
+        """Execute the default entity type operation within its declared architectural boundary.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         if value is None:
             return "concept"
         text = str(value).strip()
@@ -1153,6 +1499,17 @@ class LLMExtractedAssertion(StrictModel):
     @field_validator("subject", "predicate", "quote")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -1161,11 +1518,27 @@ class LLMExtractedAssertion(StrictModel):
     @field_validator("modality", mode="before")
     @classmethod
     def normalize_modality(cls, value: object) -> str:
+        """Normalize modality deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         return _normalize_assertion_modality(value)
 
     @field_validator("polarity", mode="before")
     @classmethod
     def normalize_polarity(cls, value: object) -> str:
+        """Normalize polarity deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         text = str(value).strip().lower() if value is not None else ""
         if text in {"negative", "neg", "not", "false"}:
             return "negative"
@@ -1174,6 +1547,14 @@ class LLMExtractedAssertion(StrictModel):
     @field_validator("explicitness", mode="before")
     @classmethod
     def normalize_explicitness(cls, value: object) -> str:
+        """Normalize explicitness deterministically within the active scope.
+
+        Args:
+            value (object): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         text = str(value).strip().lower() if value is not None else ""
         if text in {"inferred", "implicit", "implied", "derived"}:
             return "inferred"
@@ -1181,6 +1562,14 @@ class LLMExtractedAssertion(StrictModel):
 
     @model_validator(mode="after")
     def exactly_one_object(self) -> LLMExtractedAssertion:
+        """Execute the exactly one object operation within its declared architectural boundary.
+
+        Returns:
+            LLMExtractedAssertion: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         has_entity = bool(self.object_name.strip())
         has_literal = bool(self.object_literal.strip())
         if has_entity == has_literal:
@@ -1192,6 +1581,8 @@ class LLMExtractedAssertion(StrictModel):
 
 
 class KnowledgeExtractionChunkOutput(StrictModel):
+    """Define the validated knowledge extraction chunk output data contract."""
+
     entities: list[LLMExtractedEntity] = Field(default_factory=list)
     assertions: list[LLMExtractedAssertion] = Field(default_factory=list)
 
@@ -1222,12 +1613,16 @@ class AssertionCandidate(StrictModel):
 
 
 class ChunkKnowledgeCandidates(StrictModel):
+    """Define the validated chunk knowledge candidates data contract."""
+
     chunk_id: str
     entities: list[EntityCandidate] = Field(default_factory=list)
     assertions: list[AssertionCandidate] = Field(default_factory=list)
 
 
 class KnowledgeExtractionOutput(StrictModel):
+    """Define the validated knowledge extraction output data contract."""
+
     chunks: list[ChunkKnowledgeCandidates] = Field(default_factory=list)
 
 
@@ -1311,6 +1706,8 @@ class AssertionEvidenceRecord(StrictModel):
 
 
 class KnowledgeGraphArtifact(StrictModel):
+    """Define the validated knowledge graph artifact data contract."""
+
     artifact_schema_version: Literal["1.0-knowledge-graph"] = "1.0-knowledge-graph"
     project: str
     document_id: str
@@ -1325,6 +1722,8 @@ class KnowledgeGraphArtifact(StrictModel):
 
 
 class KnowledgeGraphRequest(StrictModel):
+    """Define the validated knowledge graph request data contract."""
+
     project: str
     document_version_id: str
     reasoning_provider: str | None = None
@@ -1332,6 +1731,17 @@ class KnowledgeGraphRequest(StrictModel):
     @field_validator("project", "document_version_id")
     @classmethod
     def non_empty(cls, value: str) -> str:
+        """Execute the non empty operation within its declared architectural boundary.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         value = value.strip()
         if not value:
             raise ValueError("value must not be empty")
@@ -1339,6 +1749,8 @@ class KnowledgeGraphRequest(StrictModel):
 
 
 class KnowledgeGraphResult(StrictModel):
+    """Define the validated knowledge graph result data contract."""
+
     run_id: str
     status: str
     project: str

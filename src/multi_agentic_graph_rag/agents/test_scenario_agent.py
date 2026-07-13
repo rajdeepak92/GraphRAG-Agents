@@ -21,6 +21,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     UserStoryRecord,
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 from multi_agentic_graph_rag.observability.session import RunSession
 from multi_agentic_graph_rag.services.knowledge_context import (
     authoritative_related,
@@ -36,6 +37,12 @@ class TestScenarioGenerationAgent:
     """One strict prompt per user story, validated with a single retry."""
 
     def __init__(self, reasoning_model: ReasoningModel, *, logger: Any | None = None) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+            logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        """
         self.reasoning_model = reasoning_model
         self.logger = logger
 
@@ -47,9 +54,38 @@ class TestScenarioGenerationAgent:
         story_index: int = 1,
         requirement_text: str | None = None,
     ) -> TestScenarioGenerationOutput:
+        """Generate generate.
+
+        Args:
+            story (UserStoryRecord): Story required by the operation's typed contract.
+            context (RetrievedContext): Context required by the operation's typed contract.
+            story_index (int): Story index required by the operation's typed contract.
+            requirement_text (str | None): Optional requirement text excluded from logs.
+
+        Returns:
+            TestScenarioGenerationOutput: The typed result produced by the operation.
+
+        Raises:
+            ModelOutputError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         validation_error: str | None = None
         try:
             for attempt in (1, 2):
+                if self.logger is not None:
+                    self.logger.debug(
+                        "retry.attempt_started",
+                        step="generate_test_scenarios.story",
+                        operation="test_scenario.generate",
+                        story_id=story.story_id,
+                        attempt=attempt,
+                        max_attempts=2,
+                        status="attempting",
+                    )
                 prompt = _build_test_scenario_prompt(
                     story,
                     context,
@@ -85,7 +121,8 @@ class TestScenarioGenerationAgent:
                         raise ModelOutputError(
                             "Test-scenario generation for "
                             f"{story.story_id} failed validation after retry: "
-                            f"{error}; raw_response_path={response_path}"
+                            f"{sanitized_exception_summary(error)}; "
+                            f"raw_response_path={response_path}"
                         ) from error
                     validation_error = str(error)
                     continue
@@ -116,6 +153,19 @@ class TestScenarioGenerationAgent:
         context_source: str,
         response_path: str | None,
     ) -> None:
+        """Execute the log story completed operation within its declared architectural boundary.
+
+        Args:
+            story (UserStoryRecord): Story required by the operation's typed contract.
+            story_index (int): Story index required by the operation's typed contract.
+            scenario_count (int): Bounded scenario count used for deterministic processing.
+            retry_count (int): Bounded retry count used for deterministic processing.
+            context_source (str): Context source required by the operation's typed contract.
+            response_path (str | None): Filesystem location authorized for this operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.info(
@@ -140,6 +190,18 @@ class TestScenarioGenerationAgent:
         error: TestScenarioValidationError,
         response_path: str | None,
     ) -> None:
+        """Execute the log validation failure operation within its declared architectural boundary.
+
+        Args:
+            story (UserStoryRecord): Story required by the operation's typed contract.
+            story_index (int): Story index required by the operation's typed contract.
+            attempt (int): Bounded attempt used for deterministic processing.
+            error (TestScenarioValidationError): Validation failure summarized without payload text.
+            response_path (str | None): Filesystem location authorized for this operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.warning(
@@ -149,8 +211,10 @@ class TestScenarioGenerationAgent:
             story_id=story.story_id,
             requirement_id=story.requirement_id,
             attempt=attempt,
-            retry_count=attempt - 1,
-            error=str(error),
+            max_attempts=2,
+            retry_delay_seconds=0.0,
+            exception_type=error.__class__.__name__,
+            error_summary=sanitized_exception_summary(error),
             raw_response_path=response_path,
             status="failed" if attempt == 2 else "retrying",
         )
@@ -165,6 +229,16 @@ class TestScenarioGeneratorAgent:
         *,
         session: RunSession | None = None,
     ) -> TestScenarioResult:
+        """Run run.
+
+        Args:
+            request (TestScenarioRequest): Request required by the operation's typed contract.
+            session (RunSession | None): Optional command session that owns run artifacts and
+                                         diagnostics.
+
+        Returns:
+            TestScenarioResult: The typed result produced by the operation.
+        """
         from multi_agentic_graph_rag.workflows.test_scenario_graph import (
             run_test_scenario_generation,
         )
@@ -176,6 +250,16 @@ def _verify_test_scenarios(
     story: UserStoryRecord,
     output: TestScenarioGenerationOutput,
 ) -> None:
+    """Verify test scenarios against the enforced runtime contract.
+
+    Args:
+        story (UserStoryRecord): Story required by the operation's typed contract.
+        output (TestScenarioGenerationOutput): Output required by the operation's typed contract.
+
+    Raises:
+        TestScenarioValidationError: If validated inputs or required dependencies cannot satisfy
+        the contract.
+    """
     seen_titles: set[str] = set()
     for scenario in output.test_scenarios:
         for label, value in (
@@ -208,6 +292,18 @@ def _build_test_scenario_prompt(
     requirement_text: str | None = None,
     validation_error: str | None = None,
 ) -> str:
+    """Build test scenario prompt.
+
+    Args:
+        story (UserStoryRecord): Story required by the operation's typed contract.
+        context (RetrievedContext): Context required by the operation's typed contract.
+        requirement_text (str | None): Input text processed in memory and excluded from diagnostic
+                                       logs.
+        validation_error (str | None): Validation error required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     story_json = json.dumps(
         {
             "title": story.title,
@@ -248,6 +344,14 @@ def _build_test_scenario_prompt(
 
 
 def _render_chunk_context(context: RetrievedContext) -> str:
+    """Render chunk context.
+
+    Args:
+        context (RetrievedContext): Context required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     if context.chunks:
         context_block = "\n".join(
             f"[{index}] {chunk.text}" for index, chunk in enumerate(context.chunks, start=1)
@@ -296,12 +400,25 @@ def _set_response_context(
     attempt: int,
     chunk_ids: list[str],
 ) -> None:
+    """Execute the set response context operation within its declared architectural boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+        batch_index (int): Batch index required by the operation's typed contract.
+        attempt (int): Bounded attempt used for deterministic processing.
+        chunk_ids (list[str]): Chunk ids required by the operation's typed contract.
+    """
     setter = getattr(reasoning_model, "set_response_context", None)
     if callable(setter):
         setter(batch_index=batch_index, attempt=attempt, chunk_ids=chunk_ids)
 
 
 def _clear_response_context(reasoning_model: ReasoningModel) -> None:
+    """Execute the clear response context operation within its declared architectural boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+    """
     clearer = getattr(reasoning_model, "clear_response_context", None)
     if callable(clearer):
         clearer()
@@ -313,6 +430,16 @@ def _persist_last_response(
     story_index: int,
     attempt: int,
 ) -> str | None:
+    """Persist last response through the owning storage boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+        story_index (int): Story index required by the operation's typed contract.
+        attempt (int): Bounded attempt used for deterministic processing.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     persister = getattr(reasoning_model, "persist_last_response", None)
     if not callable(persister):
         return _last_response_path(reasoning_model)
@@ -321,5 +448,13 @@ def _persist_last_response(
 
 
 def _last_response_path(reasoning_model: ReasoningModel) -> str | None:
+    """Execute the last response path operation within its declared architectural boundary.
+
+    Args:
+        reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     response_path = getattr(reasoning_model, "last_response_path", None)
     return str(response_path) if response_path else None

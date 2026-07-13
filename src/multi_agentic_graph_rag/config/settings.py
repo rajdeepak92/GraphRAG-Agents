@@ -11,6 +11,8 @@ from multi_agentic_graph_rag.common_defs import ModeName, ProviderName
 
 
 class ModelSection(BaseModel):
+    """Define the validated model section data contract."""
+
     model_config = ConfigDict(extra="allow")
 
     provider: str
@@ -19,6 +21,8 @@ class ModelSection(BaseModel):
 
 
 class PathsSettings(BaseModel):
+    """Define the validated paths settings data contract."""
+
     project_root: Path
     global_cache_dir: Path
     documents_inbox_dir: Path
@@ -30,6 +34,8 @@ class PathsSettings(BaseModel):
 
 
 class ChunkingSettings(BaseModel):
+    """Define the validated chunking settings data contract."""
+
     chunk_size: int = 1200
     chunk_overlap: int = 150
     minimum_chunk_size: int = 80
@@ -37,12 +43,16 @@ class ChunkingSettings(BaseModel):
 
 
 class PostgresSettings(BaseModel):
+    """Define the validated postgres settings data contract."""
+
     mode: str = ModeName.POSTGRES.value
     dsn: str = "postgresql://marag:marag@127.0.0.1:5432/marag"
     local_path: Path
 
 
 class Neo4jSettings(BaseModel):
+    """Define the validated neo4j settings data contract."""
+
     mode: str = ModeName.NEO4J.value
     uri: str = "bolt://127.0.0.1:7687"
     username: str = "neo4j"
@@ -52,10 +62,14 @@ class Neo4jSettings(BaseModel):
 
 
 class ChromaSettings(BaseModel):
+    """Define the validated chroma settings data contract."""
+
     collection_name: str = "marag_chunks"
 
 
 class DiscoverySettings(BaseModel):
+    """Define the validated discovery settings data contract."""
+
     batch_size: int = 1
     log_llm_responses: bool = False
     ledger_enabled: bool = True
@@ -64,6 +78,8 @@ class DiscoverySettings(BaseModel):
 
 
 class UserStorySettings(BaseModel):
+    """Define the validated user story settings data contract."""
+
     top_k: int = 4
     dense_k: int = 8
     sparse_k: int = 8
@@ -112,6 +128,8 @@ class RequirementIdentitySettings(BaseModel):
 
 
 class AzureOpenAISettings(BaseModel):
+    """Define the validated azure open aisettings data contract."""
+
     endpoint: str = ""
     api_key: str = ""
     api_version: str = "2024-10-21"
@@ -121,6 +139,8 @@ class AzureOpenAISettings(BaseModel):
 
 
 class HuggingFaceSettings(BaseModel):
+    """Define the validated hugging face settings data contract."""
+
     token: str = ""
     reasoning_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
     embedding_model: str = "BAAI/bge-m3"
@@ -132,6 +152,8 @@ class HuggingFaceSettings(BaseModel):
 
 
 class AppSettings(BaseModel):
+    """Define the validated app settings data contract."""
+
     model_config = ConfigDict(extra="forbid")
 
     app_env: str = "development"

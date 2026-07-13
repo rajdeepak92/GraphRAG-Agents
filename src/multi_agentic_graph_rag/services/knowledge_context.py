@@ -128,10 +128,20 @@ class ContextAssemblyConfig:
 
 
 def story_config() -> ContextAssemblyConfig:
+    """Execute the story config operation within its declared architectural boundary.
+
+    Returns:
+        ContextAssemblyConfig: The typed result produced by the operation.
+    """
     return ContextAssemblyConfig(stage="user_story", predicate_priorities=STORY_PREDICATES)
 
 
 def scenario_config() -> ContextAssemblyConfig:
+    """Execute the scenario config operation within its declared architectural boundary.
+
+    Returns:
+        ContextAssemblyConfig: The typed result produced by the operation.
+    """
     return ContextAssemblyConfig(stage="test_scenario", predicate_priorities=SCENARIO_PREDICATES)
 
 
@@ -176,6 +186,8 @@ def render_assertion_lines(items: list[AssertionContextItem]) -> str:
 
 @dataclass
 class _Candidate:
+    """Coordinate candidate behavior within the services boundary."""
+
     row: dict[str, Any]
     channel: str
     hop_count: int
@@ -328,6 +340,16 @@ def _seed_entities(
 
 
 def _score(candidate: _Candidate, config: ContextAssemblyConfig, max_search: float) -> float:
+    """Execute the score operation within its declared architectural boundary.
+
+    Args:
+        candidate (_Candidate): Candidate required by the operation's typed contract.
+        config (ContextAssemblyConfig): Validated settings that control this operation.
+        max_search (float): Max search required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     row = candidate.row
     priority = _predicate_priority(str(row.get("predicate", "")), config.predicate_priorities)
     confidence = _as_float(row.get("confidence"))
@@ -340,6 +362,15 @@ def _score(candidate: _Candidate, config: ContextAssemblyConfig, max_search: flo
 
 
 def _predicate_priority(predicate: str, priorities: tuple[str, ...]) -> float:
+    """Execute the predicate priority operation within its declared architectural boundary.
+
+    Args:
+        predicate (str): Predicate required by the operation's typed contract.
+        priorities (tuple[str, ...]): Priorities required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     if not priorities:
         return 0.0
     try:
@@ -386,6 +417,17 @@ def _build_item(
     normalized: float,
     evidence: list[dict[str, Any]],
 ) -> AssertionContextItem:
+    """Build item.
+
+    Args:
+        candidate (_Candidate): Candidate required by the operation's typed contract.
+        score (float): Score required by the operation's typed contract.
+        normalized (float): Normalized required by the operation's typed contract.
+        evidence (list[dict[str, Any]]): Evidence required by the operation's typed contract.
+
+    Returns:
+        AssertionContextItem: The typed result produced by the operation.
+    """
     row = candidate.row
     return AssertionContextItem(
         assertion_id=str(row.get("assertion_id", "")),
@@ -410,6 +452,14 @@ def _build_item(
 
 
 def _build_evidence(evidence: list[dict[str, Any]]) -> list[AssertionEvidenceContext]:
+    """Build evidence.
+
+    Args:
+        evidence (list[dict[str, Any]]): Evidence required by the operation's typed contract.
+
+    Returns:
+        list[AssertionEvidenceContext]: The typed result produced by the operation.
+    """
     items: list[AssertionEvidenceContext] = []
     for row in evidence:
         text_unit_ids = [str(value) for value in row.get("text_unit_ids", []) if value]
@@ -432,12 +482,29 @@ def _build_evidence(evidence: list[dict[str, Any]]) -> list[AssertionEvidenceCon
 
 
 def _normalize(score: float, max_score: float) -> float:
+    """Normalize normalize deterministically within the active scope.
+
+    Args:
+        score (float): Score required by the operation's typed contract.
+        max_score (float): Max score required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     if max_score <= 0:
         return 0.0
     return max(0.0, min(1.0, score / max_score))
 
 
 def _as_float(value: Any) -> float:
+    """Execute the as float operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -445,6 +512,14 @@ def _as_float(value: Any) -> float:
 
 
 def _as_optional_str(value: Any) -> str | None:
+    """Execute the as optional str operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     if value is None:
         return None
     text = str(value)
@@ -452,6 +527,14 @@ def _as_optional_str(value: Any) -> str | None:
 
 
 def _as_optional_int(value: Any) -> int | None:
+    """Execute the as optional int operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+
+    Returns:
+        int | None: The typed result produced by the operation.
+    """
     if value is None:
         return None
     try:

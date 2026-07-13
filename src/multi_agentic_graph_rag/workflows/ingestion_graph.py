@@ -29,6 +29,7 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reasoning_model,
     create_reranker_model,
 )
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 from multi_agentic_graph_rag.observability.session import RunSession, command_session
 from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.artifacts import (
@@ -54,6 +55,8 @@ from multi_agentic_graph_rag.services.requirement_memory import (
 
 
 class IngestionState(TypedDict, total=False):
+    """Describe the ingestion state state exchanged between typed workflow nodes."""
+
     request: dict[str, Any]
     run_id: str
     checksum: str
@@ -74,6 +77,15 @@ class IngestionState(TypedDict, total=False):
 
 
 def build_ingestion_graph(session: RunSession | None = None) -> Any:
+    """Build ingestion graph.
+
+    Args:
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        Any: The typed result produced by the operation.
+    """
     graph = StateGraph(IngestionState)
     graph.add_node("validate_request", lambda state: _validate_request(state, session=session))
     graph.add_node("run_pipeline", lambda state: _run_pipeline(state, session=session))
@@ -88,6 +100,23 @@ def _validate_request(
     *,
     session: RunSession | None = None,
 ) -> IngestionState:
+    """Validate request against the enforced runtime contract.
+
+    Args:
+        state (IngestionState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        IngestionState: The typed result produced by the operation.
+
+    Raises:
+        FileNotFoundError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = IngestionRequest.model_validate(state["request"])
     logger = session.logger if session is not None else None
     if logger is not None:
@@ -116,6 +145,20 @@ def _run_pipeline(
     *,
     session: RunSession | None = None,
 ) -> IngestionState:
+    """Run pipeline.
+
+    Args:
+        state (IngestionState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        IngestionState: The typed result produced by the operation.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = IngestionRequest.model_validate(state["request"])
     settings = load_config()
     if session is not None:
@@ -137,6 +180,15 @@ def _run_pipeline(
     )
 
     def pipeline() -> IngestionState:
+        """Run the workflow pipeline while preserving its persistence boundaries.
+
+        Returns:
+            IngestionState: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         _validate_required_ingest_stack(settings)
         if logger is not None:
             logger.info(
@@ -380,7 +432,14 @@ def _run_pipeline(
         return result_payload
 
     try:
-        return pipeline()
+        if logger is None:
+            return pipeline()
+        with logger.span(
+            step="run_pipeline",
+            operation="ingestion.pipeline",
+            document_version_id=state.get("document_version_id", ""),
+        ):
+            return pipeline()
     except Exception as exc:
         if logger is not None:
             logger.exception(
@@ -394,7 +453,7 @@ def _run_pipeline(
         error_payload = {
             "run_id": state["run_id"],
             "document_version_id": state.get("document_version_id", ""),
-            "error": str(exc),
+            "error": sanitized_exception_summary(exc),
         }
         _record_failed_run_safely(
             postgres=postgres,
@@ -421,6 +480,29 @@ def _resolve_and_persist_requirements(
     reranker_model: Any,
     logger: Any | None,
 ) -> tuple[RequirementArtifact, Path]:
+    """Resolve and persist requirements deterministically within the active scope.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        manifest (Any): Manifest required by the operation's typed contract.
+        project (str): Project scope that isolates persistence and retrieval.
+        version (str): Document version label within the project scope.
+        checksum (str): Checksum required by the operation's typed contract.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        run_dir (Path): Filesystem location authorized for this operation.
+        replace_version (bool): Replace version required by the operation's typed contract.
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+        embedding_model (Any): Provider-neutral model adapter used by the operation.
+        reranker_model (Any): Provider-neutral model adapter used by the operation.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        tuple[RequirementArtifact, Path]: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     with postgres.document_identity_lock(project, manifest.document_id):
         prior_revisions = postgres.load_requirement_revision_snapshot(
             project=project,
@@ -520,6 +602,18 @@ def _apply_strictly_outdated_cascade(
     postgres: PostgresStore,
     replace_version: bool,
 ) -> RequirementArtifact:
+    """Apply strictly outdated cascade.
+
+    Args:
+        artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+        prior_revisions (dict[str, RequirementRevisionSnapshot]): Prior revisions required by the
+                                                                  operation's typed contract.
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        replace_version (bool): Replace version required by the operation's typed contract.
+
+    Returns:
+        RequirementArtifact: The typed result produced by the operation.
+    """
     if not replace_version:
         return artifact
     strictly_outdated: dict[str, VerifiedRequirement] = {}
@@ -567,6 +661,18 @@ def _apply_strictly_outdated_cascade(
 
 
 def _is_explicit_removal(prior: str, incoming: str) -> bool:
+    """Return whether explicit removal.
+
+    Args:
+        prior (str): Prior required by the operation's typed contract.
+        incoming (str): Incoming required by the operation's typed contract.
+
+    Returns:
+        bool: The typed result produced by the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     incoming_norm = incoming.lower()
     markers = (
         "does not support",
@@ -591,6 +697,19 @@ def run_ingestion(
     request: IngestionRequest,
     session: RunSession | None = None,
 ) -> IngestionResult:
+    """Run ingestion.
+
+    Args:
+        request (IngestionRequest): Request required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        IngestionResult: The typed result produced by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     if session is None:
         generated_run_id = run_id(request.project, request.document, request.version)
         with command_session(
@@ -679,8 +798,10 @@ def _build_knowledge_graph_best_effort(
         }
     except Exception as exc:
         rebuild = knowledge_graph_rebuild_command(manifest.project, manifest.document_version_id)
+        failure_summary = sanitized_exception_summary(exc)
         message = (
-            f"knowledge-graph build failed for {manifest.document_version_id}: {exc}. "
+            f"knowledge-graph build failed for {manifest.document_version_id}: "
+            f"{failure_summary}. "
             "Requirements were persisted; graph-primary story/scenario generation is "
             f"blocked for this version until you rebuild it with `{rebuild}`."
         )
@@ -689,13 +810,14 @@ def _build_knowledge_graph_best_effort(
                 "Knowledge-graph build failed; continuing (requirements already persisted)",
                 step="build_knowledge_graph",
                 document_version_id=manifest.document_version_id,
-                error=str(exc),
+                exception_type=exc.__class__.__name__,
+                error_summary=failure_summary,
                 status="degraded",
             )
         return {
             "ingestion_status": "degraded",
             "kg_status": "failed",
-            "kg_failure_reason": str(exc),
+            "kg_failure_reason": failure_summary,
             "downstream_blocked": True,
             "kg_rebuild_command": rebuild,
             "warnings": [message],
@@ -703,10 +825,29 @@ def _build_knowledge_graph_best_effort(
 
 
 def _ingest_run_dir(settings: AppSettings, project: str, run_identifier: str) -> Path:
+    """Execute the ingest run dir operation within its declared architectural boundary.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        project (str): Project scope that isolates persistence and retrieval.
+        run_identifier (str): Canonical run identifier used as a safe operational anchor.
+
+    Returns:
+        Path: The typed result produced by the operation.
+    """
     return settings.paths.generated_requirements_dir / project / "req" / run_identifier
 
 
 def _validate_required_ingest_stack(settings: AppSettings) -> None:
+    """Validate required ingest stack against the enforced runtime contract.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     invalid_reasoning = {ProviderName.LOCAL_HEURISTIC.value}
     invalid_embedding = {ProviderName.LOCAL_HASH.value}
     invalid_reranker = {ProviderName.NONE.value}
@@ -729,6 +870,14 @@ def _validate_required_ingest_stack(settings: AppSettings) -> None:
 
 
 def _warmup_reasoning_model(reasoning_model: Any) -> None:
+    """Warm up reasoning model.
+
+    Args:
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     warmup = getattr(reasoning_model, "warmup", None)
     if callable(warmup):
         warmup()
@@ -741,6 +890,18 @@ def _record_failed_run_safely(
     payload: dict[str, Any],
     logger: Any,
 ) -> None:
+    """Record failed run safely through the owning storage boundary.
+
+    Args:
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        payload (dict[str, Any]): Validated structured data for the operation.
+        logger (Any): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     try:
         postgres.record_run(run_id, "failed", payload)
     except Exception as record_error:
@@ -750,6 +911,6 @@ def _record_failed_run_safely(
                 step="record_failed_run",
                 run_id=run_id,
                 error_type=record_error.__class__.__name__,
-                error=str(record_error),
+                error_summary=sanitized_exception_summary(record_error),
                 status="warning",
             )

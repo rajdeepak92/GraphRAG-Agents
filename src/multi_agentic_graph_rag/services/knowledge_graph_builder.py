@@ -138,6 +138,21 @@ def _reconcile_lifecycle(
     assertions: list[Any],
     logger: Any | None,
 ) -> LifecycleResult:
+    """Reconcile lifecycle deterministically within the active scope.
+
+    Args:
+        neo4j (Any): Neo4j required by the operation's typed contract.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        assertions (list[Any]): Assertions required by the operation's typed contract.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        LifecycleResult: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     prior_version = neo4j.active_knowledge_version(document_id)
     if prior_version is None or prior_version == document_version_id:
         return LifecycleResult(assertions=assertions)

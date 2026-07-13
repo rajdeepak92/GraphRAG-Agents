@@ -31,10 +31,25 @@ _LUCENE_TOKEN = re.compile(r"[A-Za-z0-9]+")
 
 
 class Neo4jStore:
+    """Coordinate neo4j store behavior within the db boundary."""
+
     def __init__(self, settings: AppSettings) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (AppSettings): Validated settings that control this operation.
+        """
         self.settings = settings
 
     def check(self) -> str:
+        """Check check.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         if self.settings.neo4j.mode == "local_json":
             self.settings.neo4j.local_path.parent.mkdir(parents=True, exist_ok=True)
             return f"PASS neo4j local_json path={self.settings.neo4j.local_path}"
@@ -43,6 +58,11 @@ class Neo4jStore:
         return "PASS neo4j connectivity"
 
     def project_manifest(self, manifest: DocumentManifest) -> None:
+        """Project manifest through the owning storage boundary.
+
+        Args:
+            manifest (DocumentManifest): Manifest required by the operation's typed contract.
+        """
         if self.settings.neo4j.mode == "local_json":
             self._upsert_local(
                 "manifest_projection",
@@ -473,6 +493,19 @@ class Neo4jStore:
         document_version_id: str,
         limit: int,
     ) -> list[tuple[str, str, float]]:
+        """Execute the local knowledge related chunks operation within its declared architectural
+        boundary.
+
+        Args:
+            evidence_chunk_ids (list[str]): Evidence chunk ids required by the operation's typed
+                                            contract.
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+            limit (int): Bounded limit used for deterministic processing.
+
+        Returns:
+            list[tuple[str, str, float]]: The typed result produced by the operation.
+        """
         seeds = set(evidence_chunk_ids)
         assertions: list[dict[str, Any]] = [
             row
@@ -483,6 +516,14 @@ class Neo4jStore:
         ]
 
         def evidence_chunks(row: dict[str, Any]) -> set[str]:
+            """Execute the evidence chunks operation within its declared architectural boundary.
+
+            Args:
+                row (dict[str, Any]): Validated structured data for the operation.
+
+            Returns:
+                set[str]: The typed result produced by the operation.
+            """
             chunks: set[str] = set()
             for evidence in row.get("evidence", []):
                 trace = evidence.get("source_trace", {})
@@ -492,6 +533,14 @@ class Neo4jStore:
             return chunks
 
         def entity_ids(row: dict[str, Any]) -> set[str]:
+            """Execute the entity ids operation within its declared architectural boundary.
+
+            Args:
+                row (dict[str, Any]): Validated structured data for the operation.
+
+            Returns:
+                set[str]: The typed result produced by the operation.
+            """
             ids = {str(row.get("subject_entity_id", ""))}
             object_entity = row.get("object_entity_id")
             if object_entity:
@@ -720,6 +769,15 @@ class Neo4jStore:
     def _local_assertions(self, document_version_id: str) -> list[dict[str, Any]]:
         # Current-knowledge reads: superseded/retired assertions are excluded so a
         # stale version returns nothing (explicit historical reads are elsewhere).
+        """Execute the local assertions operation within its declared architectural boundary.
+
+        Args:
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         return [
             row
             for row in self._read_local_rows()
@@ -742,6 +800,11 @@ class Neo4jStore:
         ]
 
     def _local_entities(self) -> dict[str, dict[str, Any]]:
+        """Execute the local entities operation within its declared architectural boundary.
+
+        Returns:
+            dict[str, dict[str, Any]]: The typed result produced by the operation.
+        """
         entities: dict[str, dict[str, Any]] = {}
         for row in self._read_local_rows():
             if row.get("kind") == "entity_projection":
@@ -754,6 +817,17 @@ class Neo4jStore:
         entities: dict[str, dict[str, Any]],
         extra: dict[str, Any],
     ) -> dict[str, Any]:
+        """Execute the local assertion row operation within its declared architectural boundary.
+
+        Args:
+            assertion (dict[str, Any]): Assertion required by the operation's typed contract.
+            entities (dict[str, dict[str, Any]]): Entities required by the operation's typed
+                                                  contract.
+            extra (dict[str, Any]): Extra required by the operation's typed contract.
+
+        Returns:
+            dict[str, Any]: The typed result produced by the operation.
+        """
         subject = entities.get(str(assertion.get("subject_entity_id", "")), {})
         object_entity_id = assertion.get("object_entity_id")
         obj = entities.get(str(object_entity_id), {}) if object_entity_id else None
@@ -766,6 +840,18 @@ class Neo4jStore:
         limit: int,
         predicates: list[str] | None,
     ) -> list[dict[str, Any]]:
+        """Execute the local search assertions operation within its declared architectural boundary.
+
+        Args:
+            query (str): Input text processed in memory and excluded from diagnostic logs.
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+            limit (int): Bounded limit used for deterministic processing.
+            predicates (list[str] | None): Predicates required by the operation's typed contract.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         terms = {token.lower() for token in _LUCENE_TOKEN.findall(query)}
         if not terms:
             return []
@@ -791,6 +877,17 @@ class Neo4jStore:
         evidence_chunk_ids: list[str],
         document_version_id: str,
     ) -> list[dict[str, Any]]:
+        """Execute the local anchor assertions operation within its declared architectural boundary.
+
+        Args:
+            evidence_chunk_ids (list[str]): Evidence chunk ids required by the operation's typed
+                                            contract.
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         seeds = set(evidence_chunk_ids)
         entities = self._local_entities()
         rows: list[dict[str, Any]] = []
@@ -811,6 +908,19 @@ class Neo4jStore:
         per_entity_limit: int,
         predicates: list[str] | None,
     ) -> list[dict[str, Any]]:
+        """Execute the local expand entity assertions operation within its declared architectural
+        boundary.
+
+        Args:
+            entity_ids (list[str]): Entity ids required by the operation's typed contract.
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+            per_entity_limit (int): Per entity limit required by the operation's typed contract.
+            predicates (list[str] | None): Predicates required by the operation's typed contract.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         seed_entities = set(entity_ids)
         entities = self._local_entities()
         by_entity: dict[str, list[dict[str, Any]]] = {eid: [] for eid in seed_entities}
@@ -838,6 +948,17 @@ class Neo4jStore:
         assertion_ids: list[str],
         document_version_id: str,
     ) -> dict[str, list[dict[str, Any]]]:
+        """Execute the local assertion evidence operation within its declared architectural
+        boundary.
+
+        Args:
+            assertion_ids (list[str]): Assertion ids required by the operation's typed contract.
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+
+        Returns:
+            dict[str, list[dict[str, Any]]]: The typed result produced by the operation.
+        """
         wanted = set(assertion_ids)
         evidence: dict[str, list[dict[str, Any]]] = {}
         for assertion in self._local_assertions(document_version_id):
@@ -1273,6 +1394,11 @@ class Neo4jStore:
             ]
 
     def _driver(self) -> Any:
+        """Execute the driver operation within its declared architectural boundary.
+
+        Returns:
+            Any: The typed result produced by the operation.
+        """
         from neo4j import GraphDatabase, NotificationDisabledClassification
 
         # PDF chunks have no ``section`` property (only Markdown/DOCX headings set it),
@@ -1288,12 +1414,30 @@ class Neo4jStore:
         )
 
     def _append_local(self, payload: dict[str, Any]) -> None:
+        """Append local.
+
+        Args:
+            payload (dict[str, Any]): Validated structured data for the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         self.settings.neo4j.local_path.parent.mkdir(parents=True, exist_ok=True)
         payload["written_at"] = datetime.now(UTC).isoformat()
         with self.settings.neo4j.local_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
 
     def _upsert_local(self, kind: str, key: str, payload: dict[str, Any]) -> None:
+        """Execute the upsert local operation within its declared architectural boundary.
+
+        Args:
+            kind (str): Kind required by the operation's typed contract.
+            key (str): Key required by the operation's typed contract.
+            payload (dict[str, Any]): Validated structured data for the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         self.settings.neo4j.local_path.parent.mkdir(parents=True, exist_ok=True)
         rows: list[dict[str, Any]] = []
         if self.settings.neo4j.local_path.exists():
@@ -1318,6 +1462,11 @@ class Neo4jStore:
         )
 
     def _read_local_rows(self) -> list[dict[str, Any]]:
+        """Read local rows within the authorized project and version scope.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         if not self.settings.neo4j.local_path.exists():
             return []
         return [
@@ -1327,6 +1476,15 @@ class Neo4jStore:
         ]
 
     def _local_manifest_chunks(self, document_version_id: str) -> list[dict[str, Any]]:
+        """Execute the local manifest chunks operation within its declared architectural boundary.
+
+        Args:
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         for row in reversed(self._read_local_rows()):
             if (
                 row.get("kind") == "manifest_projection"
@@ -1345,6 +1503,17 @@ class Neo4jStore:
         document_version_id: str,
         limit: int,
     ) -> list[tuple[str, str, float]]:
+        """Execute the local fulltext search operation within its declared architectural boundary.
+
+        Args:
+            query (str): Input text processed in memory and excluded from diagnostic logs.
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+            limit (int): Bounded limit used for deterministic processing.
+
+        Returns:
+            list[tuple[str, str, float]]: The typed result produced by the operation.
+        """
         terms = {token.lower() for token in _LUCENE_TOKEN.findall(query)}
         if not terms:
             return []
@@ -1364,6 +1533,17 @@ class Neo4jStore:
         document_version_id: str,
         window: int,
     ) -> list[tuple[str, str]]:
+        """Execute the local neighbor chunks operation within its declared architectural boundary.
+
+        Args:
+            chunk_ids (list[str]): Chunk ids required by the operation's typed contract.
+            document_version_id (str): Canonical document version id used as a safe operational
+                                       anchor.
+            window (int): Window required by the operation's typed contract.
+
+        Returns:
+            list[tuple[str, str]]: The typed result produced by the operation.
+        """
         chunks = self._local_manifest_chunks(document_version_id)
         if not chunks:
             return []
@@ -1384,6 +1564,14 @@ class Neo4jStore:
         return selected
 
     def _local_fetch_chunks(self, chunk_ids: list[str]) -> list[tuple[str, str]]:
+        """Execute the local fetch chunks operation within its declared architectural boundary.
+
+        Args:
+            chunk_ids (list[str]): Chunk ids required by the operation's typed contract.
+
+        Returns:
+            list[tuple[str, str]]: The typed result produced by the operation.
+        """
         by_id: dict[str, str] = {}
         for row in self._read_local_rows():
             if row.get("kind") != "manifest_projection":
@@ -1462,6 +1650,14 @@ def _project_user_story_coverage_tx(
     artifact: dict[str, Any],
     evidence_chunk_ids: Mapping[str, list[str]],
 ) -> None:
+    """Project user story coverage tx through the owning storage boundary.
+
+    Args:
+        tx (Any): Tx required by the operation's typed contract.
+        artifact (dict[str, Any]): Artifact required by the operation's typed contract.
+        evidence_chunk_ids (Mapping[str, list[str]]): Evidence chunk ids required by the operation's
+                                                      typed contract.
+    """
     for story_id, record in artifact["stories"].items():
         requirement_id = record["requirement_id"]
         tx.run(
@@ -1529,6 +1725,14 @@ def _project_test_scenario_coverage_tx(
     artifact: dict[str, Any],
     evidence_chunk_ids: Mapping[str, list[str]],
 ) -> None:
+    """Project test scenario coverage tx through the owning storage boundary.
+
+    Args:
+        tx (Any): Tx required by the operation's typed contract.
+        artifact (dict[str, Any]): Artifact required by the operation's typed contract.
+        evidence_chunk_ids (Mapping[str, list[str]]): Evidence chunk ids required by the operation's
+                                                      typed contract.
+    """
     for scenario_id, record in artifact["scenarios"].items():
         requirement_id = record["requirement_id"]
         tx.run(
@@ -1597,6 +1801,18 @@ def _project_test_scenario_coverage_tx(
 def _user_story_records(
     artifact: UserStoryArtifact | UserStoryBuildResult,
 ) -> dict[str, Any]:
+    """Execute the user story records operation within its declared architectural boundary.
+
+    Args:
+        artifact (UserStoryArtifact | UserStoryBuildResult): Artifact required by the operation's
+                                                             typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     if isinstance(artifact, UserStoryBuildResult):
         return dict(artifact.records)
     raise ValueError("projecting user-story coverage requires internal build records")
@@ -1605,6 +1821,18 @@ def _user_story_records(
 def _test_scenario_records(
     artifact: TestScenarioArtifact | TestScenarioBuildResult,
 ) -> dict[str, Any]:
+    """Execute the test scenario records operation within its declared architectural boundary.
+
+    Args:
+        artifact (TestScenarioArtifact | TestScenarioBuildResult): Artifact required by the
+                                                                   operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     if isinstance(artifact, TestScenarioBuildResult):
         return dict(artifact.records)
     raise ValueError("projecting test-scenario coverage requires internal build records")
@@ -1616,6 +1844,14 @@ def _project_text_units_tx(
     text_units: list[dict[str, Any]],
     next_pairs: list[dict[str, str]],
 ) -> None:
+    """Project text units tx through the owning storage boundary.
+
+    Args:
+        tx (Any): Tx required by the operation's typed contract.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        text_units (list[dict[str, Any]]): Text units required by the operation's typed contract.
+        next_pairs (list[dict[str, str]]): Next pairs required by the operation's typed contract.
+    """
     if text_units:
         tx.run(
             """
@@ -1784,6 +2020,14 @@ def _project_knowledge_graph_tx(tx: Any, artifact: dict[str, Any]) -> None:
 
 
 def _set_active_knowledge_version_tx(tx: Any, document_id: str, document_version_id: str) -> None:
+    """Execute the set active knowledge version tx operation within its declared architectural
+    boundary.
+
+    Args:
+        tx (Any): Tx required by the operation's typed contract.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+    """
     tx.run(
         """
         MATCH (d:Document {document_id: $document_id})
@@ -1799,6 +2043,12 @@ def _set_active_knowledge_version_tx(tx: Any, document_id: str, document_version
 
 
 def _project_manifest_tx(tx: Any, manifest: dict[str, Any]) -> None:
+    """Project manifest tx through the owning storage boundary.
+
+    Args:
+        tx (Any): Tx required by the operation's typed contract.
+        manifest (dict[str, Any]): Manifest required by the operation's typed contract.
+    """
     tx.run(
         """
         MERGE (p:Project {project: $project})

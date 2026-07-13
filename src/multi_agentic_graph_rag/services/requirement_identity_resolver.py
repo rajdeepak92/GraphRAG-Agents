@@ -117,6 +117,17 @@ def structured_requirement_signature(
         return requirement_lineage_signature(statement, requirement_type)
 
     def normalize(value: str) -> str:
+        """Normalize normalize deterministically within the active scope.
+
+        Args:
+            value (str): Value required by the operation's typed contract.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         normalized = _WHITESPACE.sub(" ", value.strip().lower())
         for parameter in sorted(mutable_parameters, key=len, reverse=True):
             if parameter.strip():
@@ -142,6 +153,8 @@ def structured_requirement_signature(
 
 @dataclass(frozen=True)
 class RequirementIdentity:
+    """Coordinate requirement identity behavior within the services boundary."""
+
     requirement_id: str
     revision_id: str
     signature: str

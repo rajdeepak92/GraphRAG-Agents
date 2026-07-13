@@ -48,24 +48,68 @@ Generated requirement artifacts and logs are written under:
 generated/<PROJECT>/req/<RUN_ID>/
 ```
 
-That directory is local-only and gitignored. It contains public catalog
-`requirements.json`, full audit `requirements_full.json`, `run.log`,
-`run.jsonl`, `chunk_manifest.json`, and any saved `llm_response_*.txt` files.
+That directory is local-only and gitignored. It contains canonical
+`requirements.json`, identity-resolution audit `identity_resolution.json`,
+`run.log`, `run.jsonl`, `chunk_manifest.json`, and any explicitly captured
+`llm_response_*.txt` diagnostic artifacts.
 
-`requirements_full.json` is the internal audit payload (`RequirementArtifact`
-schema `2.1`). The public `requirements.json` mirror is a display-ID catalog
-(`4.0-catalog`) using aliases such as `REQ-001`; old `3.0-compact`
-requirements files remain readable for generation compatibility. Downstream
-public artifacts use the same alias boundary: `user_stories.json` is
-`2.0-user-stories` with `US-###` IDs and display parent `req_id`, and
-`test_scenarios.json` is `2.0-test-scenarios` with `TS-###` IDs and display
-parents `us_id`/`req_id`. Internal PostgreSQL rows, workflow results, resume,
-HFIL, dedup, and Neo4j merges continue to use the internal hash IDs.
+`requirements.json` uses the `5.0-requirements` contract with canonical
+UUIDv7-backed `REQ-`, `REQREV-`, and nested `REQEVID-` identities. PostgreSQL
+is the generated-artifact ledger; Neo4j remains the source-knowledge and
+traceability graph rather than a second requirement/story/scenario ledger.
 
-When requirement discovery parsing or source-trace validation fails, the full
-raw model response is saved beside the run artifacts. Set
-`LOG_LLM_RESPONSES=true` to also capture raw successful responses for
-debugging.
+When requirement discovery parsing or source-trace validation fails, the model
+adapter may save the raw response as a separate restricted diagnostic artifact.
+`LOG_LLM_RESPONSES=true` explicitly enables successful-response artifact
+capture; it does not place responses in console output, `run.log`, or
+`run.jsonl`. Keep this flag off unless the run directory has appropriate access
+controls and retention.
+
+## Logging and observability
+
+The checked-in development profile uses `DEBUG`; the library fallback remains
+`INFO` when no environment or configuration value is supplied. Thresholds use
+standard inclusive semantics:
+
+- `DEBUG` emits DEBUG, INFO, WARNING, ERROR, and EXCEPTION records.
+- `INFO` suppresses DEBUG but retains INFO, WARNING, ERROR, and EXCEPTION.
+- `WARNING` suppresses DEBUG and INFO but retains warnings and failures.
+- Unknown values normalize safely to `INFO`.
+
+Select DEBUG for one PowerShell session without changing files:
+
+```powershell
+$env:LOG_LEVEL = "DEBUG"
+uv run marag ingest `
+  --project <PROJECT> `
+  --document <DOCUMENT_PATH> `
+  --version <VERSION>
+```
+
+Operational logs are written to stderr so `--json-output` stdout remains one
+valid machine-readable JSON document. INFO records are concise workflow
+milestones. DEBUG adds safe `function.started`, `function.completed`, and
+`function.propagated_failure` records with module, function, workflow step,
+operation, run/project/version anchors, status, counts, and duration. It does
+not inspect or serialize function arguments or return values.
+
+Every ingest run persists ANSI-free text and one-record-per-line JSONL at
+`generated/<PROJECT>/req/<RUN_ID>/run.log` and `run.jsonl`. Other commands keep
+their backward-compatible `.generated/<PROJECT>/run/` paths. WARNING identifies
+recoverable degradation or retries; retry records include `attempt`,
+`max_attempts`, `retry_delay_seconds`, exception type, safe anchor, and status.
+ERROR represents a terminal operation without an active traceback. EXCEPTION
+is emitted once by the boundary that owns a terminal failure and includes a
+sanitized traceback.
+
+All sinks apply the same recursive redaction boundary. Sensitive keys,
+authenticated DSNs, credential query parameters, bearer values, cookies,
+provider-token shapes, arbitrary settings objects, rendered messages,
+exception summaries, and traceback frames are sanitized before output. DEBUG
+never enables logging of credentials, prompts, source documents, source chunks,
+raw LLM requests or responses, embeddings, complete configuration objects, or
+arbitrary payloads. Legacy raw-block calls record only length and a response
+fingerprint.
 
 ## Database Requirements
 
@@ -119,6 +163,7 @@ uv run ruff format --check .
 uv run python -m unittest discover -s tests
 uv run python -m compileall -q src
 uv run mypy src/multi_agentic_graph_rag
+uv run python tools/docstring_audit.py
 ```
 
 ## Database Reset

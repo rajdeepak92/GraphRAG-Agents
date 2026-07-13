@@ -17,6 +17,8 @@ CHUNKER_FINGERPRINT = "langchain-recursive-v1"
 
 @dataclass(frozen=True)
 class _BlockSpan:
+    """Coordinate block span behavior within the services boundary."""
+
     block: ParsedBlock
     start: int
     end: int
@@ -29,6 +31,20 @@ def chunk_blocks(
     settings: ChunkingSettings,
     logger: RunLogger | None = None,
 ) -> tuple[list[DocumentChunk], str]:
+    """Execute the chunk blocks operation within its declared architectural boundary.
+
+    Args:
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        blocks (list[ParsedBlock]): Blocks required by the operation's typed contract.
+        settings (ChunkingSettings): Validated settings that control this operation.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        tuple[list[DocumentChunk], str]: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     if logger is not None:
         logger.debug(
             "Chunking {block_count} blocks for {document_version_id}",
@@ -91,10 +107,26 @@ def chunk_blocks(
 
 
 def _fingerprint(settings: ChunkingSettings) -> str:
+    """Execute the fingerprint operation within its declared architectural boundary.
+
+    Args:
+        settings (ChunkingSettings): Validated settings that control this operation.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return f"{CHUNKER_FINGERPRINT}:size={settings.chunk_size}:overlap={settings.chunk_overlap}"
 
 
 def _combine_blocks(blocks: list[ParsedBlock]) -> tuple[str, list[_BlockSpan]]:
+    """Execute the combine blocks operation within its declared architectural boundary.
+
+    Args:
+        blocks (list[ParsedBlock]): Blocks required by the operation's typed contract.
+
+    Returns:
+        tuple[str, list[_BlockSpan]]: The typed result produced by the operation.
+    """
     parts: list[str] = []
     spans: list[_BlockSpan] = []
     cursor = 0
@@ -114,6 +146,16 @@ def _overlapping_spans(
     start: int,
     end: int,
 ) -> list[_BlockSpan]:
+    """Execute the overlapping spans operation within its declared architectural boundary.
+
+    Args:
+        spans (list[_BlockSpan]): Spans required by the operation's typed contract.
+        start (int): Start required by the operation's typed contract.
+        end (int): End required by the operation's typed contract.
+
+    Returns:
+        list[_BlockSpan]: The typed result produced by the operation.
+    """
     overlapping = [span for span in spans if span.end > start and span.start < end]
     if overlapping:
         return overlapping
@@ -128,6 +170,16 @@ def _append_chunk(
     combined_start: int,
     combined_end: int,
 ) -> None:
+    """Append chunk.
+
+    Args:
+        chunks (list[DocumentChunk]): Ordered chunks processed without changing their identities.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+        spans (list[_BlockSpan]): Spans required by the operation's typed contract.
+        combined_start (int): Combined start required by the operation's typed contract.
+        combined_end (int): Combined end required by the operation's typed contract.
+    """
     if not spans:
         return
     first = spans[0]
@@ -151,12 +203,30 @@ def _append_chunk(
 
 
 def _source_start(span: _BlockSpan, combined_start: int) -> int:
+    """Execute the source start operation within its declared architectural boundary.
+
+    Args:
+        span (_BlockSpan): Span required by the operation's typed contract.
+        combined_start (int): Combined start required by the operation's typed contract.
+
+    Returns:
+        int: The typed result produced by the operation.
+    """
     if span.start <= combined_start <= span.end:
         return span.block.start_char + max(0, combined_start - span.start)
     return span.block.start_char
 
 
 def _source_end(span: _BlockSpan, combined_end: int) -> int:
+    """Execute the source end operation within its declared architectural boundary.
+
+    Args:
+        span (_BlockSpan): Span required by the operation's typed contract.
+        combined_end (int): Combined end required by the operation's typed contract.
+
+    Returns:
+        int: The typed result produced by the operation.
+    """
     if span.start <= combined_end <= span.end:
         return span.block.start_char + max(0, combined_end - span.start)
     return span.block.end_char

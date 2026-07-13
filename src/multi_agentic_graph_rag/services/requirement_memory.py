@@ -43,10 +43,14 @@ Decision = Literal["EXACT", "SAME_LINEAGE_REVISION", "DISTINCT", "AMBIGUOUS"]
 
 
 class Embedder(Protocol):
+    """Specify the provider-neutral embedder interface required by this boundary."""
+
     def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class Reranker(Protocol):
+    """Specify the provider-neutral reranker interface required by this boundary."""
+
     def rerank(self, query: str, documents: list[str]) -> list[int]: ...
 
 
@@ -57,6 +61,8 @@ class EntailmentJudge(Protocol):
 
 
 class _EntailmentOutput(StrictModel):
+    """Define the validated entailment output data contract."""
+
     entails: bool
 
 
@@ -64,9 +70,26 @@ class ModelEntailmentJudge:
     """Provider-neutral strict entailment judge backed by the configured reasoner."""
 
     def __init__(self, model: ReasoningModel) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            model (ReasoningModel): Provider-neutral model adapter used by the operation.
+        """
         self._model = model
 
     def entails(self, premise: str, hypothesis: str) -> bool:
+        """Execute the entails operation within its declared architectural boundary.
+
+        Args:
+            premise (str): Premise required by the operation's typed contract.
+            hypothesis (str): Hypothesis required by the operation's typed contract.
+
+        Returns:
+            bool: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         prompt = (
             PromptRequirementIdentity.BIDIRECTIONAL_ENTAILMENT.value
             + "PREMISE: "
@@ -79,6 +102,8 @@ class ModelEntailmentJudge:
 
 @dataclass
 class MemoryEntry:
+    """Coordinate memory entry behavior within the services boundary."""
+
     requirement_id: str
     revision_id: str
     statement: str
@@ -89,6 +114,7 @@ class MemoryEntry:
     embedding: list[float] | None = None
 
     def __post_init__(self) -> None:
+        """Execute the post init operation within its declared architectural boundary."""
         if not self.signature:
             self.signature = requirement_lineage_signature(self.statement, self.requirement_type)
         if not self.normalized_statement:
@@ -97,6 +123,8 @@ class MemoryEntry:
 
 @dataclass(frozen=True)
 class Candidate:
+    """Coordinate candidate behavior within the services boundary."""
+
     entry: MemoryEntry
     score: float
     reasons: tuple[str, ...]
@@ -104,6 +132,8 @@ class Candidate:
 
 @dataclass(frozen=True)
 class ReconcileResult:
+    """Coordinate reconcile result behavior within the services boundary."""
+
     decision: Decision
     requirement_id: str | None
     revision_id: str | None
@@ -118,24 +148,67 @@ def _family_hash(requirement_type: str, text: str) -> str:
     # Exact-statement identity is family-scoped: identical wording under a different
     # requirement family (an Acceptance Criterion vs a Business Requirement) is not
     # the same obligation and must not collapse.
+    """Execute the family hash operation within its declared architectural boundary.
+
+    Args:
+        requirement_type (str): Requirement type required by the operation's typed contract.
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     family = normalize_requirement_family(requirement_type)
     return hashlib.sha256(f"{family}::{_norm(text)}".encode()).hexdigest()
 
 
 def _norm(text: str) -> str:
+    """Execute the norm operation within its declared architectural boundary.
+
+    Args:
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
 def _tokens(text: str) -> set[str]:
+    """Execute the tokens operation within its declared architectural boundary.
+
+    Args:
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        set[str]: The typed result produced by the operation.
+    """
     return set(_TOKEN.findall(text.lower()))
 
 
 def _jaccard(left: set[str], right: set[str]) -> float:
+    """Execute the jaccard operation within its declared architectural boundary.
+
+    Args:
+        left (set[str]): Left required by the operation's typed contract.
+        right (set[str]): Right required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     union = left | right
     return len(left & right) / len(union) if union else 0.0
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
+    """Execute the cosine operation within its declared architectural boundary.
+
+    Args:
+        left (list[float]): Left required by the operation's typed contract.
+        right (list[float]): Right required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     numerator = sum(a * b for a, b in zip(left, right, strict=False))
     left_norm = math.sqrt(sum(value * value for value in left))
     right_norm = math.sqrt(sum(value * value for value in right))
@@ -155,6 +228,14 @@ class RequirementMemory:
         reranker: Reranker | None = None,
         judge: EntailmentJudge | None = None,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (RequirementIdentitySettings): Validated settings that control this operation.
+            embedder (Embedder | None): Provider-neutral model adapter used by the operation.
+            reranker (Reranker | None): Provider-neutral model adapter used by the operation.
+            judge (EntailmentJudge | None): Judge required by the operation's typed contract.
+        """
         self._settings = settings
         self._embedder = embedder
         self._reranker = reranker if settings.use_reranker else None
@@ -165,13 +246,32 @@ class RequirementMemory:
 
     @property
     def size(self) -> int:
+        """Execute the size operation within its declared architectural boundary.
+
+        Returns:
+            int: The typed result produced by the operation.
+        """
         return len(self._entries)
 
     def seed(self, entries: Iterable[MemoryEntry]) -> None:
+        """Seed seed.
+
+        Args:
+            entries (Iterable[MemoryEntry]): Ordered entries processed without changing their
+                                             identities.
+        """
         for entry in entries:
             self.add(entry)
 
     def add(self, entry: MemoryEntry) -> None:
+        """Execute the add operation within its declared architectural boundary.
+
+        Args:
+            entry (MemoryEntry): Entry required by the operation's typed contract.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         if entry.embedding is None and self._embedder is not None:
             vectors = self._embedder.embed_documents([entry.statement])
             entry.embedding = vectors[0] if vectors else None
@@ -183,9 +283,27 @@ class RequirementMemory:
         self._by_signature.setdefault(entry.signature, entry)
 
     def exact_statement_match(self, statement: str, requirement_type: str) -> MemoryEntry | None:
+        """Execute the exact statement match operation within its declared architectural boundary.
+
+        Args:
+            statement (str): Statement required by the operation's typed contract.
+            requirement_type (str): Requirement type required by the operation's typed contract.
+
+        Returns:
+            MemoryEntry | None: The typed result produced by the operation.
+        """
         return self._by_hash.get(_family_hash(requirement_type, statement))
 
     def exact_signature_match(self, statement: str, requirement_type: str) -> MemoryEntry | None:
+        """Execute the exact signature match operation within its declared architectural boundary.
+
+        Args:
+            statement (str): Statement required by the operation's typed contract.
+            requirement_type (str): Requirement type required by the operation's typed contract.
+
+        Returns:
+            MemoryEntry | None: The typed result produced by the operation.
+        """
         return self._by_signature.get(requirement_lineage_signature(statement, requirement_type))
 
     def candidates(
@@ -206,6 +324,13 @@ class RequirementMemory:
         scored: dict[str, tuple[float, list[str]]] = {}
 
         def _bump(entry: MemoryEntry, score: float, reason: str) -> None:
+            """Execute the bump operation within its declared architectural boundary.
+
+            Args:
+                entry (MemoryEntry): Entry required by the operation's typed contract.
+                score (float): Score required by the operation's typed contract.
+                reason (str): Reason required by the operation's typed contract.
+            """
             key = entry.revision_id or entry.requirement_id
             current = scored.get(key)
             if current is None or score > current[0]:

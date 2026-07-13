@@ -59,6 +59,18 @@ _STAGE_FILE_SUFFIX = {
 
 
 def _stage_suffix(stage: str) -> str:
+    """Execute the stage suffix operation within its declared architectural boundary.
+
+    Args:
+        stage (str): Stage required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+
+    Raises:
+        CheckpointError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     try:
         return _STAGE_FILE_SUFFIX[stage]
     except KeyError as exc:
@@ -66,14 +78,39 @@ def _stage_suffix(stage: str) -> str:
 
 
 def context_map_filename(stage: str) -> str:
+    """Execute the context map filename operation within its declared architectural boundary.
+
+    Args:
+        stage (str): Stage required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return f"context_{_stage_suffix(stage)}.json"
 
 
 def generation_progress_filename(stage: str) -> str:
+    """Execute the generation progress filename operation within its declared architectural
+    boundary.
+
+    Args:
+        stage (str): Stage required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return f"progress_{_stage_suffix(stage)}.json"
 
 
 def generation_errors_filename(stage: str) -> str:
+    """Execute the generation errors filename operation within its declared architectural boundary.
+
+    Args:
+        stage (str): Stage required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return f"errors_{_stage_suffix(stage)}.jsonl"
 
 
@@ -87,6 +124,8 @@ class ChunkFetcher(Protocol):
 
 
 class RetrievalMetadataEntry(StrictModel):
+    """Define the validated retrieval metadata entry data contract."""
+
     chunk_id: str
     source: str
     rank: int
@@ -111,6 +150,8 @@ class ContextMapEntry(StrictModel):
 
 
 class ContextMapCheckpoint(StrictModel):
+    """Define the validated context map checkpoint data contract."""
+
     run_id: str
     stage: str
     project: str
@@ -133,6 +174,8 @@ class GenerationProgressItem(StrictModel):
 
 
 class GenerationProgress(StrictModel):
+    """Define the validated generation progress data contract."""
+
     run_id: str
     stage: str
     project: str
@@ -171,6 +214,11 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 
 def _now_iso() -> str:
+    """Execute the now iso operation within its declared architectural boundary.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -357,6 +405,20 @@ def write_context_map_checkpoint(
     document_version_id: str,
     entries: Sequence[ContextMapEntry],
 ) -> Path:
+    """Write context map checkpoint through the owning storage boundary.
+
+    Args:
+        out_dir (Path): Out dir required by the operation's typed contract.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        stage (str): Stage required by the operation's typed contract.
+        project (str): Project scope that isolates persistence and retrieval.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        entries (Sequence[ContextMapEntry]): Ordered entries processed without changing their
+                                             identities.
+
+    Returns:
+        Path: The typed result produced by the operation.
+    """
     payload = {
         "run_id": run_id,
         "stage": stage,
@@ -434,6 +496,15 @@ def load_generation_progress(
 
 
 def write_generation_progress(out_dir: Path, progress: GenerationProgress) -> Path:
+    """Write generation progress through the owning storage boundary.
+
+    Args:
+        out_dir (Path): Out dir required by the operation's typed contract.
+        progress (GenerationProgress): Progress required by the operation's typed contract.
+
+    Returns:
+        Path: The typed result produced by the operation.
+    """
     payload = {
         "run_id": progress.run_id,
         "stage": progress.stage,
@@ -454,6 +525,14 @@ def record_completion(
     payload: dict[str, Any],
     requirement_id: str | None = None,
 ) -> None:
+    """Record completion through the owning storage boundary.
+
+    Args:
+        progress (GenerationProgress): Progress required by the operation's typed contract.
+        input_id (str): Canonical input id used as a safe operational anchor.
+        payload (dict[str, Any]): Validated structured data for the operation.
+        requirement_id (str | None): Canonical requirement id used as a safe operational anchor.
+    """
     progress.failed.pop(input_id, None)
     progress.completed[input_id] = GenerationProgressItem(
         input_id=input_id,
@@ -471,6 +550,14 @@ def record_failure(
     error: str,
     requirement_id: str | None = None,
 ) -> None:
+    """Record failure through the owning storage boundary.
+
+    Args:
+        progress (GenerationProgress): Progress required by the operation's typed contract.
+        input_id (str): Canonical input id used as a safe operational anchor.
+        error (str): Failure being classified or converted without exposing its message.
+        requirement_id (str | None): Canonical requirement id used as a safe operational anchor.
+    """
     progress.failed[input_id] = GenerationProgressItem(
         input_id=input_id,
         requirement_id=requirement_id,
@@ -490,6 +577,19 @@ def append_generation_error(out_dir: Path, stage: str, record: dict[str, Any]) -
 
 
 def _entry_key(entry: ContextMapEntry, *, require_story_id: bool) -> str:
+    """Execute the entry key operation within its declared architectural boundary.
+
+    Args:
+        entry (ContextMapEntry): Entry required by the operation's typed contract.
+        require_story_id (bool): Canonical require story id used as a safe operational anchor.
+
+    Returns:
+        str: The typed result produced by the operation.
+
+    Raises:
+        CheckpointError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     if require_story_id:
         if not entry.story_id:
             raise CheckpointError(
@@ -500,6 +600,14 @@ def _entry_key(entry: ContextMapEntry, *, require_story_id: bool) -> str:
 
 
 def _dump_entry(entry: ContextMapEntry) -> dict[str, Any]:
+    """Execute the dump entry operation within its declared architectural boundary.
+
+    Args:
+        entry (ContextMapEntry): Entry required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     exclude = {"story_id"} if entry.story_id is None else set()
     if not entry.assertions:
         # Legacy chunk-only entries stay byte-identical: omit graph-primary fields.
@@ -510,11 +618,32 @@ def _dump_entry(entry: ContextMapEntry) -> dict[str, Any]:
 
 
 def _dump_item(item: GenerationProgressItem) -> dict[str, Any]:
+    """Execute the dump item operation within its declared architectural boundary.
+
+    Args:
+        item (GenerationProgressItem): Item required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     exclude = {"requirement_id"} if item.requirement_id is None else set()
     return item.model_dump(mode="json", exclude=exclude)
 
 
 def _load_model[ModelT: StrictModel](path: Path, model: type[ModelT]) -> ModelT:
+    """Load model within the authorized project and version scope.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+        model (type[ModelT]): Provider-neutral model adapter used by the operation.
+
+    Returns:
+        ModelT: The typed result produced by the operation.
+
+    Raises:
+        CheckpointError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return model.model_validate(data)
@@ -535,6 +664,22 @@ def _guard_identity(
     project: str,
     document_version_id: str,
 ) -> None:
+    """Execute the guard identity operation within its declared architectural boundary.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+        found_stage (str): Found stage required by the operation's typed contract.
+        found_project (str): Found project required by the operation's typed contract.
+        found_document_version_id (str): Canonical found document version id used as a safe
+                                         operational anchor.
+        stage (str): Stage required by the operation's typed contract.
+        project (str): Project scope that isolates persistence and retrieval.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+
+    Raises:
+        CheckpointError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     for label, found, expected in (
         ("stage", found_stage, stage),
         ("project", found_project, project),
@@ -553,6 +698,17 @@ def _log_run_id_reuse(
     path: Path,
     logger: RunLogger | None,
 ) -> None:
+    """Execute the log run id reuse operation within its declared architectural boundary.
+
+    Args:
+        found_run_id (str): Canonical found run id used as a safe operational anchor.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        path (Path): Filesystem location authorized for this operation.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     if found_run_id == run_id or logger is None:
         return
     logger.info(

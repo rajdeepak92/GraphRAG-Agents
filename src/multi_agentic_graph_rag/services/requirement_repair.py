@@ -39,11 +39,21 @@ from multi_agentic_graph_rag.services.requirement_identity_resolver import (
 
 
 def _normalize_statement(value: str) -> str:
+    """Normalize statement deterministically within the active scope.
+
+    Args:
+        value (str): Value required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return " ".join(value.strip().lower().split())
 
 
 @dataclass(frozen=True)
 class LineageFinding:
+    """Coordinate lineage finding behavior within the services boundary."""
+
     old_requirement_id: str
     signatures: tuple[str, ...]
     revision_remap: dict[str, str]  # revision_id -> corrected requirement_id
@@ -51,6 +61,8 @@ class LineageFinding:
 
 @dataclass
 class RepairReport:
+    """Coordinate repair report behavior within the services boundary."""
+
     project: str
     document_id: str
     total_requirements: int = 0
@@ -63,6 +75,11 @@ class RepairReport:
     ambiguous_cases: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
+        """Convert the value to dict without mutating its source.
+
+        Returns:
+            dict[str, object]: The typed result produced by the operation.
+        """
         return {
             "project": self.project,
             "document_id": self.document_id,
@@ -105,11 +122,21 @@ class ProjectRepairReport:
 
     @property
     def changed(self) -> bool:
+        """Execute the changed operation within its declared architectural boundary.
+
+        Returns:
+            bool: The typed result produced by the operation.
+        """
         return bool(
             self.requirement_id_by_revision or self.revision_id_remap or self.evidence_id_remap
         )
 
     def to_dict(self) -> dict[str, object]:
+        """Convert the value to dict without mutating its source.
+
+        Returns:
+            dict[str, object]: The typed result produced by the operation.
+        """
         return {
             "project": self.project,
             "artifact_count": self.artifact_count,

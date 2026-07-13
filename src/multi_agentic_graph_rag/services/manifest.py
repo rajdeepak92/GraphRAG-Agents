@@ -22,6 +22,25 @@ def build_manifest(
     chunks: list[DocumentChunk],
     logger: RunLogger | None = None,
 ) -> DocumentManifest:
+    """Build manifest.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        logical_name (str): Logical name required by the operation's typed contract.
+        version (str): Document version label within the project scope.
+        source_path (Path): Filesystem location authorized for this operation.
+        source_checksum (str): Source checksum required by the operation's typed contract.
+        parser_fingerprint (str): Parser fingerprint required by the operation's typed contract.
+        chunker_fingerprint (str): Chunker fingerprint required by the operation's typed contract.
+        chunks (list[DocumentChunk]): Ordered chunks processed without changing their identities.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        DocumentManifest: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     if logger is not None:
         logger.debug(
             "Building manifest for {project}:{logical_name}:{version}",
@@ -52,6 +71,20 @@ def write_manifest(
     run_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
+    """Write manifest through the owning storage boundary.
+
+    Args:
+        manifest (DocumentManifest): Manifest required by the operation's typed contract.
+        run_dir (Path): Filesystem location authorized for this operation.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        Path: The typed result produced by the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     path = run_dir / "chunk_manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if logger is not None:

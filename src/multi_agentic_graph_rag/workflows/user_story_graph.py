@@ -30,7 +30,7 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reasoning_model,
     create_reranker_model,
 )
-from multi_agentic_graph_rag.observability.logging import RunLogger
+from multi_agentic_graph_rag.observability.logging import RunLogger, sanitized_exception_summary
 from multi_agentic_graph_rag.observability.session import (
     RunSession,
     command_run_id,
@@ -59,19 +59,26 @@ from multi_agentic_graph_rag.services.knowledge_retrieval import (
     log_graph_primary_decision,
     require_knowledge_graph_when_primary,
 )
+from multi_agentic_graph_rag.services.requirement_memory import ModelEntailmentJudge
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
     load_requirement_source_from_canonical_payload,
     load_requirement_source_local,
 )
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
+from multi_agentic_graph_rag.services.story_scenario_identity import (
+    StoryScenarioIdentityResolver,
+)
 from multi_agentic_graph_rag.services.user_story_builder import (
     build_user_story_artifact,
+    normalize_story_title,
     project_user_story_artifact,
 )
 
 
 class UserStoryState(TypedDict, total=False):
+    """Describe the user story state state exchanged between typed workflow nodes."""
+
     request: dict[str, Any]
     run_id: str
     project: str
@@ -87,6 +94,15 @@ class UserStoryState(TypedDict, total=False):
 
 
 def build_user_story_graph(session: RunSession | None = None) -> Any:
+    """Build user story graph.
+
+    Args:
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        Any: The typed result produced by the operation.
+    """
     graph = StateGraph(UserStoryState)
     graph.add_node("validate_request", lambda state: _validate_request(state, session=session))
     graph.add_node("run_pipeline", lambda state: _run_pipeline(state, session=session))
@@ -101,6 +117,25 @@ def _validate_request(
     *,
     session: RunSession | None = None,
 ) -> UserStoryState:
+    """Validate request against the enforced runtime contract.
+
+    Args:
+        state (UserStoryState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        UserStoryState: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+        FileNotFoundError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = UserStoryRequest.model_validate(state["request"])
     logger = session.logger if session is not None else None
     if request.requirements_path is None and request.document_version_id is None:
@@ -126,6 +161,20 @@ def _run_pipeline(
     *,
     session: RunSession | None = None,
 ) -> UserStoryState:
+    """Run pipeline.
+
+    Args:
+        state (UserStoryState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        UserStoryState: The typed result produced by the operation.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = UserStoryRequest.model_validate(state["request"])
     settings = load_config()
     if session is not None:
@@ -138,6 +187,15 @@ def _run_pipeline(
     run_dir = session.run_dir if session is not None else None
 
     def pipeline() -> UserStoryState:
+        """Run the workflow pipeline while preserving its persistence boundaries.
+
+        Returns:
+            UserStoryState: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         _validate_required_user_story_stack(settings)
         if logger is not None:
             logger.info(
@@ -239,6 +297,10 @@ def _run_pipeline(
         build_result = _preserve_existing_story_ids(
             build_result,
             postgres.load_user_stories_for_generation(project=source.project),
+            StoryScenarioIdentityResolver(
+                embedder=embedding_model,
+                judge=ModelEntailmentJudge(reasoning_model),
+            ),
         )
         artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
             artifact=build_result,
@@ -295,7 +357,14 @@ def _run_pipeline(
         return result_payload
 
     try:
-        return pipeline()
+        if logger is None:
+            return pipeline()
+        with logger.span(
+            step="generate_user_stories",
+            operation="user_story.pipeline",
+            document_version_id=request.document_version_id,
+        ):
+            return pipeline()
     except Exception as exc:
         if logger is not None:
             logger.exception(
@@ -309,7 +378,7 @@ def _run_pipeline(
         _record_failed_run_safely(
             postgres=postgres,
             run_id=state["run_id"],
-            payload={"run_id": state["run_id"], "error": str(exc)},
+            payload={"run_id": state["run_id"], "error": sanitized_exception_summary(exc)},
             logger=logger,
         )
         raise
@@ -472,7 +541,11 @@ def _generate_from_context_map(
         try:
             output = agent.generate(requirement, context, requirement_index=index)
         except Exception as exc:
-            record_failure(progress, input_id=entry.requirement_id, error=str(exc))
+            record_failure(
+                progress,
+                input_id=entry.requirement_id,
+                error=sanitized_exception_summary(exc),
+            )
             write_generation_progress(out_dir, progress)
             append_generation_error(
                 out_dir,
@@ -481,7 +554,7 @@ def _generate_from_context_map(
                     "stage": STAGE_USER_STORY,
                     "input_id": entry.requirement_id,
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": sanitized_exception_summary(exc),
                 },
             )
             raise
@@ -498,6 +571,19 @@ def _generate_from_context_map(
 
 
 def _stories_from_payload(payload: dict[str, Any], requirement_id: str) -> list[UserStoryModel]:
+    """Execute the stories from payload operation within its declared architectural boundary.
+
+    Args:
+        payload (dict[str, Any]): Validated structured data for the operation.
+        requirement_id (str): Canonical requirement id used as a safe operational anchor.
+
+    Returns:
+        list[UserStoryModel]: The typed result produced by the operation.
+
+    Raises:
+        CheckpointError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     raw = payload.get("user_stories")
     if not isinstance(raw, list):
         raise CheckpointError(f"progress payload for {requirement_id} is missing user_stories")
@@ -507,27 +593,104 @@ def _stories_from_payload(payload: dict[str, Any], requirement_id: str) -> list[
         raise CheckpointError(f"progress payload for {requirement_id} is invalid ({exc})") from exc
 
 
+def _story_identity_text(story: UserStoryRecord) -> str:
+    """Content used for semantic identity recall/entailment (never the id)."""
+    parts = [
+        story.title,
+        story.persona,
+        story.user_story.as_a,
+        story.user_story.i_want,
+        story.user_story.so_that,
+        *story.acceptance_criteria,
+    ]
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
+def _match_story_id(
+    story: UserStoryRecord,
+    existing: list[UserStoryRecord],
+    indices: list[int],
+    consumed: set[int],
+    resolver: StoryScenarioIdentityResolver | None,
+) -> str:
+    """Decide the stable story_id: exact-title, then semantic, else a fresh id."""
+    title = normalize_story_title(story.title)
+    for index in indices:
+        if index not in consumed and normalize_story_title(existing[index].title) == title:
+            consumed.add(index)
+            return existing[index].story_id
+    if resolver is not None:
+        pool = [
+            (existing[index].story_id, _story_identity_text(existing[index]))
+            for index in indices
+            if index not in consumed
+        ]
+        match_id = resolver.find_semantic_match(_story_identity_text(story), pool)
+        if match_id is not None:
+            for index in indices:
+                if index not in consumed and existing[index].story_id == match_id:
+                    consumed.add(index)
+                    break
+            return match_id
+    return story.story_id
+
+
 def _preserve_existing_story_ids(
     artifact: UserStoryBuildResult,
     existing_stories: list[UserStoryRecord],
+    resolver: StoryScenarioIdentityResolver | None = None,
 ) -> UserStoryBuildResult:
-    existing_by_requirement: dict[str, list[UserStoryRecord]] = {}
-    for story in existing_stories:
-        existing_by_requirement.setdefault(story.requirement_id, []).append(story)
-    for stories in existing_by_requirement.values():
-        stories.sort(key=lambda item: item.story_id)
+    """Preserve canonical story lineage by content, never by output ordinal.
+
+    A regenerated story reuses a prior ``story_id`` only when it is the same
+    logical story under the same parent requirement: first via an exact
+    normalized-title match (deterministic — the content key ``story_id`` is
+    derived from), then, when a resolver is supplied, via bounded embedding recall
+    plus strict bidirectional LLM entailment (the LLM proposes, Python decides).
+    New content mints a fresh id. Identity is therefore stable across insertion,
+    removal and reordering and can never be reassigned to unrelated content by
+    position.
+
+    Lifecycle (decisions #5/#6): a prior story that the regeneration no longer
+    produces is never dropped — it is carried forward with ``status='outdated'``
+    so its history is preserved and it is not left stale-active.
+
+    Args:
+        artifact (UserStoryBuildResult): Artifact required by the operation's typed contract.
+        existing_stories (list[UserStoryRecord]): Prior persisted stories for the project.
+        resolver (StoryScenarioIdentityResolver | None): Optional semantic identity resolver;
+            when absent only the deterministic exact-title fast path is used.
+
+    Returns:
+        UserStoryBuildResult: The typed result produced by the operation.
+    """
+    existing = sorted(existing_stories, key=lambda item: item.story_id)
+    by_requirement: dict[str, list[int]] = {}
+    for index, story in enumerate(existing):
+        by_requirement.setdefault(story.requirement_id, []).append(index)
+    consumed: set[int] = set()
 
     rewritten: dict[str, UserStoryRecord] = {}
     coverage: dict[str, list[str]] = {}
-    ordinal_by_requirement: dict[str, int] = {}
     for story in artifact.records.values():
-        ordinal = ordinal_by_requirement.get(story.requirement_id, 0)
-        ordinal_by_requirement[story.requirement_id] = ordinal + 1
-        prior = existing_by_requirement.get(story.requirement_id, [])
-        stable_story_id = prior[ordinal].story_id if ordinal < len(prior) else story.story_id
+        indices = by_requirement.get(story.requirement_id, [])
+        stable_story_id = _match_story_id(story, existing, indices, consumed, resolver)
         record = story.model_copy(update={"story_id": stable_story_id})
         rewritten[stable_story_id] = record
         coverage.setdefault(record.requirement_id, []).append(stable_story_id)
+
+    # Retire only priors whose parent requirement was actually part of this batch.
+    # A prior under a requirement absent from this run (resume / subset generation)
+    # is out of scope — "absent from this batch" is not "removed" — and is left
+    # untouched so it is never silently retired.
+    batch_requirements = set(coverage)
+    for index, prior in enumerate(existing):
+        if index in consumed or prior.story_id in rewritten:
+            continue
+        if prior.requirement_id not in batch_requirements:
+            continue
+        rewritten[prior.story_id] = prior.model_copy(update={"status": "outdated"})
+
     artifact.records = rewritten
     artifact.coverage = coverage
     artifact.artifact = project_user_story_artifact(
@@ -544,6 +707,19 @@ def run_user_story_generation(
     request: UserStoryRequest,
     session: RunSession | None = None,
 ) -> UserStoryResult:
+    """Run user story generation.
+
+    Args:
+        request (UserStoryRequest): Request required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        UserStoryResult: The typed result produced by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     if session is None:
         project, version = resolve_user_story_identity(request)
         with command_session(
@@ -591,6 +767,12 @@ def resolve_user_story_identity(request: UserStoryRequest) -> tuple[str, str]:
 
 
 def _apply_overrides(settings: AppSettings, request: UserStoryRequest) -> None:
+    """Apply overrides.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        request (UserStoryRequest): Request required by the operation's typed contract.
+    """
     if request.reasoning_provider:
         settings.reasoning_model.provider = request.reasoning_provider
     if request.embedding_provider:
@@ -608,6 +790,23 @@ def _load_requirement_source(
     postgres: PostgresStore,
     logger: Any | None,
 ) -> RequirementSource:
+    """Load requirement source within the authorized project and version scope.
+
+    Args:
+        request (UserStoryRequest): Request required by the operation's typed contract.
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        RequirementSource: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     if request.requirements_path is not None:
         if logger is not None:
             logger.info(
@@ -653,6 +852,17 @@ def _output_dir(
     source: RequirementSource,
     run_identifier: str,
 ) -> Path:
+    """Execute the output dir operation within its declared architectural boundary.
+
+    Args:
+        request (UserStoryRequest): Request required by the operation's typed contract.
+        settings (AppSettings): Validated settings that control this operation.
+        source (RequirementSource): Source required by the operation's typed contract.
+        run_identifier (str): Canonical run identifier used as a safe operational anchor.
+
+    Returns:
+        Path: The typed result produced by the operation.
+    """
     if request.requirements_path is not None:
         return request.requirements_path.parent
     return (
@@ -661,6 +871,15 @@ def _output_dir(
 
 
 def _validate_required_user_story_stack(settings: AppSettings) -> None:
+    """Validate required user story stack against the enforced runtime contract.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     if settings.reasoning_model.provider in {ProviderName.LOCAL_HEURISTIC.value}:
         raise ConfigurationError(
             f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} "
@@ -683,12 +902,30 @@ def _validate_required_user_story_stack(settings: AppSettings) -> None:
 
 
 def _check_store(logger: Any | None, step: str, check: Any) -> None:
+    """Check store.
+
+    Args:
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        step (str): Step required by the operation's typed contract.
+        check (Any): Check required by the operation's typed contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     detail = check()
     if logger is not None:
         logger.info(detail, step=step, status="PASS", detail=detail)
 
 
 def _warmup_reasoning_model(reasoning_model: Any) -> None:
+    """Warm up reasoning model.
+
+    Args:
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     warmup = getattr(reasoning_model, "warmup", None)
     if callable(warmup):
         warmup()
@@ -701,6 +938,18 @@ def _record_failed_run_safely(
     payload: dict[str, Any],
     logger: Any,
 ) -> None:
+    """Record failed run safely through the owning storage boundary.
+
+    Args:
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        payload (dict[str, Any]): Validated structured data for the operation.
+        logger (Any): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     try:
         postgres.record_run(run_id, "failed", payload)
     except Exception as record_error:
@@ -710,6 +959,6 @@ def _record_failed_run_safely(
                 step="record_failed_run",
                 run_id=run_id,
                 error_type=record_error.__class__.__name__,
-                error=str(record_error),
+                error_summary=sanitized_exception_summary(record_error),
                 status="warning",
             )

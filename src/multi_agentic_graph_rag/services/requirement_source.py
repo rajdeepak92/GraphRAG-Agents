@@ -47,6 +47,8 @@ def _select_active_revision_entries[Entry](
 
 @dataclass(frozen=True)
 class RequirementSource:
+    """Coordinate requirement source behavior within the services boundary."""
+
     project: str
     document_id: str
     document_version_id: str
@@ -55,6 +57,17 @@ class RequirementSource:
 
 
 def load_requirement_source_local(path: Path) -> RequirementSource:
+    """Load requirement source local within the authorized project and version scope.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        RequirementSource: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("requirement artifact payload must be an object")
@@ -64,6 +77,15 @@ def load_requirement_source_local(path: Path) -> RequirementSource:
 def load_requirement_source_from_canonical_payload(
     payload: dict[str, Any],
 ) -> RequirementSource:
+    """Load requirement source from canonical payload within the authorized project and version
+    scope.
+
+    Args:
+        payload (dict[str, Any]): Validated structured data for the operation.
+
+    Returns:
+        RequirementSource: The typed result produced by the operation.
+    """
     artifact = CanonicalRequirementsArtifact.model_validate(payload)
     by_requirement: dict[str, list[Any]] = {}
     for requirement in artifact.requirements:
@@ -102,6 +124,14 @@ def load_requirement_source_from_canonical_payload(
 
 
 def load_requirement_source_from_full_payload(payload: dict[str, Any]) -> RequirementSource:
+    """Load requirement source from full payload within the authorized project and version scope.
+
+    Args:
+        payload (dict[str, Any]): Validated structured data for the operation.
+
+    Returns:
+        RequirementSource: The typed result produced by the operation.
+    """
     artifact = RequirementArtifact.model_validate(payload)
     by_requirement: dict[str, list[Any]] = {}
     for requirement in artifact.requirements:
@@ -145,6 +175,14 @@ def load_requirement_source_from_full_payload(payload: dict[str, Any]) -> Requir
 
 
 def unique_strings(values: Iterable[object]) -> list[str]:
+    """Execute the unique strings operation within its declared architectural boundary.
+
+    Args:
+        values (Iterable[object]): Ordered values processed without changing their identities.
+
+    Returns:
+        list[str]: The typed result produced by the operation.
+    """
     seen: set[str] = set()
     ordered: list[str] = []
     for value in values:

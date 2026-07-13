@@ -43,6 +43,8 @@ ContextRecorder = Callable[[GenerationContextRun, list[GenerationContextItem]], 
 
 @dataclass(frozen=True)
 class KnowledgeRetrievalConfig:
+    """Coordinate knowledge retrieval config behavior within the services boundary."""
+
     stage: str
     project: str
     include_in_context: bool
@@ -74,6 +76,11 @@ class GraphPrimaryDecision:
 
     @property
     def selected(self) -> bool:
+        """Execute the selected operation within its declared architectural boundary.
+
+        Returns:
+            bool: The typed result produced by the operation.
+        """
         return self.status == STATUS_SELECTED and self.context is not None
 
 
@@ -288,6 +295,11 @@ def build_context_snapshot(
 
 
 def new_context_run_id() -> str:
+    """Execute the new context run id operation within its declared architectural boundary.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return f"CTX-{uuid4().hex[:16].upper()}"
 
 

@@ -44,7 +44,7 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reasoning_model,
     create_reranker_model,
 )
-from multi_agentic_graph_rag.observability.logging import RunLogger
+from multi_agentic_graph_rag.observability.logging import RunLogger, sanitized_exception_summary
 from multi_agentic_graph_rag.observability.session import (
     RunSession,
     command_run_id,
@@ -73,6 +73,7 @@ from multi_agentic_graph_rag.services.knowledge_retrieval import (
     log_graph_primary_decision,
     require_knowledge_graph_when_primary,
 )
+from multi_agentic_graph_rag.services.requirement_memory import ModelEntailmentJudge
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
     load_requirement_source_from_canonical_payload,
@@ -81,8 +82,12 @@ from multi_agentic_graph_rag.services.requirement_source import (
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
 from multi_agentic_graph_rag.services.scenario_dedup import DedupConfig, DedupEngine
 from multi_agentic_graph_rag.services.semantic_matcher import SemanticMatcher
+from multi_agentic_graph_rag.services.story_scenario_identity import (
+    StoryScenarioIdentityResolver,
+)
 from multi_agentic_graph_rag.services.test_scenario_builder import (
     build_test_scenario_artifact,
+    normalize_scenario_title,
     project_test_scenario_artifact,
 )
 from multi_agentic_graph_rag.workflows.hfil_node import (
@@ -95,6 +100,8 @@ from multi_agentic_graph_rag.workflows.hfil_node import (
 
 
 class TestScenarioState(TypedDict, total=False):
+    """Describe the test scenario state state exchanged between typed workflow nodes."""
+
     request: dict[str, Any]
     run_id: str
     project: str
@@ -124,6 +131,8 @@ class TestScenarioState(TypedDict, total=False):
 
 @dataclass(frozen=True)
 class _StorySource:
+    """Coordinate story source behavior within the workflows boundary."""
+
     project: str
     document_id: str
     document_version_id: str
@@ -139,6 +148,23 @@ def build_test_scenario_graph(
     hfil_runtime: HFILRuntime | None = None,
     checkpointer: Any | None = None,
 ) -> Any:
+    """Build test scenario graph.
+
+    Args:
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+        settings (AppSettings | None): Validated settings that control this operation.
+        hfil_enabled (bool | None): Hfil enabled required by the operation's typed contract.
+        hfil_runtime (HFILRuntime | None): Hfil runtime required by the operation's typed contract.
+        checkpointer (Any | None): Checkpointer required by the operation's typed contract.
+
+    Returns:
+        Any: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     settings = settings or load_config()
     enabled = settings.enable_hfil if hfil_enabled is None else hfil_enabled
     graph = StateGraph(TestScenarioState)
@@ -182,6 +208,25 @@ def _validate_request(
     *,
     session: RunSession | None = None,
 ) -> TestScenarioState:
+    """Validate request against the enforced runtime contract.
+
+    Args:
+        state (TestScenarioState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        TestScenarioState: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+        FileNotFoundError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = TestScenarioRequest.model_validate(state["request"])
     logger = session.logger if session is not None else None
     if request.user_stories_path is None and request.document_version_id is None:
@@ -213,6 +258,20 @@ def _generate(
     session: RunSession | None,
     settings: AppSettings,
 ) -> TestScenarioState:
+    """Generate generate.
+
+    Args:
+        state (TestScenarioState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+        settings (AppSettings): Validated settings that control this operation.
+
+    Returns:
+        TestScenarioState: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = TestScenarioRequest.model_validate(state["request"])
     if session is not None:
         session.set_log_level(settings.log_level)
@@ -331,6 +390,10 @@ def _generate(
     build_result = _preserve_existing_scenario_ids(
         build_result,
         postgres.load_test_scenarios_for_generation(project=source.project),
+        StoryScenarioIdentityResolver(
+            embedder=embedding_model,
+            judge=ModelEntailmentJudge(reasoning_model),
+        ),
     )
     next_state: dict[str, Any] = {
         **state,
@@ -363,12 +426,28 @@ def _generate(
 
 
 def _validate_and_assign_ids(state: TestScenarioState) -> TestScenarioState:
+    """Validate and assign ids against the enforced runtime contract.
+
+    Args:
+        state (TestScenarioState): State required by the operation's typed contract.
+
+    Returns:
+        TestScenarioState: The typed result produced by the operation.
+    """
     TestScenarioArtifact.model_validate(state["artifact_payload"])
     _scenario_records_from_state(state)
     return state
 
 
 def _finalize(state: TestScenarioState) -> TestScenarioState:
+    """Execute the finalize operation within its declared architectural boundary.
+
+    Args:
+        state (TestScenarioState): State required by the operation's typed contract.
+
+    Returns:
+        TestScenarioState: The typed result produced by the operation.
+    """
     artifact = TestScenarioArtifact.model_validate(state["artifact_payload"])
     if state.get("hfil_enabled"):
         scenarios = hfil_scenarios_from_state(dict(state))
@@ -402,6 +481,21 @@ def _persist(
     session: RunSession | None,
     settings: AppSettings,
 ) -> TestScenarioState:
+    """Persist persist through the owning storage boundary.
+
+    Args:
+        state (TestScenarioState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+        settings (AppSettings): Validated settings that control this operation.
+
+    Returns:
+        TestScenarioState: The typed result produced by the operation.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = TestScenarioRequest.model_validate(state["request"])
     _apply_overrides(settings, request)
     logger = session.logger if session is not None else None
@@ -480,6 +574,20 @@ def _run_pipeline(
     *,
     session: RunSession | None = None,
 ) -> TestScenarioState:
+    """Run pipeline.
+
+    Args:
+        state (TestScenarioState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        TestScenarioState: The typed result produced by the operation.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = TestScenarioRequest.model_validate(state["request"])
     settings = load_config()
     if session is not None:
@@ -492,6 +600,15 @@ def _run_pipeline(
     run_dir = session.run_dir if session is not None else None
 
     def pipeline() -> TestScenarioState:
+        """Run the workflow pipeline while preserving its persistence boundaries.
+
+        Returns:
+            TestScenarioState: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         _validate_required_test_scenario_stack(settings)
         if logger is not None:
             logger.info(
@@ -601,6 +718,10 @@ def _run_pipeline(
         build_result = _preserve_existing_scenario_ids(
             build_result,
             postgres.load_test_scenarios_for_generation(project=source.project),
+            StoryScenarioIdentityResolver(
+                embedder=embedding_model,
+                judge=ModelEntailmentJudge(reasoning_model),
+            ),
         )
         artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
             artifact=build_result,
@@ -658,7 +779,14 @@ def _run_pipeline(
         return result_payload
 
     try:
-        return pipeline()
+        if logger is None:
+            return pipeline()
+        with logger.span(
+            step="generate_test_scenarios",
+            operation="test_scenario.pipeline",
+            document_version_id=request.document_version_id,
+        ):
+            return pipeline()
     except Exception as exc:
         if logger is not None:
             logger.exception(
@@ -672,7 +800,7 @@ def _run_pipeline(
         _record_failed_run_safely(
             postgres=postgres,
             run_id=state["run_id"],
-            payload={"run_id": state["run_id"], "error": str(exc)},
+            payload={"run_id": state["run_id"], "error": sanitized_exception_summary(exc)},
             logger=logger,
         )
         raise
@@ -862,7 +990,7 @@ def _generate_from_context_map(
             record_failure(
                 progress,
                 input_id=story.story_id,
-                error=str(exc),
+                error=sanitized_exception_summary(exc),
                 requirement_id=story.requirement_id,
             )
             write_generation_progress(out_dir, progress)
@@ -874,7 +1002,7 @@ def _generate_from_context_map(
                     "input_id": story.story_id,
                     "requirement_id": story.requirement_id,
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": sanitized_exception_summary(exc),
                 },
             )
             raise
@@ -894,6 +1022,19 @@ def _generate_from_context_map(
 
 
 def _scenarios_from_payload(payload: dict[str, Any], story_id: str) -> list[TestScenarioModel]:
+    """Execute the scenarios from payload operation within its declared architectural boundary.
+
+    Args:
+        payload (dict[str, Any]): Validated structured data for the operation.
+        story_id (str): Canonical story id used as a safe operational anchor.
+
+    Returns:
+        list[TestScenarioModel]: The typed result produced by the operation.
+
+    Raises:
+        CheckpointError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     raw = payload.get("test_scenarios")
     if not isinstance(raw, list):
         raise CheckpointError(f"progress payload for {story_id} is missing test_scenarios")
@@ -907,6 +1048,19 @@ def run_test_scenario_generation(
     request: TestScenarioRequest,
     session: RunSession | None = None,
 ) -> TestScenarioResult:
+    """Run test scenario generation.
+
+    Args:
+        request (TestScenarioRequest): Request required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        TestScenarioResult: The typed result produced by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     if session is None:
         project, version = resolve_test_scenario_identity(request)
         with command_session(
@@ -940,6 +1094,14 @@ def run_test_scenario_generation(
 
 
 def _result_from_state(final_state: dict[str, Any]) -> TestScenarioResult:
+    """Execute the result from state operation within its declared architectural boundary.
+
+    Args:
+        final_state (dict[str, Any]): Final state required by the operation's typed contract.
+
+    Returns:
+        TestScenarioResult: The typed result produced by the operation.
+    """
     return TestScenarioResult(
         run_id=final_state["run_id"],
         status="completed",
@@ -965,6 +1127,18 @@ def _invoke_hfil_graph(
     initial_state: dict[str, Any],
     feedback_io: FeedbackIO,
 ) -> dict[str, Any]:
+    """Execute the invoke hfil graph operation within its declared architectural boundary.
+
+    Args:
+        request (TestScenarioRequest): Request required by the operation's typed contract.
+        session (RunSession): Optional command session that owns run artifacts and diagnostics.
+        settings (AppSettings): Validated settings that control this operation.
+        initial_state (dict[str, Any]): Initial state required by the operation's typed contract.
+        feedback_io (FeedbackIO): Feedback io required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     runtime = _build_hfil_runtime(settings, session)
     thread_id = request.thread_id or f"{session.run_id}:hfil"
     config = {"configurable": {"thread_id": thread_id}}
@@ -997,6 +1171,15 @@ def _invoke_hfil_graph(
 
 
 def _build_hfil_runtime(settings: AppSettings, session: RunSession) -> HFILRuntime:
+    """Build hfil runtime.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        session (RunSession): Optional command session that owns run artifacts and diagnostics.
+
+    Returns:
+        HFILRuntime: The typed result produced by the operation.
+    """
     reasoning_model = create_reasoning_model(
         settings,
         logger=session.logger,
@@ -1031,6 +1214,20 @@ def _drive_hfil_interrupts(
     config: dict[str, Any],
     feedback_io: FeedbackIO,
 ) -> dict[str, Any]:
+    """Execute the drive hfil interrupts operation within its declared architectural boundary.
+
+    Args:
+        graph (Any): Graph required by the operation's typed contract.
+        initial_state (dict[str, Any]): Initial state required by the operation's typed contract.
+        config (dict[str, Any]): Validated settings that control this operation.
+        feedback_io (FeedbackIO): Feedback io required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     state = graph.invoke(initial_state, config=config)
     while "__interrupt__" in state:
         payload = state["__interrupt__"][0].value
@@ -1041,6 +1238,12 @@ def _drive_hfil_interrupts(
 
 
 def _render_hfil_payload(payload: object, feedback_io: FeedbackIO) -> None:
+    """Render hfil payload.
+
+    Args:
+        payload (object): Validated structured data for the operation.
+        feedback_io (FeedbackIO): Feedback io required by the operation's typed contract.
+    """
     if not isinstance(payload, dict):
         feedback_io.show(str(payload))
         return
@@ -1056,6 +1259,14 @@ def _render_hfil_payload(payload: object, feedback_io: FeedbackIO) -> None:
 
 
 def _checkpoint_dsn(settings: AppSettings) -> str:
+    """Execute the checkpoint dsn operation within its declared architectural boundary.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     dsn = settings.postgres.dsn
     scheme, separator, remainder = dsn.partition("://")
     if separator and "+" in scheme:
@@ -1080,6 +1291,12 @@ def resolve_test_scenario_identity(request: TestScenarioRequest) -> tuple[str, s
 
 
 def _apply_overrides(settings: AppSettings, request: TestScenarioRequest) -> None:
+    """Apply overrides.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        request (TestScenarioRequest): Request required by the operation's typed contract.
+    """
     if request.reasoning_provider:
         settings.reasoning_model.provider = request.reasoning_provider
     if request.embedding_provider:
@@ -1101,6 +1318,23 @@ def _load_story_source(
     postgres: PostgresStore,
     logger: Any | None,
 ) -> _StorySource:
+    """Load story source within the authorized project and version scope.
+
+    Args:
+        request (TestScenarioRequest): Request required by the operation's typed contract.
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        _StorySource: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     if request.user_stories_path is not None:
         if logger is not None:
             logger.info(
@@ -1156,6 +1390,20 @@ def _load_story_source_from_payload(
     payload: dict[str, Any],
     records: list[UserStoryRecord],
 ) -> _StorySource:
+    """Load story source from payload within the authorized project and version scope.
+
+    Args:
+        payload (dict[str, Any]): Validated structured data for the operation.
+        records (list[UserStoryRecord]): Ordered records processed without changing their
+                                         identities.
+
+    Returns:
+        _StorySource: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     artifact = UserStoryArtifact.model_validate(payload)
     if not records:
         raise ConfigurationError(
@@ -1178,7 +1426,32 @@ def _load_requirement_map(
     logger: Any | None,
     warnings: list[str],
 ) -> dict[str, RequirementInput]:
+    """Load requirement map within the authorized project and version scope.
+
+    Args:
+        request (TestScenarioRequest): Request required by the operation's typed contract.
+        source (_StorySource): Source required by the operation's typed contract.
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        warnings (list[str]): Warnings required by the operation's typed contract.
+
+    Returns:
+        dict[str, RequirementInput]: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
+
     def warn(message: str, **context: object) -> None:
+        """Execute the warn operation within its declared architectural boundary.
+
+        Args:
+            message (str): Message required by the operation's typed contract.
+            context (object): Context required by the operation's typed contract.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         warnings.append(message)
         if logger is not None:
             logger.warning(
@@ -1222,7 +1495,7 @@ def _load_requirement_map(
         except (ValidationError, KeyError, TypeError, ValueError, ConfigurationError) as exc:
             warn(
                 "postgres requirement artifact is unusable; proceeding without it",
-                error=str(exc),
+                error_summary=sanitized_exception_summary(exc),
                 source="postgres",
             )
 
@@ -1235,6 +1508,16 @@ def _try_load_requirement_source_local(
     source: _StorySource,
     warn: Any,
 ) -> RequirementSource | None:
+    """Try to load a version-authorized local requirement source.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+        source (_StorySource): Source required by the operation's typed contract.
+        warn (Any): Warn required by the operation's typed contract.
+
+    Returns:
+        RequirementSource | None: The typed result produced by the operation.
+    """
     try:
         requirement_source = load_requirement_source_local(path)
         _raise_on_document_version_mismatch(requirement_source, source)
@@ -1242,7 +1525,7 @@ def _try_load_requirement_source_local(
         warn(
             "sibling requirements.json is unusable; trying next requirement source",
             path=str(path),
-            error=str(exc),
+            error_summary=sanitized_exception_summary(exc),
             source="local_json",
         )
         return None
@@ -1253,6 +1536,17 @@ def _raise_on_document_version_mismatch(
     requirement_source: RequirementSource,
     source: _StorySource,
 ) -> None:
+    """Reject a story source that crosses its requirement-version boundary.
+
+    Args:
+        requirement_source (RequirementSource): Requirement source required by the operation's typed
+                                                contract.
+        source (_StorySource): Source required by the operation's typed contract.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     if requirement_source.document_version_id != source.document_version_id:
         raise ConfigurationError(
             "requirement artifact document_version_id "
@@ -1262,10 +1556,28 @@ def _raise_on_document_version_mismatch(
 
 
 def _requirements_by_id(source: RequirementSource) -> dict[str, RequirementInput]:
+    """Execute the requirements by id operation within its declared architectural boundary.
+
+    Args:
+        source (RequirementSource): Source required by the operation's typed contract.
+
+    Returns:
+        dict[str, RequirementInput]: The typed result produced by the operation.
+    """
     return {requirement.requirement_id: requirement for requirement in source.requirements}
 
 
 def _story_query_text(story: UserStoryRecord, requirement_text: str | None) -> str:
+    """Execute the story query text operation within its declared architectural boundary.
+
+    Args:
+        story (UserStoryRecord): Story required by the operation's typed contract.
+        requirement_text (str | None): Input text processed in memory and excluded from diagnostic
+                                       logs.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     parts = [story.title, story.user_story.i_want, story.user_story.so_that]
     parts.extend(story.acceptance_criteria)
     if requirement_text:
@@ -1274,6 +1586,15 @@ def _story_query_text(story: UserStoryRecord, requirement_text: str | None) -> s
 
 
 def _coverage_by_story(scenarios: list[TestScenarioRecord]) -> dict[str, list[str]]:
+    """Execute the coverage by story operation within its declared architectural boundary.
+
+    Args:
+        scenarios (list[TestScenarioRecord]): Ordered scenarios processed without changing their
+                                              identities.
+
+    Returns:
+        dict[str, list[str]]: The typed result produced by the operation.
+    """
     coverage: dict[str, list[str]] = {}
     for scenario in scenarios:
         coverage.setdefault(scenario.story_id, []).append(scenario.scenario_id)
@@ -1281,6 +1602,18 @@ def _coverage_by_story(scenarios: list[TestScenarioRecord]) -> dict[str, list[st
 
 
 def _scenario_records_from_state(state: TestScenarioState) -> dict[str, TestScenarioRecord]:
+    """Execute the scenario records from state operation within its declared architectural boundary.
+
+    Args:
+        state (TestScenarioState): State required by the operation's typed contract.
+
+    Returns:
+        dict[str, TestScenarioRecord]: The typed result produced by the operation.
+
+    Raises:
+        CheckpointError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     payloads = state.get("scenario_record_payloads", {})
     if not isinstance(payloads, dict):
         raise CheckpointError("scenario_record_payloads must be a JSON object")
@@ -1291,31 +1624,104 @@ def _scenario_records_from_state(state: TestScenarioState) -> dict[str, TestScen
     }
 
 
+def _scenario_identity_text(scenario: TestScenarioRecord) -> str:
+    """Content used for semantic identity recall/entailment (never the id)."""
+    parts = [
+        scenario.title,
+        scenario.scenario_type,
+        scenario.description,
+        *scenario.preconditions,
+        scenario.expected_result,
+    ]
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
+def _match_scenario_id(
+    scenario: TestScenarioRecord,
+    existing: list[TestScenarioRecord],
+    indices: list[int],
+    consumed: set[int],
+    resolver: StoryScenarioIdentityResolver | None,
+) -> str:
+    """Decide the stable scenario_id: exact-title, then semantic, else a fresh id."""
+    title = normalize_scenario_title(scenario.title)
+    for index in indices:
+        if index not in consumed and normalize_scenario_title(existing[index].title) == title:
+            consumed.add(index)
+            return existing[index].scenario_id
+    if resolver is not None:
+        pool = [
+            (existing[index].scenario_id, _scenario_identity_text(existing[index]))
+            for index in indices
+            if index not in consumed
+        ]
+        match_id = resolver.find_semantic_match(_scenario_identity_text(scenario), pool)
+        if match_id is not None:
+            for index in indices:
+                if index not in consumed and existing[index].scenario_id == match_id:
+                    consumed.add(index)
+                    break
+            return match_id
+    return scenario.scenario_id
+
+
 def _preserve_existing_scenario_ids(
     artifact: TestScenarioBuildResult,
     existing_scenarios: list[TestScenarioRecord],
+    resolver: StoryScenarioIdentityResolver | None = None,
 ) -> TestScenarioBuildResult:
-    existing_by_story: dict[str, list[TestScenarioRecord]] = {}
-    for scenario in existing_scenarios:
-        existing_by_story.setdefault(scenario.story_id, []).append(scenario)
-    for scenarios in existing_by_story.values():
-        scenarios.sort(key=lambda item: item.scenario_id)
+    """Preserve canonical scenario lineage by content, never by output ordinal.
+
+    A regenerated scenario reuses a prior ``scenario_id`` only when it is the same
+    logical scenario under the same parent story: first via an exact
+    normalized-title match (deterministic — the content key ``scenario_id`` is
+    derived from), then, when a resolver is supplied, via bounded embedding recall
+    plus strict bidirectional LLM entailment (the LLM proposes, Python decides).
+    New content mints a fresh id, so identity is stable across insertion, removal
+    and reordering and never assigned to unrelated content by position.
+
+    Lifecycle (decisions #5/#6): a prior scenario the regeneration no longer
+    produces is never dropped — it is carried forward with ``status='outdated'``
+    so its history is preserved and it is not left stale-active.
+
+    Args:
+        artifact (TestScenarioBuildResult): Artifact required by the operation's typed contract.
+        existing_scenarios (list[TestScenarioRecord]): Prior persisted scenarios for the project.
+        resolver (StoryScenarioIdentityResolver | None): Optional semantic identity resolver;
+            when absent only the deterministic exact-title fast path is used.
+
+    Returns:
+        TestScenarioBuildResult: The typed result produced by the operation.
+    """
+    existing = sorted(existing_scenarios, key=lambda item: item.scenario_id)
+    by_story: dict[str, list[int]] = {}
+    for index, scenario in enumerate(existing):
+        by_story.setdefault(scenario.story_id, []).append(index)
+    consumed: set[int] = set()
 
     rewritten: dict[str, TestScenarioRecord] = {}
-    ordinal_by_story: dict[str, int] = {}
+    active: list[TestScenarioRecord] = []
     for scenario in artifact.records.values():
-        ordinal = ordinal_by_story.get(scenario.story_id, 0)
-        ordinal_by_story[scenario.story_id] = ordinal + 1
-        prior = existing_by_story.get(scenario.story_id, [])
-        stable_scenario_id = (
-            prior[ordinal].scenario_id if ordinal < len(prior) else scenario.scenario_id
-        )
+        indices = by_story.get(scenario.story_id, [])
+        stable_scenario_id = _match_scenario_id(scenario, existing, indices, consumed, resolver)
         record = scenario.model_copy(update={"scenario_id": stable_scenario_id})
         rewritten[stable_scenario_id] = record
-    scenarios = list(rewritten.values())
+        active.append(record)
+
+    # Retire only priors whose parent story was actually part of this batch. A
+    # prior under a story absent from this run (resume / subset generation) is out
+    # of scope — "absent from this batch" is not "removed" — and is left untouched.
+    batch_stories = {record.story_id for record in active}
+    for index, prior in enumerate(existing):
+        if index in consumed or prior.scenario_id in rewritten:
+            continue
+        if prior.story_id not in batch_stories:
+            continue
+        rewritten[prior.scenario_id] = prior.model_copy(update={"status": "outdated"})
+
     artifact.records = rewritten
-    artifact.coverage = _coverage_by_story(scenarios)
-    artifact.requirement_coverage = _coverage_by_requirement(scenarios)
+    artifact.coverage = _coverage_by_story(active)
+    artifact.requirement_coverage = _coverage_by_requirement(active)
     artifact.artifact = project_test_scenario_artifact(
         project=artifact.artifact.project,
         document_id=artifact.artifact.document_id,
@@ -1327,6 +1733,15 @@ def _preserve_existing_scenario_ids(
 
 
 def _coverage_by_requirement(scenarios: list[TestScenarioRecord]) -> dict[str, list[str]]:
+    """Execute the coverage by requirement operation within its declared architectural boundary.
+
+    Args:
+        scenarios (list[TestScenarioRecord]): Ordered scenarios processed without changing their
+                                              identities.
+
+    Returns:
+        dict[str, list[str]]: The typed result produced by the operation.
+    """
     coverage: dict[str, list[str]] = {}
     for scenario in scenarios:
         coverage.setdefault(scenario.requirement_id, []).append(scenario.scenario_id)
@@ -1334,6 +1749,15 @@ def _coverage_by_requirement(scenarios: list[TestScenarioRecord]) -> dict[str, l
 
 
 def _write_test_scenario_markdown(artifact: TestScenarioBuildResult, path: Path) -> None:
+    """Write test scenario markdown through the owning storage boundary.
+
+    Args:
+        artifact (TestScenarioBuildResult): Artifact required by the operation's typed contract.
+        path (Path): Filesystem location authorized for this operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     lines = [
         f"# Test Scenarios - {artifact.artifact.project}",
         "",
@@ -1366,6 +1790,17 @@ def _output_dir(
     source: _StorySource,
     run_identifier: str,
 ) -> Path:
+    """Execute the output dir operation within its declared architectural boundary.
+
+    Args:
+        request (TestScenarioRequest): Request required by the operation's typed contract.
+        settings (AppSettings): Validated settings that control this operation.
+        source (_StorySource): Source required by the operation's typed contract.
+        run_identifier (str): Canonical run identifier used as a safe operational anchor.
+
+    Returns:
+        Path: The typed result produced by the operation.
+    """
     if request.user_stories_path is not None:
         return request.user_stories_path.parent
     return (
@@ -1377,6 +1812,15 @@ def _output_dir(
 
 
 def _validate_required_test_scenario_stack(settings: AppSettings) -> None:
+    """Validate required test scenario stack against the enforced runtime contract.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     if settings.reasoning_model.provider in {ProviderName.LOCAL_HEURISTIC.value}:
         raise ConfigurationError(
             f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} "
@@ -1399,12 +1843,31 @@ def _validate_required_test_scenario_stack(settings: AppSettings) -> None:
 
 
 def _apply_test_scenario_system_message(reasoning_model: Any) -> None:
+    """Apply test scenario system message.
+
+    Args:
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+    """
     setter = getattr(reasoning_model, "set_system_message", None)
     if callable(setter):
         setter(PromptTestScenarioGeneration.SYS_PROMPT_TEST_SCENARIO_GENERATION.value)
 
 
 def _check_store(logger: Any | None, step: str, check: Any) -> None:
+    """Check store.
+
+    Args:
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        step (str): Step required by the operation's typed contract.
+        check (Any): Check required by the operation's typed contract.
+
+    Raises:
+        StoreUnavailableError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     try:
         detail = check()
     except Exception as exc:
@@ -1414,6 +1877,14 @@ def _check_store(logger: Any | None, step: str, check: Any) -> None:
 
 
 def _warmup_reasoning_model(reasoning_model: Any) -> None:
+    """Warm up reasoning model.
+
+    Args:
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     warmup = getattr(reasoning_model, "warmup", None)
     if callable(warmup):
         warmup()
@@ -1426,6 +1897,18 @@ def _record_failed_run_safely(
     payload: dict[str, Any],
     logger: Any,
 ) -> None:
+    """Record failed run safely through the owning storage boundary.
+
+    Args:
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        payload (dict[str, Any]): Validated structured data for the operation.
+        logger (Any): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     try:
         postgres.record_run(run_id, "failed", payload)
     except Exception as record_error:
@@ -1436,6 +1919,6 @@ def _record_failed_run_safely(
                 step="record_failed_run",
                 run_id=run_id,
                 error_type=record_error.__class__.__name__,
-                error=str(record_error),
+                error_summary=sanitized_exception_summary(record_error),
                 status="warning",
             )

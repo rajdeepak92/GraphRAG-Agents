@@ -44,7 +44,7 @@ def build_user_story_artifact(
         story_id = user_story_id(
             project,
             requirement.requirement_id,
-            _normalize_title(story.title),
+            normalize_story_title(story.title),
             ordinal,
         )
         stories[story_id] = _to_record(
@@ -78,6 +78,20 @@ def project_user_story_artifact(
     records: dict[str, UserStoryRecord],
     **_legacy_aliases: object,
 ) -> UserStoryArtifact:
+    """Project user story artifact through the owning storage boundary.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        doc_version (str): Document version label within the project scope.
+        records (dict[str, UserStoryRecord]): Ordered records processed without changing their
+                                              identities.
+        _legacy_aliases (object): Legacy aliases required by the operation's typed contract.
+
+    Returns:
+        UserStoryArtifact: The typed result produced by the operation.
+    """
     projections: list[UserStoryProjection] = []
     traceability: list[UserStoryTraceability] = []
     for story_id, record in records.items():
@@ -129,6 +143,21 @@ def _to_record(
     story_id: str,
     trace: GenerationTrace | None = None,
 ) -> UserStoryRecord:
+    """Convert the value to record without mutating its source.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        doc_version (str): Document version label within the project scope.
+        requirement (RequirementInput): Requirement required by the operation's typed contract.
+        story (UserStoryModel): Story required by the operation's typed contract.
+        story_id (str): Canonical story id used as a safe operational anchor.
+        trace (GenerationTrace | None): Trace required by the operation's typed contract.
+
+    Returns:
+        UserStoryRecord: The typed result produced by the operation.
+    """
     trace = trace or GenerationTrace()
     return UserStoryRecord(
         story_id=story_id,
@@ -154,5 +183,16 @@ def _to_record(
     )
 
 
-def _normalize_title(title: str) -> str:
+def normalize_story_title(title: str) -> str:
+    """Normalize a story title deterministically for id derivation and identity.
+
+    This is the single content key used both to mint ``story_id`` and to match a
+    regenerated story to its prior lineage, so the two can never disagree.
+
+    Args:
+        title (str): Title required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return _WHITESPACE.sub(" ", title.strip().lower())

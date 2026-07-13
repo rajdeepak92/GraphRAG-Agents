@@ -6,6 +6,8 @@ from enum import StrEnum
 
 
 class EnvVar(StrEnum):
+    """Define canonical env var literals shared across runtime boundaries."""
+
     APP_ENV = "APP_ENV"
     AZURE_OPENAI_API_KEY = "AZURE_OPENAI_API_KEY"
     AZURE_OPENAI_API_VERSION = "AZURE_OPENAI_API_VERSION"
@@ -95,6 +97,8 @@ class EnvVar(StrEnum):
 
 
 class PathDef(StrEnum):
+    """Define canonical path def literals shared across runtime boundaries."""
+
     GLOBAL_CACHE_DIR = ".global_cache"
     DOCUMENTS_INBOX_DIR = "documents/inbox"
     GENERATED_REQUIREMENTS_DIR = "generated"
@@ -106,6 +110,8 @@ class PathDef(StrEnum):
 
 
 class ProviderName(StrEnum):
+    """Define canonical provider name literals shared across runtime boundaries."""
+
     AZURE_OPENAI = "azure_openai"
     HUGGINGFACE = "huggingface"
     LOCAL_HEURISTIC = "local_heuristic"
@@ -114,6 +120,8 @@ class ProviderName(StrEnum):
 
 
 class ModeName(StrEnum):
+    """Define canonical mode name literals shared across runtime boundaries."""
+
     POSTGRES = "postgres"
     NEO4J = "neo4j"
     LOCAL_JSON = "local_json"
@@ -121,6 +129,8 @@ class ModeName(StrEnum):
 
 
 class StatusName(StrEnum):
+    """Define canonical status name literals shared across runtime boundaries."""
+
     STARTED = "started"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -143,6 +153,8 @@ class StatusName(StrEnum):
 
 
 class IdentifierPrefix(StrEnum):
+    """Define canonical identifier prefix literals shared across runtime boundaries."""
+
     RUN = "RUN-"
     REQ = "REQ-"
     US = "US-"
@@ -163,6 +175,8 @@ class IdentifierPrefix(StrEnum):
 
 
 class ServiceName(StrEnum):
+    """Define canonical service name literals shared across runtime boundaries."""
+
     POSTGRES = "postgres"
     NEO4J = "neo4j"
     CHROMA = "chroma"
@@ -173,6 +187,8 @@ class ServiceName(StrEnum):
 
 
 class RuntimeCommand(StrEnum):
+    """Define canonical runtime command literals shared across runtime boundaries."""
+
     VERSION = "version"
     CONFIG_CHECK = "config-check"
     HF_CHECK = "hf-check"

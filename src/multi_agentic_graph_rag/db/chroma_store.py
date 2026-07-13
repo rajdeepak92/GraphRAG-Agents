@@ -10,17 +10,42 @@ from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel
 
 
 class ChromaStore:
+    """Coordinate chroma store behavior within the db boundary."""
+
     def __init__(self, settings: AppSettings) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (AppSettings): Validated settings that control this operation.
+        """
         self.settings = settings
         self.collection_name = settings.chroma.collection_name
 
     def check(self) -> str:
+        """Check check.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         self.settings.paths.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
         client = self._client()
         collection = client.get_or_create_collection(self.collection_name)
         return f"PASS chroma collection={collection.name}"
 
     def index_chunks(self, manifest: DocumentManifest, embedding_model: EmbeddingModel) -> None:
+        """Index chunks through the owning storage boundary.
+
+        Args:
+            manifest (DocumentManifest): Manifest required by the operation's typed contract.
+            embedding_model (EmbeddingModel): Provider-neutral model adapter used by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+            May invoke configured model or workflow providers.
+        """
         client = self._client()
         collection = client.get_or_create_collection(self.collection_name)
         ids = [chunk.chunk_id for chunk in manifest.chunks]
@@ -80,17 +105,38 @@ class ChromaStore:
         return matches
 
     def count_ids(self, ids: list[str]) -> int:
+        """Count ids.
+
+        Args:
+            ids (list[str]): Ids required by the operation's typed contract.
+
+        Returns:
+            int: The typed result produced by the operation.
+        """
         collection = self._client().get_or_create_collection(self.collection_name)
         result = collection.get(ids=ids)
         return len(result.get("ids", []))
 
     def _client(self) -> Any:
+        """Execute the client operation within its declared architectural boundary.
+
+        Returns:
+            Any: The typed result produced by the operation.
+        """
         import chromadb
 
         return chromadb.PersistentClient(path=str(self.settings.paths.chroma_persist_dir))
 
 
 def _first_row(value: Any) -> list[Any]:
+    """Execute the first row operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+
+    Returns:
+        list[Any]: The typed result produced by the operation.
+    """
     if not value:
         return []
     first = value[0]

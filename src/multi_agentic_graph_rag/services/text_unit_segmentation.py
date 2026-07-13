@@ -123,6 +123,17 @@ def _trimmed_span(
     local_start: int,
     local_end: int,
 ) -> tuple[int, int]:
+    """Execute the trimmed span operation within its declared architectural boundary.
+
+    Args:
+        line_text (str): Input text processed in memory and excluded from diagnostic logs.
+        line_offset (int): Line offset required by the operation's typed contract.
+        local_start (int): Local start required by the operation's typed contract.
+        local_end (int): Local end required by the operation's typed contract.
+
+    Returns:
+        tuple[int, int]: The typed result produced by the operation.
+    """
     segment = line_text[local_start:local_end]
     stripped = segment.strip()
     if not stripped:

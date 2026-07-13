@@ -1,7 +1,7 @@
 {
   "application": {
     "app_env": "development",
-    "log_level": "INFO"
+    "log_level": "DEBUG"
   },
   "paths": {
     "global_cache_dir": ".global_cache",

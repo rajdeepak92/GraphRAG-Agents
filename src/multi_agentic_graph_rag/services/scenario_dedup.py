@@ -22,10 +22,14 @@ from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel, ReasoningMo
 
 @dataclass(frozen=True)
 class DedupConfig:
+    """Coordinate dedup config behavior within the services boundary."""
+
     recall_cosine: float = 0.55
 
 
 class DedupEngine:
+    """Coordinate dedup engine behavior within the services boundary."""
+
     def __init__(
         self,
         embedder: EmbeddingModel,
@@ -33,6 +37,14 @@ class DedupEngine:
         reasoner: ReasoningModel,
         cfg: DedupConfig,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            embedder (EmbeddingModel): Provider-neutral model adapter used by the operation.
+            reranker (RerankerModel | None): Provider-neutral model adapter used by the operation.
+            reasoner (ReasoningModel): Provider-neutral model adapter used by the operation.
+            cfg (DedupConfig): Cfg required by the operation's typed contract.
+        """
         self.embedder = embedder
         self.reranker = reranker
         self.reasoner = reasoner
@@ -40,10 +52,33 @@ class DedupEngine:
         self._canonical_cache: dict[str, CanonicalScenario] = {}
 
     def canonicalize(self, scenario_text: str) -> CanonicalScenario:
+        """Execute the canonicalize operation within its declared architectural boundary.
+
+        Args:
+            scenario_text (str): Input text processed in memory and excluded from diagnostic logs.
+
+        Returns:
+            CanonicalScenario: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         prompt = f"{SCENARIO_CANONICALIZATION_PROMPT}\n\nScenario:\n{scenario_text.strip()}\n"
         return self.reasoner.generate_structured(prompt=prompt, schema=CanonicalScenario)
 
     def candidate_pairs(self, scenarios: list[TestScenarioRecord]) -> list[DuplicateCandidate]:
+        """Execute the candidate pairs operation within its declared architectural boundary.
+
+        Args:
+            scenarios (list[TestScenarioRecord]): Ordered scenarios processed without changing their
+                                                  identities.
+
+        Returns:
+            list[DuplicateCandidate]: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         if len(scenarios) < 2:
             return []
         canonical = [self._canonical_for(record) for record in scenarios]
@@ -67,6 +102,15 @@ class DedupEngine:
         left: TestScenarioRecord,
         right: TestScenarioRecord,
     ) -> bool:
+        """Verify duplicate against the enforced runtime contract.
+
+        Args:
+            left (TestScenarioRecord): Left required by the operation's typed contract.
+            right (TestScenarioRecord): Right required by the operation's typed contract.
+
+        Returns:
+            bool: The typed result produced by the operation.
+        """
         left_canonical = self._canonical_for(left)
         right_canonical = self._canonical_for(right)
         first = self._judge(left_canonical, right_canonical)
@@ -84,18 +128,41 @@ class DedupEngine:
         self,
         scenarios: list[TestScenarioRecord],
     ) -> list[DuplicateGroup]:
+        """Find duplicates.
+
+        Args:
+            scenarios (list[TestScenarioRecord]): Ordered scenarios processed without changing their
+                                                  identities.
+
+        Returns:
+            list[DuplicateGroup]: The typed result produced by the operation.
+        """
         by_id = {scenario.scenario_id: scenario for scenario in scenarios}
         parent: dict[str, str] = {
             scenario.scenario_id: scenario.scenario_id for scenario in scenarios
         }
 
         def find(item: str) -> str:
+            """Find find.
+
+            Args:
+                item (str): Item required by the operation's typed contract.
+
+            Returns:
+                str: The typed result produced by the operation.
+            """
             while parent[item] != item:
                 parent[item] = parent[parent[item]]
                 item = parent[item]
             return item
 
         def union(left: str, right: str) -> None:
+            """Execute the union operation within its declared architectural boundary.
+
+            Args:
+                left (str): Left required by the operation's typed contract.
+                right (str): Right required by the operation's typed contract.
+            """
             left_root = find(left)
             right_root = find(right)
             if left_root != right_root:
@@ -140,6 +207,14 @@ class DedupEngine:
         return groups
 
     def _canonical_for(self, scenario: TestScenarioRecord) -> CanonicalScenario:
+        """Execute the canonical for operation within its declared architectural boundary.
+
+        Args:
+            scenario (TestScenarioRecord): Scenario required by the operation's typed contract.
+
+        Returns:
+            CanonicalScenario: The typed result produced by the operation.
+        """
         cached = self._canonical_cache.get(scenario.scenario_id)
         if cached is not None:
             return cached
@@ -152,6 +227,18 @@ class DedupEngine:
         left: CanonicalScenario,
         right: CanonicalScenario,
     ) -> DuplicateJudgeResult:
+        """Execute the judge operation within its declared architectural boundary.
+
+        Args:
+            left (CanonicalScenario): Left required by the operation's typed contract.
+            right (CanonicalScenario): Right required by the operation's typed contract.
+
+        Returns:
+            DuplicateJudgeResult: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         prompt = (
             f"{DUPLICATE_JUDGE_PROMPT}\n\n"
             "Use deterministic judging. Temperature must be 0.0.\n\n"
@@ -165,6 +252,20 @@ class DedupEngine:
         candidates: list[DuplicateCandidate],
         scenarios: list[TestScenarioRecord],
     ) -> list[DuplicateCandidate]:
+        """Execute the rerank candidates operation within its declared architectural boundary.
+
+        Args:
+            candidates (list[DuplicateCandidate]): Candidates required by the operation's typed
+                                                   contract.
+            scenarios (list[TestScenarioRecord]): Ordered scenarios processed without changing their
+                                                  identities.
+
+        Returns:
+            list[DuplicateCandidate]: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         if self.reranker is None or len(candidates) < 2:
             return candidates
         by_id = {scenario.scenario_id: scenario for scenario in scenarios}
@@ -178,6 +279,14 @@ class DedupEngine:
 
 
 def _scenario_text(scenario: TestScenarioRecord) -> str:
+    """Execute the scenario text operation within its declared architectural boundary.
+
+    Args:
+        scenario (TestScenarioRecord): Scenario required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     preconditions = "; ".join(scenario.preconditions)
     return (
         f"{scenario.title}\n"
@@ -189,6 +298,15 @@ def _scenario_text(scenario: TestScenarioRecord) -> str:
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
+    """Execute the cosine operation within its declared architectural boundary.
+
+    Args:
+        left (list[float]): Left required by the operation's typed contract.
+        right (list[float]): Right required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     numerator = sum(a * b for a, b in zip(left, right, strict=True))
     left_norm = math.sqrt(sum(value * value for value in left))
     right_norm = math.sqrt(sum(value * value for value in right))

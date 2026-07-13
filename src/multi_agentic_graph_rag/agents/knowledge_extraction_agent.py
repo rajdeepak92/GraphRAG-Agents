@@ -37,6 +37,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     SourceTrace,
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 from multi_agentic_graph_rag.services.ontology import (
     normalize_entity_name,
     normalize_entity_type,
@@ -46,18 +47,28 @@ from multi_agentic_graph_rag.services.ontology import (
 
 @dataclass(frozen=True)
 class _NormalizedChunk:
+    """Coordinate normalized chunk behavior within the agents boundary."""
+
     chunk: DocumentChunk
     text: str
     char_map: list[int]
 
 
 class KnowledgeExtractionAgent:
+    """Coordinate knowledge extraction agent behavior within the agents boundary."""
+
     def __init__(
         self,
         reasoning_model: ReasoningModel,
         *,
         logger: Any | None = None,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
+            logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        """
         self.reasoning_model = reasoning_model
         self.logger = logger
 
@@ -68,6 +79,16 @@ class KnowledgeExtractionAgent:
         version: str,
         chunks: list[DocumentChunk],
     ) -> KnowledgeExtractionOutput:
+        """Run run.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            version (str): Document version label within the project scope.
+            chunks (list[DocumentChunk]): Ordered chunks whose identities remain unchanged.
+
+        Returns:
+            KnowledgeExtractionOutput: The typed result produced by the operation.
+        """
         outputs: list[ChunkKnowledgeCandidates] = []
         for chunk_index, chunk in enumerate(chunks, start=1):
             outputs.append(
@@ -88,11 +109,40 @@ class KnowledgeExtractionAgent:
         chunk: DocumentChunk,
         chunk_index: int,
     ) -> ChunkKnowledgeCandidates:
+        """Run chunk.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            version (str): Document version label within the project scope.
+            chunk (DocumentChunk): Chunk required by the operation's typed contract.
+            chunk_index (int): Chunk index required by the operation's typed contract.
+
+        Returns:
+            ChunkKnowledgeCandidates: The typed result produced by the operation.
+
+        Raises:
+            ModelOutputError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         normalized_text, char_map = _normalize_for_prompt(chunk.text)
         context = _NormalizedChunk(chunk=chunk, text=normalized_text, char_map=char_map)
         validation_error: str | None = None
         try:
             for attempt in (1, 2):
+                if self.logger is not None:
+                    self.logger.debug(
+                        "retry.attempt_started",
+                        step="extract_knowledge.chunk",
+                        operation="knowledge_extraction.chunk",
+                        chunk_id=chunk.chunk_id,
+                        attempt=attempt,
+                        max_attempts=2,
+                        status="attempting",
+                    )
                 prompt = _build_knowledge_prompt(
                     project=project,
                     version=version,
@@ -127,7 +177,8 @@ class KnowledgeExtractionAgent:
                     if attempt == 2:
                         raise ModelOutputError(
                             f"Knowledge extraction chunk {chunk_index} failed validation "
-                            f"after retry for {chunk.chunk_id}: {error}; "
+                            f"after retry for {chunk.chunk_id}: "
+                            f"{sanitized_exception_summary(error)}; "
                             f"raw_response_path={response_path}"
                         ) from error
                     validation_error = str(error)
@@ -157,6 +208,19 @@ class KnowledgeExtractionAgent:
         retry_count: int,
         response_path: str | None,
     ) -> None:
+        """Execute the log chunk completed operation within its declared architectural boundary.
+
+        Args:
+            chunk_index (int): Chunk index required by the operation's typed contract.
+            chunk_id (str): Canonical chunk id used as a safe operational anchor.
+            entity_count (int): Bounded entity count used for deterministic processing.
+            assertion_count (int): Bounded assertion count used for deterministic processing.
+            retry_count (int): Bounded retry count used for deterministic processing.
+            response_path (str | None): Filesystem location authorized for this operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.info(
@@ -180,6 +244,19 @@ class KnowledgeExtractionAgent:
         error: TraceValidationError,
         response_path: str | None,
     ) -> None:
+        """Execute the log validation failure operation within its declared architectural boundary.
+
+        Args:
+            chunk_index (int): Chunk index required by the operation's typed contract.
+            chunk_id (str): Canonical chunk id used as a safe operational anchor.
+            attempt (int): Bounded attempt used for deterministic processing.
+            error (TraceValidationError): Failure being classified or converted without exposing its
+                                          message.
+            response_path (str | None): Filesystem location authorized for this operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.warning(
@@ -188,8 +265,10 @@ class KnowledgeExtractionAgent:
             chunk_index=chunk_index,
             chunk_id=chunk_id,
             attempt=attempt,
-            retry_count=attempt - 1,
-            error=str(error),
+            max_attempts=2,
+            retry_delay_seconds=0.0,
+            exception_type=error.__class__.__name__,
+            error_summary=sanitized_exception_summary(error),
             raw_response_path=response_path,
             status="failed" if attempt == 2 else "retrying",
         )
@@ -202,6 +281,17 @@ def _build_knowledge_prompt(
     context: _NormalizedChunk,
     validation_error: str | None = None,
 ) -> str:
+    """Build knowledge prompt.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        version (str): Document version label within the project scope.
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        validation_error (str | None): Validation error required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     chunk_json = json.dumps(
         {
             "chunk_id": context.chunk.chunk_id,
@@ -235,6 +325,15 @@ def _validate_chunk_output(
     context: _NormalizedChunk,
     output: KnowledgeExtractionChunkOutput,
 ) -> ChunkKnowledgeCandidates:
+    """Validate chunk output against the enforced runtime contract.
+
+    Args:
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        output (KnowledgeExtractionChunkOutput): Output required by the operation's typed contract.
+
+    Returns:
+        ChunkKnowledgeCandidates: The typed result produced by the operation.
+    """
     entities = _validate_entities(context, output)
     names = {entity.normalized_name for entity in entities}
     assertions = [
@@ -252,6 +351,19 @@ def _validate_entities(
     context: _NormalizedChunk,
     output: KnowledgeExtractionChunkOutput,
 ) -> list[EntityCandidate]:
+    """Validate entities against the enforced runtime contract.
+
+    Args:
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        output (KnowledgeExtractionChunkOutput): Output required by the operation's typed contract.
+
+    Returns:
+        list[EntityCandidate]: The typed result produced by the operation.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     haystack = context.text.casefold()
     entities: list[EntityCandidate] = []
     seen: set[tuple[str, str]] = set()
@@ -285,6 +397,21 @@ def _validate_assertion(
     entity_names: set[str],
     assertion_index: int,
 ) -> AssertionCandidate:
+    """Validate assertion against the enforced runtime contract.
+
+    Args:
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        assertion (LLMExtractedAssertion): Assertion required by the operation's typed contract.
+        entity_names (set[str]): Entity names required by the operation's typed contract.
+        assertion_index (int): Assertion index required by the operation's typed contract.
+
+    Returns:
+        AssertionCandidate: The typed result produced by the operation.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     label = f"assertion {assertion_index}"
     subject_name = normalize_entity_name(assertion.subject)
     if subject_name not in entity_names:
@@ -337,6 +464,20 @@ def _source_trace_from_quote(
     quote: str,
     label: str,
 ) -> SourceTrace:
+    """Execute the source trace from quote operation within its declared architectural boundary.
+
+    Args:
+        context (_NormalizedChunk): Context required by the operation's typed contract.
+        quote (str): Quote required by the operation's typed contract.
+        label (str): Label required by the operation's typed contract.
+
+    Returns:
+        SourceTrace: The typed result produced by the operation.
+
+    Raises:
+        TraceValidationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     normalized_quote, _ = _normalize_for_prompt(quote)
     if not normalized_quote:
         raise TraceValidationError(f"empty source quote for {label}")

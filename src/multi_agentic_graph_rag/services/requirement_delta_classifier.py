@@ -17,16 +17,27 @@ from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel, ReasoningMo
 
 @dataclass(frozen=True)
 class RequirementDeltaConfig:
+    """Coordinate requirement delta config behavior within the services boundary."""
+
     contradiction_gate_cosine: float = 0.60
 
 
 class RequirementDeltaClassifier:
+    """Coordinate requirement delta classifier behavior within the services boundary."""
+
     def __init__(
         self,
         embedder: EmbeddingModel,
         reasoner: ReasoningModel,
         cfg: RequirementDeltaConfig,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            embedder (EmbeddingModel): Provider-neutral model adapter used by the operation.
+            reasoner (ReasoningModel): Provider-neutral model adapter used by the operation.
+            cfg (RequirementDeltaConfig): Cfg required by the operation's typed contract.
+        """
         self.embedder = embedder
         self.reasoner = reasoner
         self.cfg = cfg
@@ -36,6 +47,19 @@ class RequirementDeltaClassifier:
         prior: RequirementRevisionSnapshot | None,
         incoming: VerifiedRequirement,
     ) -> RequirementDeltaDecision:
+        """Classify classify.
+
+        Args:
+            prior (RequirementRevisionSnapshot | None): Prior required by the operation's typed
+                                                        contract.
+            incoming (VerifiedRequirement): Incoming required by the operation's typed contract.
+
+        Returns:
+            RequirementDeltaDecision: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         if prior is None:
             return _decision(incoming, "new", reason="no prior active lineage match")
         if prior.revision_id == incoming.revision_id:
@@ -76,6 +100,15 @@ class RequirementDeltaClassifier:
         "strictly_outdated",
         "unchanged",
     ]:
+        """Execute the map event operation within its declared architectural boundary.
+
+        Args:
+            event (RequirementDeltaEvent): Event required by the operation's typed contract.
+
+        Returns:
+            Literal['new', 'updated', 'strictly_outdated', 'unchanged']: The typed result produced
+            by the operation.
+        """
         if event.event_type == "new":
             return "new"
         if event.event_type == "duplicate":
@@ -94,6 +127,20 @@ def _decision(
     prior_revision_id: str | None = None,
     reason: str,
 ) -> RequirementDeltaDecision:
+    """Execute the decision operation within its declared architectural boundary.
+
+    Args:
+        incoming (VerifiedRequirement): Incoming required by the operation's typed contract.
+        label (Literal['new', 'updated', 'strictly_outdated', 'unchanged']): Label required by the
+                                                                             operation's typed
+                                                                             contract.
+        prior_revision_id (str | None): Canonical prior revision id used as a safe operational
+                                        anchor.
+        reason (str): Reason required by the operation's typed contract.
+
+    Returns:
+        RequirementDeltaDecision: The typed result produced by the operation.
+    """
     return RequirementDeltaDecision(
         requirement_id=incoming.requirement_id,
         revision_id=incoming.revision_id,
@@ -104,6 +151,18 @@ def _decision(
 
 
 def _looks_like_explicit_removal(prior: str, incoming: str) -> bool:
+    """Execute the looks like explicit removal operation within its declared architectural boundary.
+
+    Args:
+        prior (str): Prior required by the operation's typed contract.
+        incoming (str): Incoming required by the operation's typed contract.
+
+    Returns:
+        bool: The typed result produced by the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     prior_norm = prior.lower()
     incoming_norm = incoming.lower()
     removal_markers = (

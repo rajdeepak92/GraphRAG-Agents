@@ -41,7 +41,7 @@ def build_test_scenario_artifact(
         scenario_id = test_scenario_id(
             project,
             story.story_id,
-            _normalize_title(scenario.title),
+            normalize_scenario_title(scenario.title),
             ordinal,
         )
         scenarios[scenario_id] = _to_record(
@@ -81,6 +81,20 @@ def project_test_scenario_artifact(
     records: dict[str, TestScenarioRecord],
     **_legacy_aliases: object,
 ) -> TestScenarioArtifact:
+    """Project test scenario artifact through the owning storage boundary.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        doc_version (str): Document version label within the project scope.
+        records (dict[str, TestScenarioRecord]): Ordered records processed without changing their
+                                                 identities.
+        _legacy_aliases (object): Legacy aliases required by the operation's typed contract.
+
+    Returns:
+        TestScenarioArtifact: The typed result produced by the operation.
+    """
     projections: list[TestScenarioProjection] = []
     traceability: list[TestScenarioTraceability] = []
     for scenario_id, record in records.items():
@@ -135,6 +149,21 @@ def _to_record(
     scenario_id: str,
     trace: GenerationTrace | None = None,
 ) -> TestScenarioRecord:
+    """Convert the value to record without mutating its source.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        doc_version (str): Document version label within the project scope.
+        story (UserStoryRecord): Story required by the operation's typed contract.
+        scenario (TestScenarioModel): Scenario required by the operation's typed contract.
+        scenario_id (str): Canonical scenario id used as a safe operational anchor.
+        trace (GenerationTrace | None): Trace required by the operation's typed contract.
+
+    Returns:
+        TestScenarioRecord: The typed result produced by the operation.
+    """
     trace = trace or GenerationTrace()
     return TestScenarioRecord(
         scenario_id=scenario_id,
@@ -162,5 +191,16 @@ def _to_record(
     )
 
 
-def _normalize_title(title: str) -> str:
+def normalize_scenario_title(title: str) -> str:
+    """Normalize a scenario title deterministically for id derivation and identity.
+
+    This is the single content key used both to mint ``scenario_id`` and to match
+    a regenerated scenario to its prior lineage, so the two can never disagree.
+
+    Args:
+        title (str): Title required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return _WHITESPACE.sub(" ", title.strip().lower())

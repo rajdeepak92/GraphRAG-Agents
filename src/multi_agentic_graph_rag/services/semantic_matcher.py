@@ -9,7 +9,19 @@ from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel
 
 
 class SemanticMatcher:
+    """Coordinate semantic matcher behavior within the services boundary."""
+
     def __init__(self, embedder: EmbeddingModel, cos_floor: float, cos_ceil: float) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            embedder (EmbeddingModel): Provider-neutral model adapter used by the operation.
+            cos_floor (float): Cos floor required by the operation's typed contract.
+            cos_ceil (float): Cos ceil required by the operation's typed contract.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         if cos_ceil <= cos_floor:
             raise ValueError("cos_ceil must be greater than cos_floor")
         self.embedder = embedder
@@ -51,11 +63,27 @@ class SemanticMatcher:
         # usable cosine band into a calibrated percentage so the 60% / 5% business
         # thresholds behave as intended.
         # RECALIBRATE cos_floor / cos_ceil IF THE EMBEDDING PROVIDER OR MODEL CHANGES.
+        """Execute the calibrated match pct operation within its declared architectural boundary.
+
+        Args:
+            cosine (float): Cosine required by the operation's typed contract.
+
+        Returns:
+            float: The typed result produced by the operation.
+        """
         scaled = (cosine - self.cos_floor) / (self.cos_ceil - self.cos_floor)
         return max(0.0, min(1.0, scaled)) * 100.0
 
 
 def _story_text(story: UserStoryRecord) -> str:
+    """Execute the story text operation within its declared architectural boundary.
+
+    Args:
+        story (UserStoryRecord): Story required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     parts = [
         story.story_id,
         story.title,
@@ -69,6 +97,15 @@ def _story_text(story: UserStoryRecord) -> str:
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
+    """Execute the cosine operation within its declared architectural boundary.
+
+    Args:
+        left (list[float]): Left required by the operation's typed contract.
+        right (list[float]): Right required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     numerator = sum(a * b for a, b in zip(left, right, strict=True))
     left_norm = math.sqrt(sum(value * value for value in left))
     right_norm = math.sqrt(sum(value * value for value in right))

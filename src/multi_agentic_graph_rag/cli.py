@@ -77,6 +77,11 @@ console = Console()
 
 @app.command("version")
 def version_command() -> None:
+    """Print the installed package version within a run session.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -96,6 +101,14 @@ def version_command() -> None:
 def config_check(
     config: Annotated[Path | None, typer.Option("--config")] = None,
 ) -> None:
+    """Validate configuration precedence and report safe provider/store settings.
+
+    Args:
+        config (Path | None): Authorized input path for the command.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -153,6 +166,19 @@ def hf_check(
         ),
     ] = False,
 ) -> None:
+    """Check Hugging Face configuration and optionally construct configured models.
+
+    Args:
+        config (Path | None): Authorized input path for the command.
+        load_model (bool): Whether to construct model implementations in addition to checking
+                           configuration.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -239,6 +265,11 @@ def hf_check(
 
 @app.command("doctor")
 def doctor() -> None:
+    """Run configuration and dependency diagnostics without exposing settings values.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -259,6 +290,14 @@ def doctor() -> None:
 
 @app.command("db-check")
 def db_check() -> None:
+    """Validate configured store connectivity and schema readiness.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -411,6 +450,18 @@ def postgres_reset(
         ),
     ] = False,
 ) -> None:
+    """Reset an explicitly authorized local PostgreSQL application database.
+
+    Args:
+        yes (bool): Explicit safety authorization required for the destructive reset.
+        allow_nonlocal (bool): Explicit safety authorization required for the destructive reset.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -449,6 +500,28 @@ def ingest(
     embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
     json_output: Annotated[bool, typer.Option("--json-output")] = False,
 ) -> None:
+    """Run the ingestion-first document pipeline and emit its stable result contract.
+
+    Args:
+        project (str): Project scope for isolated persistence and retrieval.
+        document (Path): Authorized input path for the command.
+        version (str): Authorized document-version boundary or label.
+        logical_name (str | None): Stable logical document name used to preserve version
+                                   continuity.
+        replace_version (bool): Whether the existing immutable version may be replaced under
+                                current policy.
+        reasoning_provider (str | None): Optional provider override validated against the
+                                         existing provider contract.
+        embedding_provider (str | None): Optional provider override validated against the
+                                         existing provider contract.
+        json_output (bool): Whether stdout must contain only the machine-readable JSON result.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project=project,
         version=version,
@@ -524,6 +597,27 @@ def generate_user_stories(
     top_k: Annotated[int | None, typer.Option("--top-k")] = None,
     json_output: Annotated[bool, typer.Option("--json-output")] = False,
 ) -> None:
+    """Generate version-grounded user stories from canonical requirements.
+
+    Args:
+        requirements (Path | None): Authorized input path for the command.
+        project (str | None): Project scope for isolated persistence and retrieval.
+        document_version_id (str | None): Authorized document-version boundary or label.
+        reasoning_provider (str | None): Optional provider override validated against the
+                                         existing provider contract.
+        embedding_provider (str | None): Optional provider override validated against the
+                                         existing provider contract.
+        reranker_provider (str | None): Optional provider override validated against the
+                                        existing provider contract.
+        top_k (int | None): Optional bounded retrieval or display limit.
+        json_output (bool): Whether stdout must contain only the machine-readable JSON result.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     request = UserStoryRequest(
         requirements_path=requirements,
         project=project,
@@ -583,6 +677,21 @@ def build_knowledge_graph(
     reasoning_provider: Annotated[str | None, typer.Option("--reasoning-provider")] = None,
     json_output: Annotated[bool, typer.Option("--json-output")] = False,
 ) -> None:
+    """Rebuild the source-semantic knowledge graph for one document version.
+
+    Args:
+        project (str): Project scope for isolated persistence and retrieval.
+        document_version_id (str): Authorized document-version boundary or label.
+        reasoning_provider (str | None): Optional provider override validated against the
+                                         existing provider contract.
+        json_output (bool): Whether stdout must contain only the machine-readable JSON result.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     request = KnowledgeGraphRequest(
         project=project,
         document_version_id=document_version_id,
@@ -653,6 +762,31 @@ def generate_test_scenarios(
     ] = None,
     json_output: Annotated[bool, typer.Option("--json-output")] = False,
 ) -> None:
+    """Generate version-grounded test scenarios from canonical user stories.
+
+    Args:
+        user_stories (Path | None): Authorized input path for the command.
+        requirements (Path | None): Authorized input path for the command.
+        project (str | None): Project scope for isolated persistence and retrieval.
+        document_version_id (str | None): Authorized document-version boundary or label.
+        reasoning_provider (str | None): Optional provider override validated against the
+                                         existing provider contract.
+        embedding_provider (str | None): Optional provider override validated against the
+                                         existing provider contract.
+        reranker_provider (str | None): Optional provider override validated against the
+                                        existing provider contract.
+        top_k (int | None): Optional bounded retrieval or display limit.
+        hfil (bool | None): Optional test-scenario review or presentation behavior.
+        emit_md (bool): Optional test-scenario review or presentation behavior.
+        thread_id (str | None): Stable LangGraph thread identifier used only for HFIL resume.
+        json_output (bool): Whether stdout must contain only the machine-readable JSON result.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     request = TestScenarioRequest(
         user_stories_path=user_stories,
         requirements_path=requirements,
@@ -715,6 +849,17 @@ def generate_test_scenarios(
 
 @run_app.command("status")
 def run_status(run_id_value: Annotated[str, typer.Argument()]) -> None:
+    """Render persisted status records for a command run.
+
+    Args:
+        run_id_value (str): Typed run id value option for the command.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -761,6 +906,17 @@ def run_status(run_id_value: Annotated[str, typer.Argument()]) -> None:
 
 @run_app.command("resume")
 def run_resume(run_id_value: Annotated[str, typer.Argument()]) -> None:
+    """Resume a supported checkpointed run without changing its identity.
+
+    Args:
+        run_id_value (str): Typed run id value option for the command.
+
+    Raises:
+        typer.Exit: If validation or the requested command fails.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -975,6 +1131,14 @@ def _rebuild_identity_projections(
 
 @artifact_app.command("verify")
 def artifact_verify(path: Annotated[Path, typer.Argument()]) -> None:
+    """Validate a canonical requirement artifact and report its metadata.
+
+    Args:
+        path (Path): Authorized input path for the command.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -1000,6 +1164,14 @@ def artifact_verify(path: Annotated[Path, typer.Argument()]) -> None:
 
 @artifact_app.command("verify-user-stories")
 def artifact_verify_user_stories(path: Annotated[Path, typer.Argument()]) -> None:
+    """Validate a canonical user-story artifact and report its metadata.
+
+    Args:
+        path (Path): Authorized input path for the command.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -1025,6 +1197,14 @@ def artifact_verify_user_stories(path: Annotated[Path, typer.Argument()]) -> Non
 
 @artifact_app.command("verify-test-scenarios")
 def artifact_verify_test_scenarios(path: Annotated[Path, typer.Argument()]) -> None:
+    """Validate a canonical test-scenario artifact and report its metadata.
+
+    Args:
+        path (Path): Authorized input path for the command.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     with command_session(
         project="_system",
         version=__version__,
@@ -1052,6 +1232,15 @@ def artifact_verify_test_scenarios(path: Annotated[Path, typer.Argument()]) -> N
 
 
 def _render_kv(title: str, rows: list[tuple[str, str]]) -> None:
+    """Render safe key/value diagnostics as a Rich table.
+
+    Args:
+        title (str): Human-readable diagnostic label.
+        rows (list[tuple[str, str]]): Safe diagnostic rows to render without arbitrary payloads.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     table = Table(title=title)
     table.add_column("Key", style="bold")
     table.add_column("Value")
@@ -1061,6 +1250,16 @@ def _render_kv(title: str, rows: list[tuple[str, str]]) -> None:
 
 
 def _render_checks(title: str, rows: list[tuple[str, str, str]]) -> None:
+    """Render safe diagnostic check results and return aggregate success.
+
+    Args:
+        title (str): Human-readable diagnostic label.
+        rows (list[tuple[str, str, str]]): Safe diagnostic rows to render without arbitrary
+                                           payloads.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     table = Table(title=title)
     table.add_column("Check", style="bold")
     table.add_column("Status")
@@ -1074,10 +1273,30 @@ def _render_checks(title: str, rows: list[tuple[str, str, str]]) -> None:
 
 
 def _hf_offline_flag_status() -> str:
+    """Describe whether Hugging Face offline mode is configured.
+
+    Returns:
+        str: The safe diagnostic or command result.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     return ", ".join(f"{key}={os.environ.get(key, '<not set>')}" for key in HF_OFFLINE_FLAGS)
 
 
 def _dependency_status(module: str, *, required: bool) -> str:
+    """Report whether an optional Python dependency can be imported.
+
+    Args:
+        module (str): Typed module option for the command.
+        required (bool): Typed required option for the command.
+
+    Returns:
+        str: The safe diagnostic or command result.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     installed = find_spec(module) is not None
     if installed:
         return "PASS"
@@ -1085,6 +1304,18 @@ def _dependency_status(module: str, *, required: bool) -> str:
 
 
 def _hf_load_checks(reasoning_model: str, settings: Any) -> list[tuple[str, str, str]]:
+    """Construct configured Hugging Face models and return safe readiness checks.
+
+    Args:
+        reasoning_model (str): Typed reasoning model option for the command.
+        settings (Any): Typed settings option for the command.
+
+    Returns:
+        list[tuple[str, str, str]]: The safe diagnostic or command result.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     checks: list[tuple[str, str, str]] = []
     if reasoning_model:
         try:
@@ -1108,6 +1339,17 @@ def _hf_load_checks(reasoning_model: str, settings: Any) -> list[tuple[str, str,
 
 
 def _postgres_dsn_host(dsn: str) -> str:
+    """Extract only the hostname from a PostgreSQL DSN.
+
+    Args:
+        dsn (str): PostgreSQL DSN parsed in memory; credentials are never returned.
+
+    Returns:
+        str: The safe diagnostic or command result.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     normalized_dsn = dsn
     scheme, separator, remainder = normalized_dsn.partition("://")
     if separator and "+" in scheme:
@@ -1116,6 +1358,11 @@ def _postgres_dsn_host(dsn: str) -> str:
 
 
 def main() -> None:
+    """Run the Typer command-line application.
+
+    Side Effects:
+        Writes command diagnostics to stderr/run logs and results to stdout.
+    """
     app()
 
 

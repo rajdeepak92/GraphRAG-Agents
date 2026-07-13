@@ -17,6 +17,7 @@ from multi_agentic_graph_rag.llm_models.json_output import (
     parse_json_object,
     sanitized_output_preview,
 )
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -24,12 +25,16 @@ _DEFAULT_SYSTEM_MESSAGE = PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISC
 
 
 class _ChatCompletionRequest(TypedDict):
+    """Describe the chat completion request state exchanged between typed workflow nodes."""
+
     model: str
     messages: list[dict[str, str]]
     temperature: NotRequired[float]
 
 
 class AzureOpenAIReasoningModel:
+    """Coordinate azure open aireasoning model behavior within the llm_models boundary."""
+
     provider_name = "azure_openai"
 
     def __init__(
@@ -41,6 +46,15 @@ class AzureOpenAIReasoningModel:
         logger: Any | None = None,
         run_dir: Path | None = None,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (AzureOpenAISettings): Validated settings that control this operation.
+            discovery_batch_size (int): Bounded requirement-discovery batch size.
+            log_llm_responses (bool): Log llm responses required by the operation's typed contract.
+            logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+            run_dir (Path | None): Filesystem location authorized for this operation.
+        """
         self.settings = settings
         self.discovery_batch_size = discovery_batch_size
         self.log_llm_responses = log_llm_responses
@@ -58,6 +72,11 @@ class AzureOpenAIReasoningModel:
         self._omit_temperature = False
 
     def set_system_message(self, text: str) -> None:
+        """Execute the set system message operation within its declared architectural boundary.
+
+        Args:
+            text (str): Input text processed in memory and excluded from diagnostic logs.
+        """
         self._system_message = text
 
     def set_response_context(
@@ -67,6 +86,13 @@ class AzureOpenAIReasoningModel:
         attempt: int,
         chunk_ids: list[str],
     ) -> None:
+        """Execute the set response context operation within its declared architectural boundary.
+
+        Args:
+            batch_index (int): Batch index required by the operation's typed contract.
+            attempt (int): Bounded attempt used for deterministic processing.
+            chunk_ids (list[str]): Chunk ids required by the operation's typed contract.
+        """
         self._response_context = {
             "batch_index": batch_index,
             "validation_attempt": attempt,
@@ -75,9 +101,21 @@ class AzureOpenAIReasoningModel:
         self.last_response_path = None
 
     def clear_response_context(self) -> None:
+        """Clear safe response anchors after a provider call finishes."""
         self._response_context = {}
 
     def persist_last_response(self, *, filename: str | None = None) -> Path | None:
+        """Persist last response through the owning storage boundary.
+
+        Args:
+            filename (str | None): Filename required by the operation's typed contract.
+
+        Returns:
+            Path | None: The typed result produced by the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         if self.run_dir is None or self._last_completion is None:
             return None
         response_name = filename
@@ -94,6 +132,19 @@ class AzureOpenAIReasoningModel:
         return response_path
 
     def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        """Generate structured.
+
+        Args:
+            prompt (str): Prompt text passed only to the selected model provider and never logged.
+            schema (type[T]): Schema required by the operation's typed contract.
+
+        Returns:
+            T: The typed result produced by the operation.
+
+        Raises:
+            ModelOutputError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+        """
         self.last_response_path = None
         first_completion = self._generate_completion(prompt)
         try:
@@ -130,7 +181,8 @@ class AzureOpenAIReasoningModel:
             )
             raise ModelOutputError(
                 "Azure OpenAI model output could not be validated after retry: "
-                f"{retry_error}; preview={sanitized_output_preview(retry_completion)}"
+                f"{sanitized_exception_summary(retry_error)}; "
+                f"diagnostic={sanitized_output_preview(retry_completion)}"
             ) from retry_error
 
         self._record_response(
@@ -143,6 +195,17 @@ class AzureOpenAIReasoningModel:
         return parsed
 
     def _generate_completion(self, prompt: str) -> str:
+        """Generate completion.
+
+        Args:
+            prompt (str): Prompt text passed only to the selected model provider and never logged.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Raises:
+            RuntimeError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         if not all(
             [
                 self.settings.endpoint,
@@ -186,6 +249,15 @@ class AzureOpenAIReasoningModel:
         return cast(str, response.choices[0].message.content or "{}")
 
     def _parse_completion(self, completion: str, schema: type[T]) -> T:
+        """Parse completion.
+
+        Args:
+            completion (str): Completion required by the operation's typed contract.
+            schema (type[T]): Schema required by the operation's typed contract.
+
+        Returns:
+            T: The typed result produced by the operation.
+        """
         return schema.model_validate(parse_json_object(completion))
 
     def _record_response(
@@ -197,6 +269,19 @@ class AzureOpenAIReasoningModel:
         parse_failed: bool,
         error: Exception | None,
     ) -> None:
+        """Record response through the owning storage boundary.
+
+        Args:
+            prompt (str): Prompt text passed only to the selected model provider and never logged.
+            completion (str): Completion required by the operation's typed contract.
+            attempt (int): Bounded attempt used for deterministic processing.
+            parse_failed (bool): Parse failed required by the operation's typed contract.
+            error (Exception | None): Failure being classified or converted without exposing its
+                                      message.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         self._last_completion = completion
         self._last_prompt = prompt
         self._last_parse_attempt = attempt
@@ -213,18 +298,22 @@ class AzureOpenAIReasoningModel:
             return
 
         if parse_failed:
-            self.logger.info(
-                "Raw Azure OpenAI response failed structured parsing",
+            self.logger.warning(
+                "Azure OpenAI response failed structured parsing",
                 step="discover_requirements.llm_response",
+                operation="azure_openai.parse_structured",
                 attempt=attempt,
+                max_attempts=2,
+                retry_delay_seconds=0.0,
                 response_path=str(response_path) if response_path else None,
-                error=str(error) if error else None,
+                exception_type=error.__class__.__name__ if error else None,
+                error_summary=sanitized_exception_summary(error) if error else None,
                 raw_response=completion,
-                status="failed",
+                status="retrying" if attempt < 2 else "failed",
             )
         else:
             self.logger.info(
-                "Raw Azure OpenAI response captured",
+                "Azure OpenAI response diagnostic captured",
                 step="discover_requirements.llm_response",
                 attempt=attempt,
                 response_path=str(response_path) if response_path else None,
@@ -241,13 +330,31 @@ class AzureOpenAIReasoningModel:
 
 
 class AzureOpenAIEmbeddingModel:
+    """Coordinate azure open aiembedding model behavior within the llm_models boundary."""
+
     provider_name = "azure_openai"
 
     def __init__(self, settings: AzureOpenAISettings) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (AzureOpenAISettings): Validated settings that control this operation.
+        """
         self.settings = settings
         self.embedding_fingerprint = f"azure:{settings.embedding_deployment}"
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Execute the embed documents operation within its declared architectural boundary.
+
+        Args:
+            texts (list[str]): Texts required by the operation's typed contract.
+
+        Returns:
+            list[list[float]]: The typed result produced by the operation.
+
+        Raises:
+            RuntimeError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         if not all(
             [
                 self.settings.endpoint,
@@ -274,6 +381,16 @@ def _chat_completion_request(
     messages: list[dict[str, str]],
     temperature: float | None,
 ) -> _ChatCompletionRequest:
+    """Execute the chat completion request operation within its declared architectural boundary.
+
+    Args:
+        model (str): Provider-neutral model adapter used by the operation.
+        messages (list[dict[str, str]]): Messages required by the operation's typed contract.
+        temperature (float | None): Temperature required by the operation's typed contract.
+
+    Returns:
+        _ChatCompletionRequest: The typed result produced by the operation.
+    """
     request: _ChatCompletionRequest = {"model": model, "messages": messages}
     if temperature is not None:
         request["temperature"] = temperature
@@ -281,6 +398,14 @@ def _chat_completion_request(
 
 
 def _is_unsupported_temperature_error(error: Exception) -> bool:
+    """Return whether unsupported temperature error.
+
+    Args:
+        error (Exception): Failure being classified or converted without exposing its message.
+
+    Returns:
+        bool: The typed result produced by the operation.
+    """
     param = getattr(error, "param", None)
     code = getattr(error, "code", None)
     body = getattr(error, "body", None)
@@ -295,6 +420,15 @@ def _is_unsupported_temperature_error(error: Exception) -> bool:
 
 
 def _build_retry_prompt(prompt: str, error: Exception) -> str:
+    """Build retry prompt.
+
+    Args:
+        prompt (str): Prompt text passed only to the selected model provider and never logged.
+        error (Exception): Failure being classified or converted without exposing its message.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return (
         f"{prompt}\n\n"
         "The previous response failed validation. "
@@ -304,6 +438,14 @@ def _build_retry_prompt(prompt: str, error: Exception) -> str:
 
 
 def _extract_chunks(prompt: str) -> list[tuple[str, str]]:
+    """Extract chunks.
+
+    Args:
+        prompt (str): Prompt text passed only to the selected model provider and never logged.
+
+    Returns:
+        list[tuple[str, str]]: The typed result produced by the operation.
+    """
     matches = re.findall(r"<chunk id=\"([^\"]+)\">\n(.*?)\n</chunk>", prompt, flags=re.S)
     return [(chunk_id, text.strip()) for chunk_id, text in matches]
 
@@ -313,6 +455,16 @@ def _response_filename(
     attempt: int,
     context: dict[str, Any] | None = None,
 ) -> str:
+    """Execute the response filename operation within its declared architectural boundary.
+
+    Args:
+        prompt (str): Prompt text passed only to the selected model provider and never logged.
+        attempt (int): Bounded attempt used for deterministic processing.
+        context (dict[str, Any] | None): Context required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     if context:
         batch_index = context.get("batch_index")
         validation_attempt = context.get("validation_attempt")

@@ -17,7 +17,7 @@ from multi_agentic_graph_rag.db.chroma_store import ChromaStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.domain.schemas import AssertionContextItem, SemanticContext
 from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel, RerankerModel
-from multi_agentic_graph_rag.observability.logging import RunLogger
+from multi_agentic_graph_rag.observability.logging import RunLogger, sanitized_exception_summary
 from multi_agentic_graph_rag.services.knowledge_context import (
     assemble_semantic_context,
     config_for_stage,
@@ -44,12 +44,16 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class RetrievedChunk:
+    """Coordinate retrieved chunk behavior within the services boundary."""
+
     chunk_id: str
     text: str
 
 
 @dataclass
 class RetrievedContext:
+    """Coordinate retrieved context behavior within the services boundary."""
+
     chunks: list[RetrievedChunk] = field(default_factory=list)
     source: str = "hybrid"
     assertions: list[AssertionContextItem] = field(default_factory=list)
@@ -80,6 +84,8 @@ _SOURCE_KNOWLEDGE = SOURCE_KNOWLEDGE
 
 @dataclass(frozen=True)
 class _SelectedChunk:
+    """Coordinate selected chunk behavior within the services boundary."""
+
     chunk_id: str
     text: str
     source: str
@@ -88,11 +94,15 @@ class _SelectedChunk:
 
 @dataclass(frozen=True)
 class _Selection:
+    """Coordinate selection behavior within the services boundary."""
+
     items: list[_SelectedChunk]
     source: str
 
 
 class RetrievalService:
+    """Coordinate retrieval service behavior within the services boundary."""
+
     def __init__(
         self,
         *,
@@ -104,6 +114,18 @@ class RetrievalService:
         logger: RunLogger | None = None,
         knowledge: KnowledgeRetrievalConfig | None = None,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            chroma (ChromaStore): Chroma required by the operation's typed contract.
+            neo4j (Neo4jStore): Neo4j required by the operation's typed contract.
+            embedding_model (EmbeddingModel): Provider-neutral model adapter used by the operation.
+            reranker_model (RerankerModel | None): Optional provider-neutral reranker.
+            settings (UserStorySettings): Validated settings that control this operation.
+            logger (RunLogger | None): Optional logger for sanitized diagnostics.
+            knowledge (KnowledgeRetrievalConfig | None): Knowledge required by the operation's typed
+                                                         contract.
+        """
         self.chroma = chroma
         self.neo4j = neo4j
         self.embedding_model = embedding_model
@@ -120,6 +142,18 @@ class RetrievalService:
         evidence_chunk_ids: list[str],
         anchor_id: str = "",
     ) -> RetrievedContext:
+        """Execute the retrieve context operation within its declared architectural boundary.
+
+        Args:
+            requirement_text (str): Requirement query processed in memory and excluded from logs.
+            document_version_id (str): Immutable document-version retrieval boundary.
+            evidence_chunk_ids (list[str]): Evidence chunk ids required by the operation's typed
+                                            contract.
+            anchor_id (str): Canonical anchor id used as a safe operational anchor.
+
+        Returns:
+            RetrievedContext: The typed result produced by the operation.
+        """
         selection = self._retrieve(
             requirement_text=requirement_text,
             document_version_id=document_version_id,
@@ -210,6 +244,16 @@ class RetrievalService:
         mandatory_count = len(context.mandatory_anchor_ids)
 
         def _decide(status: str, reason: str, keep: bool) -> GraphPrimaryDecision:
+            """Decide decide.
+
+            Args:
+                status (str): Status required by the operation's typed contract.
+                reason (str): Reason required by the operation's typed contract.
+                keep (bool): Keep required by the operation's typed contract.
+
+            Returns:
+                GraphPrimaryDecision: The typed result produced by the operation.
+            """
             return GraphPrimaryDecision(
                 status=status,
                 reason=reason,
@@ -237,6 +281,18 @@ class RetrievalService:
         evidence_chunk_ids: list[str],
         anchor_id: str = "",
     ) -> _Selection:
+        """Execute the retrieve operation within its declared architectural boundary.
+
+        Args:
+            requirement_text (str): Requirement query processed in memory and excluded from logs.
+            document_version_id (str): Immutable document-version retrieval boundary.
+            evidence_chunk_ids (list[str]): Evidence chunk ids required by the operation's typed
+                                            contract.
+            anchor_id (str): Canonical anchor id used as a safe operational anchor.
+
+        Returns:
+            _Selection: The typed result produced by the operation.
+        """
         fused: dict[str, str] = {}
         source_by_id: dict[str, str] = {}
         score_by_id: dict[str, float | None] = {}
@@ -245,6 +301,17 @@ class RetrievalService:
         empty_scored: list[tuple[str, str, float]] = []
 
         def add(chunk_id: str, text: str, source: str, score: float | None) -> bool:
+            """Execute the add operation within its declared architectural boundary.
+
+            Args:
+                chunk_id (str): Canonical chunk id used as a safe operational anchor.
+                text (str): Input text processed in memory and excluded from diagnostic logs.
+                source (str): Source required by the operation's typed contract.
+                score (float | None): Score required by the operation's typed contract.
+
+            Returns:
+                bool: The typed result produced by the operation.
+            """
             if chunk_id in fused:
                 return False
             fused[chunk_id] = text
@@ -403,12 +470,36 @@ class RetrievalService:
         requirement_text: str,
         document_version_id: str,
     ) -> list[tuple[str, str, float]]:
+        """Execute the dense operation within its declared architectural boundary.
+
+        Args:
+            requirement_text (str): Requirement query processed in memory and excluded from logs.
+            document_version_id (str): Immutable document-version retrieval boundary.
+
+        Returns:
+            list[tuple[str, str, float]]: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         embeddings = self.embedding_model.embed_documents([requirement_text])
         if not embeddings:
             return []
         return self.chroma.query_chunks(embeddings[0], document_version_id, self.settings.dense_k)
 
     def _rerank_ids(self, query: str, fused: dict[str, str]) -> list[str]:
+        """Execute the rerank ids operation within its declared architectural boundary.
+
+        Args:
+            query (str): Input text processed in memory and excluded from diagnostic logs.
+            fused (dict[str, str]): Fused required by the operation's typed contract.
+
+        Returns:
+            list[str]: The typed result produced by the operation.
+
+        Side Effects:
+            May invoke configured model or workflow providers.
+        """
         ids = list(fused)
         texts = [fused[chunk_id] for chunk_id in ids]
         order = list(range(len(ids)))
@@ -427,6 +518,19 @@ class RetrievalService:
         return f"{stage}.retrieve"
 
     def _safe(self, operation: Callable[[], T], label: str, default: T) -> T:
+        """Execute the safe operation within its declared architectural boundary.
+
+        Args:
+            operation (Callable[[], T]): Operation required by the operation's typed contract.
+            label (str): Label required by the operation's typed contract.
+            default (T): Default required by the operation's typed contract.
+
+        Returns:
+            T: The typed result produced by the operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         try:
             return operation()
         except Exception as exc:
@@ -435,12 +539,22 @@ class RetrievalService:
                     "Hybrid retrieval step failed; continuing with partial context",
                     step=self._log_step,
                     retrieval_step=label,
-                    error=str(exc),
+                    exception_type=exc.__class__.__name__,
+                    error_summary=sanitized_exception_summary(exc),
                     status="degraded",
                 )
             return default
 
     def _log_fallback(self, document_version_id: str, *, source: str) -> None:
+        """Execute the log fallback operation within its declared architectural boundary.
+
+        Args:
+            document_version_id (str): Immutable document-version retrieval boundary.
+            source (str): Source required by the operation's typed contract.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         if self.logger is None:
             return
         self.logger.warning(

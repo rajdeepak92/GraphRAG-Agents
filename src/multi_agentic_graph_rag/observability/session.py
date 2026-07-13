@@ -13,14 +13,32 @@ from pathlib import Path
 from typing import Any
 
 from multi_agentic_graph_rag.common_defs import IdentifierPrefix, PathDef, RuntimeCommand
-from multi_agentic_graph_rag.observability.logging import RunLogger, session_slug
+from multi_agentic_graph_rag.observability.logging import (
+    RunLogger,
+    sanitized_exception_summary,
+    session_slug,
+)
 
 
 def _utc_stamp() -> str:
+    """Execute the utc stamp operation within its declared architectural boundary.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Execute the atomic write json operation within its declared architectural boundary.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+        payload (dict[str, Any]): Validated structured data for the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w",
@@ -37,6 +55,17 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _command_run_id(command: str) -> str:
+    """Execute the command run id operation within its declared architectural boundary.
+
+    Args:
+        command (str): Command required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     timestamp = _utc_stamp().replace("-", "")
     return f"{IdentifierPrefix.RUN.value}{timestamp}-{session_slug(command).upper()}"
 
@@ -70,6 +99,22 @@ class RunSession:
         command: str,
         run_id: str,
     ) -> RunSession:
+        """Execute the bootstrap operation within its declared architectural boundary.
+
+        Args:
+            project_root (Path | None): Filesystem location authorized for this operation.
+            project (str): Project scope that isolates persistence and retrieval.
+            version (str): Document version label within the project scope.
+            command (str): Command required by the operation's typed contract.
+            run_id (str): Canonical run id used as a safe operational anchor.
+
+        Returns:
+            RunSession: The typed result produced by the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         root = (project_root or Path(os.environ.get("PROJECT_ROOT", Path.cwd()))).resolve()
         project_name = project if project == "_system" else session_slug(project)
         version_name = session_slug(version)
@@ -95,6 +140,7 @@ class RunSession:
             run_id=run_id,
             project=project,
             version=version,
+            level=os.environ.get("LOG_LEVEL", "INFO"),
         ).bind(command=command)
         session = cls(
             project_root=root,
@@ -122,9 +168,25 @@ class RunSession:
         return session
 
     def set_log_level(self, level: str) -> None:
+        """Execute the set log level operation within its declared architectural boundary.
+
+        Args:
+            level (str): Level required by the operation's typed contract.
+        """
         self.logger.set_level(level)
 
     def write_artifact(self, payload: dict[str, Any]) -> Path:
+        """Write artifact through the owning storage boundary.
+
+        Args:
+            payload (dict[str, Any]): Validated structured data for the operation.
+
+        Returns:
+            Path: The typed result produced by the operation.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         self.artifact_payload = payload
         self.logger.debug(
             "Writing requirement artifact to {path}",
@@ -136,6 +198,15 @@ class RunSession:
         return self.req_path
 
     def write_session_summary(self, *, status: str, extra: dict[str, Any] | None = None) -> Path:
+        """Write session summary through the owning storage boundary.
+
+        Args:
+            status (str): Status required by the operation's typed contract.
+            extra (dict[str, Any] | None): Extra required by the operation's typed contract.
+
+        Returns:
+            Path: The typed result produced by the operation.
+        """
         if self.req_path.exists():
             return self.req_path
         payload: dict[str, Any] = {
@@ -162,6 +233,15 @@ class RunSession:
         error: BaseException,
         include_artifact: bool = True,
     ) -> Path:
+        """Write failure envelope through the owning storage boundary.
+
+        Args:
+            error (BaseException): Failure recorded without exposing its message.
+            include_artifact (bool): Whether include artifact is enabled for this operation.
+
+        Returns:
+            Path: The typed result produced by the operation.
+        """
         payload: dict[str, Any] = {
             "artifact_schema_version": "session-failure",
             "status": "failed",
@@ -172,7 +252,7 @@ class RunSession:
             "stamp": self.stamp,
             "error": {
                 "type": error.__class__.__name__,
-                "message": str(error),
+                "message": sanitized_exception_summary(error),
             },
             "request": self.request_payload,
             "metadata": self.metadata,
@@ -183,6 +263,7 @@ class RunSession:
         return self.req_path
 
     def close(self) -> None:
+        """Close close."""
         self.logger.close()
 
 
@@ -195,6 +276,21 @@ def command_session(
     run_id: str,
     project_root: Path | None = None,
 ) -> Iterator[RunSession]:
+    """Execute the command session operation within its declared architectural boundary.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        version (str): Document version label within the project scope.
+        command (str): Command required by the operation's typed contract.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        project_root (Path | None): Filesystem location authorized for this operation.
+
+    Yields:
+        Iterator[RunSession]: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     session = RunSession.bootstrap(
         project_root=project_root,
         project=project,
@@ -203,7 +299,8 @@ def command_session(
         run_id=run_id,
     )
     try:
-        yield session
+        with session.logger.span(step=command, operation=f"command.{command}"):
+            yield session
     except KeyboardInterrupt as exc:
         session.logger.exception(
             "Command {command} interrupted",
@@ -251,10 +348,27 @@ def command_session(
 
 
 def command_run_id(command: str) -> str:
+    """Execute the command run id operation within its declared architectural boundary.
+
+    Args:
+        command (str): Command required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return _command_run_id(command)
 
 
 def find_run_jsonl(project_root: Path, run_id: str) -> Path | None:
+    """Find run jsonl.
+
+    Args:
+        project_root (Path): Filesystem location authorized for this operation.
+        run_id (str): Canonical run id used as a safe operational anchor.
+
+    Returns:
+        Path | None: The typed result produced by the operation.
+    """
     generated_root = project_root / PathDef.GENERATED_REQUIREMENTS_DIR.value
     if generated_root.exists():
         matches = sorted(generated_root.glob(f"*/req/{run_id}/run.jsonl"))

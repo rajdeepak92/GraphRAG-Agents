@@ -235,10 +235,9 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn("CHUNK-1", message)
         self.assertIn("attempt=2", message)
-        self.assertIn("source_support", message)
-        self.assertIn("support_ratio", message)
-        self.assertIn("missing_tokens", message)
-        self.assertIn("siimcs", message)
+        self.assertIn("_SemanticValidationError: <message redacted", message)
+        self.assertNotIn("missing_tokens", message)
+        self.assertNotIn("siimcs", message)
         self.assertIn("llm_response_1_2.txt", message)
         self.assertEqual(reasoner.prompts, 2)
 

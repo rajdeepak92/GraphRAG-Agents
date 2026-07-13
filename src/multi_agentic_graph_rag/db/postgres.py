@@ -356,10 +356,26 @@ _EXPECTED_COLUMNS = {
 
 
 class PostgresStore:
+    """Coordinate postgres store behavior within the db boundary."""
+
     def __init__(self, settings: AppSettings) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (AppSettings): Validated settings that control this operation.
+        """
         self.settings = settings
 
     def check(self) -> str:
+        """Check check.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)
             return f"PASS postgres local_json path={self.settings.postgres.local_path}"
@@ -393,6 +409,11 @@ class PostgresStore:
                 )
 
     def ensure_schema(self) -> None:
+        """Ensure schema.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             return
         with self._connect() as connection:
@@ -909,6 +930,14 @@ class PostgresStore:
             connection.commit()
 
     def reset_schema(self) -> str:
+        """Execute the reset schema operation within its declared architectural boundary.
+
+        Returns:
+            str: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             if self.settings.postgres.local_path.exists():
                 self.settings.postgres.local_path.unlink()
@@ -921,6 +950,19 @@ class PostgresStore:
         return f"RESET postgres schema tables={len(_MANAGED_TABLES)}"
 
     def assert_version_allowed(self, manifest: DocumentManifest, replace_version: bool) -> None:
+        """Assert version allowed against the enforced runtime contract.
+
+        Args:
+            manifest (DocumentManifest): Manifest required by the operation's typed contract.
+            replace_version (bool): Replace version required by the operation's typed contract.
+
+        Raises:
+            VersionConflictError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             existing = self._local_document_versions()
             key = (manifest.document_id, manifest.version)
@@ -949,6 +991,18 @@ class PostgresStore:
         project: str,
         document_id: str,
     ) -> dict[str, RequirementRevisionSnapshot]:
+        """Load requirement revision snapshot within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_id (str): Canonical document id used as a safe operational anchor.
+
+        Returns:
+            dict[str, RequirementRevisionSnapshot]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             return self._local_requirement_revision_snapshot(project, document_id)
         with self._connect() as connection, connection.cursor() as cursor:
@@ -1012,6 +1066,14 @@ class PostgresStore:
         return snapshot
 
     def persist_manifest(self, manifest: DocumentManifest) -> None:
+        """Persist manifest through the owning storage boundary.
+
+        Args:
+            manifest (DocumentManifest): Manifest required by the operation's typed contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         manifest_payload = _manifest_reference_payload(manifest)
         if self.settings.postgres.mode == "local_json":
             self._upsert_local(
@@ -1043,6 +1105,19 @@ class PostgresStore:
     def persist_artifact(
         self, artifact: RequirementArtifact, artifact_path: str, run_id: str
     ) -> RequirementArtifact:
+        """Persist artifact through the owning storage boundary.
+
+        Args:
+            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+            artifact_path (str): Filesystem location authorized for this operation.
+            run_id (str): Canonical run id used as a safe operational anchor.
+
+        Returns:
+            RequirementArtifact: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         public_payload = build_canonical_requirements_artifact(artifact).model_dump(mode="json")
         if self.settings.postgres.mode == "local_json":
             self._upsert_local(
@@ -1100,6 +1175,23 @@ class PostgresStore:
         artifact_path: str | None = None,
         document_version_id: str | None = None,
     ) -> dict[str, Any] | None:
+        """Load requirement artifact payload within the authorized project and version scope.
+
+        Args:
+            artifact_path (str | None): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, Any] | None: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if artifact_path is None and document_version_id is None:
             raise ValueError("artifact_path or document_version_id is required")
         if self.settings.postgres.mode == "local_json":
@@ -1141,6 +1233,21 @@ class PostgresStore:
         artifact_path: str,
         run_id: str,
     ) -> UserStoryBuildResult:
+        """Persist user story artifact through the owning storage boundary.
+
+        Args:
+            artifact (UserStoryArtifact | UserStoryBuildResult): Artifact required by the
+                                                                 operation's
+                                                                 typed contract.
+            artifact_path (str): Filesystem location authorized for this operation.
+            run_id (str): Canonical run id used as a safe operational anchor.
+
+        Returns:
+            UserStoryBuildResult: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         result = _coerce_user_story_build_result(artifact)
         if self.settings.postgres.mode == "local_json":
             payload = result.artifact.model_dump(mode="json")
@@ -1190,6 +1297,23 @@ class PostgresStore:
         artifact_path: str | None = None,
         document_version_id: str | None = None,
     ) -> dict[str, Any] | None:
+        """Load user story artifact payload within the authorized project and version scope.
+
+        Args:
+            artifact_path (str | None): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, Any] | None: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if artifact_path is None and document_version_id is None:
             raise ValueError("artifact_path or document_version_id is required")
         if self.settings.postgres.mode == "local_json":
@@ -1224,6 +1348,16 @@ class PostgresStore:
     def _persist_user_stories_postgres(
         self, cursor: Any, artifact: UserStoryBuildResult, run_id: str
     ) -> None:
+        """Persist user stories postgres through the owning storage boundary.
+
+        Args:
+            cursor (Any): Cursor required by the operation's typed contract.
+            artifact (UserStoryBuildResult): Artifact required by the operation's typed contract.
+            run_id (str): Canonical run id used as a safe operational anchor.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         for story_id, record in artifact.records.items():
             cursor.execute(
                 """
@@ -1293,6 +1427,12 @@ class PostgresStore:
                 )
 
     def _persist_user_stories_local(self, artifact: UserStoryBuildResult, run_id: str) -> None:
+        """Persist user stories local through the owning storage boundary.
+
+        Args:
+            artifact (UserStoryBuildResult): Artifact required by the operation's typed contract.
+            run_id (str): Canonical run id used as a safe operational anchor.
+        """
         for story_id, record in artifact.records.items():
             self._upsert_local(
                 "user_story",
@@ -1342,6 +1482,18 @@ class PostgresStore:
         artifact_path: str | None,
         document_version_id: str | None,
     ) -> dict[str, Any] | None:
+        """Execute the local user story artifact payload operation within its declared architectural
+        boundary.
+
+        Args:
+            artifact_path (str | None): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, Any] | None: The typed result produced by the operation.
+        """
         rows = [row for row in self._read_local_rows() if row.get("kind") == "user_story_artifact"]
         if artifact_path is not None:
             for row in reversed(rows):
@@ -1361,6 +1513,20 @@ class PostgresStore:
         artifact_path: str,
         run_id: str,
     ) -> TestScenarioBuildResult:
+        """Persist test scenario artifact through the owning storage boundary.
+
+        Args:
+            artifact (TestScenarioArtifact | TestScenarioBuildResult): Artifact required by the
+                                                                       operation's typed contract.
+            artifact_path (str): Filesystem location authorized for this operation.
+            run_id (str): Canonical run id used as a safe operational anchor.
+
+        Returns:
+            TestScenarioBuildResult: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         result = _coerce_test_scenario_build_result(artifact)
         if self.settings.postgres.mode == "local_json":
             payload = result.artifact.model_dump(mode="json")
@@ -1410,6 +1576,23 @@ class PostgresStore:
         artifact_path: str | None = None,
         document_version_id: str | None = None,
     ) -> dict[str, Any] | None:
+        """Load test scenario artifact payload within the authorized project and version scope.
+
+        Args:
+            artifact_path (str | None): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, Any] | None: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if artifact_path is None and document_version_id is None:
             raise ValueError("artifact_path or document_version_id is required")
         if self.settings.postgres.mode == "local_json":
@@ -1447,6 +1630,16 @@ class PostgresStore:
         artifact: TestScenarioBuildResult,
         run_id: str,
     ) -> None:
+        """Persist test scenarios postgres through the owning storage boundary.
+
+        Args:
+            cursor (Any): Cursor required by the operation's typed contract.
+            artifact (TestScenarioBuildResult): Artifact required by the operation's typed contract.
+            run_id (str): Canonical run id used as a safe operational anchor.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         for scenario_id, record in artifact.records.items():
             cursor.execute(
                 """
@@ -1522,6 +1715,12 @@ class PostgresStore:
                 )
 
     def _persist_test_scenarios_local(self, artifact: TestScenarioBuildResult, run_id: str) -> None:
+        """Persist test scenarios local through the owning storage boundary.
+
+        Args:
+            artifact (TestScenarioBuildResult): Artifact required by the operation's typed contract.
+            run_id (str): Canonical run id used as a safe operational anchor.
+        """
         for scenario_id, record in artifact.records.items():
             self._upsert_local(
                 "test_scenario",
@@ -1574,6 +1773,18 @@ class PostgresStore:
         artifact_path: str | None,
         document_version_id: str | None,
     ) -> dict[str, Any] | None:
+        """Execute the local test scenario artifact payload operation within its declared
+        architectural boundary.
+
+        Args:
+            artifact_path (str | None): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, Any] | None: The typed result produced by the operation.
+        """
         rows = [
             row for row in self._read_local_rows() if row.get("kind") == "test_scenario_artifact"
         ]
@@ -1679,6 +1890,17 @@ class PostgresStore:
         project: str,
         document_version_id: str | None,
     ) -> list[dict[str, Any]]:
+        """Execute the local coverage status operation within its declared architectural boundary.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         rows = self._read_local_rows()
         requirement_ids_in_version: set[str] | None = None
         if document_version_id is not None:
@@ -1702,6 +1924,14 @@ class PostgresStore:
         ]
 
         def _matches_version(row: dict[str, Any]) -> bool:
+            """Execute the matches version operation within its declared architectural boundary.
+
+            Args:
+                row (dict[str, Any]): Validated structured data for the operation.
+
+            Returns:
+                bool: The typed result produced by the operation.
+            """
             return (
                 document_version_id is None or row.get("document_version_id") == document_version_id
             )
@@ -1730,6 +1960,13 @@ class PostgresStore:
         artifact_path: str,
         run_id: str,
     ) -> None:
+        """Execute the upsert requirement operation within its declared architectural boundary.
+
+        Args:
+            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+            artifact_path (str): Filesystem location authorized for this operation.
+            run_id (str): Canonical run id used as a safe operational anchor.
+        """
         self.persist_artifact(artifact, artifact_path, run_id)
 
     def upsert_user_story(
@@ -1738,6 +1975,13 @@ class PostgresStore:
         artifact_path: str,
         run_id: str,
     ) -> None:
+        """Execute the upsert user story operation within its declared architectural boundary.
+
+        Args:
+            artifact (UserStoryArtifact): Artifact required by the operation's typed contract.
+            artifact_path (str): Filesystem location authorized for this operation.
+            run_id (str): Canonical run id used as a safe operational anchor.
+        """
         self.persist_user_story_artifact(artifact, artifact_path, run_id)
 
     def upsert_test_scenario(
@@ -1746,6 +1990,13 @@ class PostgresStore:
         artifact_path: str,
         run_id: str,
     ) -> None:
+        """Execute the upsert test scenario operation within its declared architectural boundary.
+
+        Args:
+            artifact (TestScenarioArtifact): Artifact required by the operation's typed contract.
+            artifact_path (str): Filesystem location authorized for this operation.
+            run_id (str): Canonical run id used as a safe operational anchor.
+        """
         self.persist_test_scenario_artifact(artifact, artifact_path, run_id)
 
     def mark_requirement_superseded(
@@ -1755,6 +2006,18 @@ class PostgresStore:
         revision_id: str,
         superseded_by_version: str,
     ) -> None:
+        """Execute the mark requirement superseded operation within its declared architectural
+        boundary.
+
+        Args:
+            requirement_id (str): Canonical requirement id used as a safe operational anchor.
+            revision_id (str): Canonical revision id used as a safe operational anchor.
+            superseded_by_version (str): Superseded by version required by the operation's typed
+                                         contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             self._update_local_revision_status(revision_id, "superseded")
             return
@@ -1811,6 +2074,20 @@ class PostgresStore:
         project: str,
         document_version_id: str | None = None,
     ) -> list[RequirementInput]:
+        """Load requirements for generation within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[RequirementInput]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             return self._load_requirements_for_generation_local(
                 project=project,
@@ -1867,6 +2144,20 @@ class PostgresStore:
         project: str,
         document_version_id: str | None = None,
     ) -> list[UserStoryRecord]:
+        """Load user stories for generation within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[UserStoryRecord]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             return self._load_user_stories_for_generation_local(
                 project=project,
@@ -1889,6 +2180,20 @@ class PostgresStore:
         project: str,
         document_version_id: str | None = None,
     ) -> list[TestScenarioRecord]:
+        """Load test scenarios for generation within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[TestScenarioRecord]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             return self._load_test_scenarios_for_generation_local(
                 project=project,
@@ -1914,6 +2219,21 @@ class PostgresStore:
         artifact_path: str | None = None,
         document_version_id: str | None = None,
     ) -> dict[str, Any] | None:
+        """Load artifact from postgres within the authorized project and version scope.
+
+        Args:
+            artifact_kind (str): Artifact kind required by the operation's typed contract.
+            artifact_path (str | None): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, Any] | None: The typed result produced by the operation.
+
+        Raises:
+            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+        """
         if artifact_kind == "requirements":
             return self.load_requirement_artifact_payload(
                 artifact_path=artifact_path,
@@ -1937,6 +2257,20 @@ class PostgresStore:
         project: str,
         document_version_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Load artifact payloads for project within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             return self._load_artifact_payloads_for_project_local(
                 project=project,
@@ -2173,6 +2507,16 @@ class PostgresStore:
         )
 
     def record_run(self, run_id: str, status: str, payload: dict[str, Any]) -> None:
+        """Record run through the owning storage boundary.
+
+        Args:
+            run_id (str): Canonical run id used as a safe operational anchor.
+            status (str): Status required by the operation's typed contract.
+            payload (dict[str, Any]): Validated structured data for the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if self.settings.postgres.mode == "local_json":
             self._upsert_local(
                 "ingestion_run",
@@ -2327,6 +2671,19 @@ class PostgresStore:
             return self._master_records_pg(own_cursor, project, stage)
 
     def _master_records_pg(self, cursor: Any, project: str, stage: str) -> list[dict[str, Any]]:
+        """Execute the master records pg operation within its declared architectural boundary.
+
+        Args:
+            cursor (Any): Cursor required by the operation's typed contract.
+            project (str): Project scope that isolates persistence and retrieval.
+            stage (str): Stage required by the operation's typed contract.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         if stage == "user_stories":
             cursor.execute(
                 "select payload from user_stories where project = %s order by story_id",
@@ -2342,6 +2699,19 @@ class PostgresStore:
         return self._requirement_master_records_pg(cursor, project)
 
     def _requirement_master_records_pg(self, cursor: Any, project: str) -> list[dict[str, Any]]:
+        """Execute the requirement master records pg operation within its declared architectural
+        boundary.
+
+        Args:
+            cursor (Any): Cursor required by the operation's typed contract.
+            project (str): Project scope that isolates persistence and retrieval.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         cursor.execute(
             """
             select requirement_id, source_req_id, id_generation_type, confidence, status,
@@ -2402,6 +2772,19 @@ class PostgresStore:
     ) -> list[dict[str, Any]]:
         # Join the fact-link table so the many-to-many fact->requirement mapping is
         # preserved in the master (a fact_id may recur across many requirements).
+        """Execute the requirement evidence pg operation within its declared architectural boundary.
+
+        Args:
+            cursor (Any): Cursor required by the operation's typed contract.
+            project (str): Project scope that isolates persistence and retrieval.
+            revision_id (str): Canonical revision id used as a safe operational anchor.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         cursor.execute(
             """
             select e.evidence_id, e.document_version_id, e.chunk_id, e.quote,
@@ -2436,6 +2819,15 @@ class PostgresStore:
         ]
 
     def _master_records_local(self, project: str, stage: str) -> list[dict[str, Any]]:
+        """Execute the master records local operation within its declared architectural boundary.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            stage (str): Stage required by the operation's typed contract.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         rows = self._read_local_rows()
         if stage == "user_stories":
             records = [
@@ -2456,6 +2848,16 @@ class PostgresStore:
     def _requirement_master_records_local(
         self, project: str, rows: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        """Execute the requirement master records local operation within its declared architectural
+        boundary.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            rows (list[dict[str, Any]]): Rows required by the operation's typed contract.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         lineage = {
             str(row["requirement_id"]): row
             for row in rows
@@ -2516,7 +2918,30 @@ class PostgresStore:
     def _master_upsert_sql(
         self, table: str, master: StageMasterArtifact, payload: dict[str, Any], cursor: Any | None
     ) -> Any:
+        """Execute the master upsert sql operation within its declared architectural boundary.
+
+        Args:
+            table (str): Table required by the operation's typed contract.
+            master (StageMasterArtifact): Master required by the operation's typed contract.
+            payload (dict[str, Any]): Validated structured data for the operation.
+            cursor (Any | None): Cursor required by the operation's typed contract.
+
+        Returns:
+            Any: The typed result produced by the operation.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
+
         def execute(active_cursor: Any) -> None:
+            """Execute the execute operation within its declared architectural boundary.
+
+            Args:
+                active_cursor (Any): Active cursor required by the operation's typed contract.
+
+            Side Effects:
+                May write transactional or derivative state through the configured store.
+            """
             active_cursor.execute(
                 f"""
                 insert into {table}
@@ -2547,6 +2972,11 @@ class PostgresStore:
             return None
 
         def run() -> None:
+            """Run run.
+
+            Side Effects:
+                May write transactional or derivative state through the configured store.
+            """
             with self._connect() as connection, connection.cursor() as own_cursor:
                 execute(own_cursor)
                 connection.commit()
@@ -2684,6 +3114,15 @@ class PostgresStore:
         cursor: Any,
         artifact: RequirementArtifact,
     ) -> None:
+        """Persist requirement ledger postgres through the owning storage boundary.
+
+        Args:
+            cursor (Any): Cursor required by the operation's typed contract.
+            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         for canonical_fact in artifact.canonical_facts:
             cursor.execute(
                 """
@@ -2914,6 +3353,11 @@ class PostgresStore:
             )
 
     def _persist_requirement_ledger_local(self, artifact: RequirementArtifact) -> None:
+        """Persist requirement ledger local through the owning storage boundary.
+
+        Args:
+            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+        """
         for canonical_fact in artifact.canonical_facts:
             self._upsert_local(
                 "canonical_fact",
@@ -3032,6 +3476,12 @@ class PostgresStore:
             )
 
     def _hard_delete_requirement_local(self, requirement_id: str) -> None:
+        """Execute the hard delete requirement local operation within its declared architectural
+        boundary.
+
+        Args:
+            requirement_id (str): Canonical requirement id used as a safe operational anchor.
+        """
         rows = [
             row
             for row in self._read_local_rows()
@@ -3045,6 +3495,17 @@ class PostgresStore:
         project: str,
         document_version_id: str | None,
     ) -> list[RequirementInput]:
+        """Load requirements for generation local within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[RequirementInput]: The typed result produced by the operation.
+        """
         rows = self._read_local_rows()
         active_revision_by_requirement = {
             str(row["requirement_id"]): str(row["active_revision_id"])
@@ -3103,6 +3564,17 @@ class PostgresStore:
         project: str,
         document_version_id: str | None,
     ) -> list[UserStoryRecord]:
+        """Load user stories for generation local within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[UserStoryRecord]: The typed result produced by the operation.
+        """
         records: list[UserStoryRecord] = []
         for row in self._read_local_rows():
             if row.get("kind") != "user_story" or row.get("project") != project:
@@ -3125,6 +3597,17 @@ class PostgresStore:
         project: str,
         document_version_id: str | None,
     ) -> list[TestScenarioRecord]:
+        """Load test scenarios for generation local within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[TestScenarioRecord]: The typed result produced by the operation.
+        """
         records: list[TestScenarioRecord] = []
         for row in self._read_local_rows():
             if row.get("kind") != "test_scenario" or row.get("project") != project:
@@ -3147,6 +3630,17 @@ class PostgresStore:
         project: str,
         document_version_id: str | None,
     ) -> list[dict[str, Any]]:
+        """Load artifact payloads for project local within the authorized project and version scope.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         rows: list[dict[str, Any]] = []
         for row in self._read_local_rows():
             kind = row.get("kind")
@@ -3175,6 +3669,11 @@ class PostgresStore:
         return rows
 
     def _connect(self) -> Any:
+        """Execute the connect operation within its declared architectural boundary.
+
+        Returns:
+            Any: The typed result produced by the operation.
+        """
         import psycopg
 
         dsn = self.settings.postgres.dsn
@@ -3184,6 +3683,18 @@ class PostgresStore:
         return psycopg.connect(dsn)
 
     def _validate_schema(self, cursor: Any) -> None:
+        """Validate schema against the enforced runtime contract.
+
+        Args:
+            cursor (Any): Cursor required by the operation's typed contract.
+
+        Raises:
+            SchemaMismatchError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+
+        Side Effects:
+            May write transactional or derivative state through the configured store.
+        """
         cursor.execute(
             """
             select table_name, column_name, data_type
@@ -3225,12 +3736,30 @@ class PostgresStore:
             )
 
     def _append_local(self, payload: dict[str, Any]) -> None:
+        """Append local.
+
+        Args:
+            payload (dict[str, Any]): Validated structured data for the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)
         payload["written_at"] = datetime.now(UTC).isoformat()
         with self.settings.postgres.local_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
 
     def _upsert_local(self, kind: str, key: str, payload: dict[str, Any]) -> None:
+        """Execute the upsert local operation within its declared architectural boundary.
+
+        Args:
+            kind (str): Kind required by the operation's typed contract.
+            key (str): Key required by the operation's typed contract.
+            payload (dict[str, Any]): Validated structured data for the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)
         rows = self._read_local_rows()
         payload["written_at"] = datetime.now(UTC).isoformat()
@@ -3246,6 +3775,11 @@ class PostgresStore:
         self._write_local_rows(rows)
 
     def _read_local_rows(self) -> list[dict[str, Any]]:
+        """Read local rows within the authorized project and version scope.
+
+        Returns:
+            list[dict[str, Any]]: The typed result produced by the operation.
+        """
         if not self.settings.postgres.local_path.exists():
             return []
         return [
@@ -3255,12 +3789,27 @@ class PostgresStore:
         ]
 
     def _write_local_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Write local rows through the owning storage boundary.
+
+        Args:
+            rows (list[dict[str, Any]]): Rows required by the operation's typed contract.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         self.settings.postgres.local_path.write_text(
             "".join(json.dumps(row) + "\n" for row in rows),
             encoding="utf-8",
         )
 
     def _update_local_revision_status(self, revision_id: str, status: str) -> None:
+        """Execute the update local revision status operation within its declared architectural
+        boundary.
+
+        Args:
+            revision_id (str): Canonical revision id used as a safe operational anchor.
+            status (str): Status required by the operation's typed contract.
+        """
         rows = self._read_local_rows()
         for row in rows:
             if row.get("kind") != "requirement_revision" or row.get("_local_key") != revision_id:
@@ -3274,6 +3823,11 @@ class PostgresStore:
         self._write_local_rows(rows)
 
     def _local_document_versions(self) -> dict[tuple[str, str], str]:
+        """Execute the local document versions operation within its declared architectural boundary.
+
+        Returns:
+            dict[tuple[str, str], str]: The typed result produced by the operation.
+        """
         versions: dict[tuple[str, str], str] = {}
         for payload in self._read_local_rows():
             if payload.get("kind") == "document_version":
@@ -3289,6 +3843,18 @@ class PostgresStore:
         artifact_path: str | None,
         document_version_id: str | None,
     ) -> dict[str, Any] | None:
+        """Execute the local requirement artifact payload operation within its declared
+        architectural boundary.
+
+        Args:
+            artifact_path (str | None): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, Any] | None: The typed result produced by the operation.
+        """
         rows = [row for row in self._read_local_rows() if row.get("kind") == "requirement_artifact"]
         if artifact_path is not None:
             for row in reversed(rows):
@@ -3307,6 +3873,16 @@ class PostgresStore:
         project: str,
         document_id: str,
     ) -> dict[str, RequirementRevisionSnapshot]:
+        """Execute the local requirement revision snapshot operation within its declared
+        architectural boundary.
+
+        Args:
+            project (str): Project scope that isolates persistence and retrieval.
+            document_id (str): Canonical document id used as a safe operational anchor.
+
+        Returns:
+            dict[str, RequirementRevisionSnapshot]: The typed result produced by the operation.
+        """
         active_by_requirement: dict[str, str] = {}
         revisions: dict[str, dict[str, Any]] = {}
         evidence_ids_by_revision: dict[str, dict[str, str]] = {}
@@ -3360,6 +3936,14 @@ class PostgresStore:
 
 
 def _manifest_reference_payload(manifest: DocumentManifest) -> dict[str, Any]:
+    """Execute the manifest reference payload operation within its declared architectural boundary.
+
+    Args:
+        manifest (DocumentManifest): Manifest required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     payload = manifest.model_dump(mode="json")
     payload["chunks"] = [
         {key: value for key, value in chunk.items() if key not in {"text", "normalized_text"}}
@@ -3369,6 +3953,14 @@ def _manifest_reference_payload(manifest: DocumentManifest) -> dict[str, Any]:
 
 
 def _artifact_payload_from_row(value: Any) -> dict[str, Any]:
+    """Execute the artifact payload from row operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     if isinstance(value, str):
         value = json.loads(value)
     if isinstance(value, dict):
@@ -3386,6 +3978,14 @@ def _remap_local_identity_rows(
     from multi_agentic_graph_rag.services.requirement_repair import remap_canonical_payload
 
     def belongs(row: dict[str, Any]) -> bool:
+        """Execute the belongs operation within its declared architectural boundary.
+
+        Args:
+            row (dict[str, Any]): Validated structured data for the operation.
+
+        Returns:
+            bool: The typed result produced by the operation.
+        """
         if row.get("project") == project:
             return True
         for key in ("artifact", "payload", "requirement", "story", "scenario"):
@@ -3456,6 +4056,14 @@ def _remap_identity_value(value: Any, report: Any) -> Any:
 
 
 def _local_artifact_kind(kind: str) -> str:
+    """Execute the local artifact kind operation within its declared architectural boundary.
+
+    Args:
+        kind (str): Kind required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     if kind == "requirement_artifact":
         return "requirements"
     if kind == "user_story_artifact":
@@ -3466,12 +4074,33 @@ def _local_artifact_kind(kind: str) -> str:
 
 
 def _id_generation_type(value: object) -> Literal["source", "generated"]:
+    """Execute the id generation type operation within its declared architectural boundary.
+
+    Args:
+        value (object): Value required by the operation's typed contract.
+
+    Returns:
+        Literal['source', 'generated']: The typed result produced by the operation.
+    """
     return "source" if str(value).strip().lower() == "source" else "generated"
 
 
 def _coerce_user_story_build_result(
     artifact: UserStoryArtifact | UserStoryBuildResult,
 ) -> UserStoryBuildResult:
+    """Execute the coerce user story build result operation within its declared architectural
+    boundary.
+
+    Args:
+        artifact (UserStoryArtifact | UserStoryBuildResult): Artifact required by the operation's
+                                                             typed contract.
+
+    Returns:
+        UserStoryBuildResult: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     if isinstance(artifact, UserStoryBuildResult):
         return artifact
     raise ValueError("persisting user stories requires internal UserStoryBuildResult records")
@@ -3480,12 +4109,35 @@ def _coerce_user_story_build_result(
 def _coerce_test_scenario_build_result(
     artifact: TestScenarioArtifact | TestScenarioBuildResult,
 ) -> TestScenarioBuildResult:
+    """Execute the coerce test scenario build result operation within its declared architectural
+    boundary.
+
+    Args:
+        artifact (TestScenarioArtifact | TestScenarioBuildResult): Artifact required by the
+                                                                   operation's typed contract.
+
+    Returns:
+        TestScenarioBuildResult: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     if isinstance(artifact, TestScenarioBuildResult):
         return artifact
     raise ValueError("persisting test scenarios requires internal TestScenarioBuildResult records")
 
 
 def _local_row_matches_requirement(row: dict[str, Any], requirement_id: str) -> bool:
+    """Execute the local row matches requirement operation within its declared architectural
+    boundary.
+
+    Args:
+        row (dict[str, Any]): Validated structured data for the operation.
+        requirement_id (str): Canonical requirement id used as a safe operational anchor.
+
+    Returns:
+        bool: The typed result produced by the operation.
+    """
     if row.get("requirement_id") == requirement_id:
         return True
     if row.get("kind") == "requirement" and row.get("_local_key") == requirement_id:

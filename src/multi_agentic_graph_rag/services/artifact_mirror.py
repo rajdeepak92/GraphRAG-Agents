@@ -38,7 +38,14 @@ ArtifactKind = Literal["requirements", "user_stories", "test_scenarios"]
 
 
 class ArtifactMirror:
+    """Coordinate artifact mirror behavior within the services boundary."""
+
     def __init__(self, postgres: PostgresStore) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            postgres (PostgresStore): Postgres required by the operation's typed contract.
+        """
         self.postgres = postgres
 
     def persist_committed_artifact(
@@ -249,6 +256,18 @@ class ArtifactMirror:
         artifact_path: Path,
         document_version_id: str | None,
     ) -> dict[str, object] | None:
+        """Load from postgres within the authorized project and version scope.
+
+        Args:
+            kind (ArtifactKind): Kind required by the operation's typed contract.
+            artifact_path (Path): Filesystem location authorized for this operation.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            dict[str, object] | None: The typed result produced by the operation.
+        """
         if kind == "requirements":
             payload = self.postgres.load_requirement_artifact_payload(
                 artifact_path=str(artifact_path),
@@ -277,6 +296,20 @@ class ArtifactMirror:
         project: str,
         document_version_id: str | None,
     ) -> bool:
+        """Execute the local matches postgres operation within its declared architectural boundary.
+
+        Args:
+            local_payload (dict[str, object]): Validated structured data for the operation.
+            postgres_payload (dict[str, object] | None): Validated structured data for the
+                                                         operation.
+            project (str): Project scope that isolates persistence and retrieval.
+            document_version_id (str | None): Canonical document version id used as a safe
+                                              operational
+                                              anchor.
+
+        Returns:
+            bool: The typed result produced by the operation.
+        """
         if local_payload.get("project") != project:
             return False
         if document_version_id and local_payload.get("document_version_id") != document_version_id:
@@ -287,6 +320,17 @@ class ArtifactMirror:
 
 
 def _kind_from_path(path: Path) -> ArtifactKind:
+    """Execute the kind from path operation within its declared architectural boundary.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        ArtifactKind: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     name = path.name
     if name in {"requirements.json", "requirement.json"}:
         return "requirements"
@@ -298,6 +342,18 @@ def _kind_from_path(path: Path) -> ArtifactKind:
 
 
 def _validate_payload(kind: ArtifactKind, payload: object) -> dict[str, object]:
+    """Validate payload against the enforced runtime contract.
+
+    Args:
+        kind (ArtifactKind): Kind required by the operation's typed contract.
+        payload (object): Validated structured data for the operation.
+
+    Returns:
+        dict[str, object]: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     if not isinstance(payload, dict):
         raise ValueError("artifact payload must be a JSON object")
     if kind == "requirements":
@@ -308,6 +364,15 @@ def _validate_payload(kind: ArtifactKind, payload: object) -> dict[str, object]:
 
 
 def _write_payload(path: Path, payload: dict[str, object]) -> None:
+    """Write payload through the owning storage boundary.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+        payload (dict[str, object]): Validated structured data for the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -333,5 +398,13 @@ def _file_matches_master(path: Path, master: StageMasterArtifact) -> bool:
 
 
 def _checksum(payload: dict[str, object]) -> str:
+    """Execute the checksum operation within its declared architectural boundary.
+
+    Args:
+        payload (dict[str, object]): Validated structured data for the operation.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

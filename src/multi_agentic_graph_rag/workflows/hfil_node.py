@@ -28,6 +28,8 @@ _WORD_SPACE = re.compile(r"\s+")
 
 @dataclass(frozen=True)
 class HFILRuntime:
+    """Coordinate hfilruntime behavior within the workflows boundary."""
+
     settings: AppSettings
     matcher: SemanticMatcher
     dedup: DedupEngine
@@ -48,6 +50,14 @@ def hfil_review_node(state: dict[str, Any], *, runtime: HFILRuntime) -> dict[str
 
 
 def route_hfil(state: dict[str, Any]) -> Literal["loop", "done"]:
+    """Execute the route hfil operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+
+    Returns:
+        Literal['loop', 'done']: The typed result produced by the operation.
+    """
     return "done" if state.get("hfil_done") else "loop"
 
 
@@ -58,6 +68,19 @@ def initialize_hfil_state(
     user_stories: list[UserStoryRecord],
     enabled: bool,
 ) -> dict[str, Any]:
+    """Execute the initialize hfil state operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        scenarios (list[TestScenarioRecord]): Ordered scenarios processed without changing their
+                                              identities.
+        user_stories (list[UserStoryRecord]): User stories required by the operation's typed
+                                              contract.
+        enabled (bool): Enabled required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     next_state = dict(state)
     next_state.update(
         {
@@ -75,6 +98,14 @@ def initialize_hfil_state(
 
 
 def hfil_scenarios_from_state(state: dict[str, Any]) -> list[TestScenarioRecord]:
+    """Execute the hfil scenarios from state operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+
+    Returns:
+        list[TestScenarioRecord]: The typed result produced by the operation.
+    """
     return [
         TestScenarioRecord.model_validate(item)
         for item in state.get("hfil_scenarios", [])
@@ -83,6 +114,14 @@ def hfil_scenarios_from_state(state: dict[str, Any]) -> list[TestScenarioRecord]
 
 
 def _interrupt_payload(state: dict[str, Any]) -> dict[str, Any]:
+    """Execute the interrupt payload operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     scenarios = hfil_scenarios_from_state(state)
     phase = str(state.get("hfil_phase", "review"))
     prompt = str(state.get("hfil_pending_prompt") or _review_prompt())
@@ -102,6 +141,16 @@ def _process_user_line(
     *,
     runtime: HFILRuntime,
 ) -> dict[str, Any]:
+    """Execute the process user line operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        user_line (str): User line required by the operation's typed contract.
+        runtime (HFILRuntime): Runtime required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     phase = str(state.get("hfil_phase", "review"))
     if phase == "await_duplicate_delete":
         return _apply_duplicate_delete(state, user_line)
@@ -124,6 +173,15 @@ def _process_user_line(
 
 
 def _run_duplicate_detection(state: dict[str, Any], *, runtime: HFILRuntime) -> dict[str, Any]:
+    """Run duplicate detection.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        runtime (HFILRuntime): Runtime required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     scenarios = hfil_scenarios_from_state(state)
     groups = runtime.dedup.find_duplicates(scenarios)
     if not groups:
@@ -147,6 +205,15 @@ def _run_duplicate_detection(state: dict[str, Any], *, runtime: HFILRuntime) -> 
 
 
 def _apply_duplicate_delete(state: dict[str, Any], user_line: str) -> dict[str, Any]:
+    """Apply duplicate delete.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        user_line (str): User line required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     if user_line.strip().lower() in {"none", "cancel", "skip"}:
         return _with_messages(
             state,
@@ -182,6 +249,16 @@ def _handle_feedback_comment(
     *,
     runtime: HFILRuntime,
 ) -> dict[str, Any]:
+    """Execute the handle feedback comment operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        comment (str): Comment required by the operation's typed contract.
+        runtime (HFILRuntime): Runtime required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     stories = _stories_from_state(state)
     story_by_id = {story.story_id: story for story in stories}
     explicit_story_id = _extract_story_id(comment)
@@ -256,6 +333,16 @@ def _apply_candidate_approval(
     *,
     runtime: HFILRuntime,
 ) -> dict[str, Any]:
+    """Apply candidate approval.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        user_line (str): User line required by the operation's typed contract.
+        runtime (HFILRuntime): Runtime required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     candidate_payload = state.get("hfil_pending_candidate")
     if not isinstance(candidate_payload, dict):
         return _with_messages(
@@ -312,6 +399,20 @@ def _generate_feedback_scenario(
     comment: str,
     runtime: HFILRuntime,
 ) -> TestScenarioRecord:
+    """Generate feedback scenario.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        story (UserStoryRecord): Story required by the operation's typed contract.
+        comment (str): Comment required by the operation's typed contract.
+        runtime (HFILRuntime): Runtime required by the operation's typed contract.
+
+    Returns:
+        TestScenarioRecord: The typed result produced by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     prompt = (
         f"{FEEDBACK_STRICT_SCENARIO_PROMPT}\n\n"
         f"Feedback comment:\n{comment}\n\n"
@@ -360,6 +461,16 @@ def _candidate_duplicate_group(
     *,
     runtime: HFILRuntime,
 ) -> DuplicateGroup | None:
+    """Execute the candidate duplicate group operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        candidate (TestScenarioRecord): Candidate required by the operation's typed contract.
+        runtime (HFILRuntime): Runtime required by the operation's typed contract.
+
+    Returns:
+        DuplicateGroup | None: The typed result produced by the operation.
+    """
     scenarios = [*hfil_scenarios_from_state(state), candidate]
     for group in runtime.dedup.find_duplicates(scenarios):
         if candidate.scenario_id in group.scenario_ids:
@@ -372,6 +483,16 @@ def _with_messages(
     messages: list[str],
     **updates: object,
 ) -> dict[str, Any]:
+    """Execute the with messages operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+        messages (list[str]): Messages required by the operation's typed contract.
+        updates (object): Updates required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     next_state = dict(state)
     next_state["hfil_messages"] = [*list(state.get("hfil_messages", [])), *messages]
     for key, value in updates.items():
@@ -383,6 +504,14 @@ def _with_messages(
 
 
 def _stories_from_state(state: dict[str, Any]) -> list[UserStoryRecord]:
+    """Execute the stories from state operation within its declared architectural boundary.
+
+    Args:
+        state (dict[str, Any]): State required by the operation's typed contract.
+
+    Returns:
+        list[UserStoryRecord]: The typed result produced by the operation.
+    """
     return [
         UserStoryRecord.model_validate(item)
         for item in state.get("hfil_user_stories", [])
@@ -391,6 +520,14 @@ def _stories_from_state(state: dict[str, Any]) -> list[UserStoryRecord]:
 
 
 def _scenario_payload(scenario: TestScenarioRecord) -> dict[str, object]:
+    """Execute the scenario payload operation within its declared architectural boundary.
+
+    Args:
+        scenario (TestScenarioRecord): Scenario required by the operation's typed contract.
+
+    Returns:
+        dict[str, object]: The typed result produced by the operation.
+    """
     return {
         "scenario_id": scenario.scenario_id,
         "story_id": scenario.story_id,
@@ -399,17 +536,46 @@ def _scenario_payload(scenario: TestScenarioRecord) -> dict[str, object]:
 
 
 def _scenario_text(scenario: TestScenarioRecord) -> str:
+    """Execute the scenario text operation within its declared architectural boundary.
+
+    Args:
+        scenario (TestScenarioRecord): Scenario required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return f"{scenario.title}: {scenario.description} Expected: {scenario.expected_result}"
 
 
 def _extract_story_id(comment: str) -> str | None:
+    """Extract story id.
+
+    Args:
+        comment (str): Comment required by the operation's typed contract.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     match = _STORY_ID_RE.search(comment)
     return match.group(1).upper() if match else None
 
 
 def _normalize_title(title: str) -> str:
+    """Normalize title deterministically within the active scope.
+
+    Args:
+        title (str): Title required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return _WORD_SPACE.sub(" ", title.strip().lower())
 
 
 def _review_prompt() -> str:
+    """Execute the review prompt operation within its declared architectural boundary.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return "Enter feedback, `remove duplicates`, or `exit`."

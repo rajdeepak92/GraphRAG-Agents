@@ -27,6 +27,8 @@ from multi_agentic_graph_rag.services.ontology import acronym_of, normalize_enti
 
 @dataclass
 class EntityResolutionResult:
+    """Coordinate entity resolution result behavior within the services boundary."""
+
     entities: list[EntityRecord] = field(default_factory=list)
     mentions: list[EntityMentionRecord] = field(default_factory=list)
     # (chunk_id, normalized_name) -> entity_id for chunk-scoped assertion linking.
@@ -35,6 +37,15 @@ class EntityResolutionResult:
     entity_id_by_name: dict[str, str] = field(default_factory=dict)
 
     def resolve_reference(self, chunk_id: str, name: str) -> str | None:
+        """Resolve reference deterministically within the active scope.
+
+        Args:
+            chunk_id (str): Canonical chunk id used as a safe operational anchor.
+            name (str): Name required by the operation's typed contract.
+
+        Returns:
+            str | None: The typed result produced by the operation.
+        """
         normalized = normalize_entity_name(name)
         scoped = self.entity_id_by_chunk_name.get((chunk_id, normalized))
         if scoped is not None:
@@ -42,6 +53,11 @@ class EntityResolutionResult:
         return self.entity_id_by_name.get(normalized)
 
     def entity_names_by_id(self) -> dict[str, str]:
+        """Execute the entity names by id operation within its declared architectural boundary.
+
+        Returns:
+            dict[str, str]: The typed result produced by the operation.
+        """
         return {entity.entity_id: entity.canonical_name for entity in self.entities}
 
 
@@ -52,6 +68,20 @@ def resolve_entities(
     existing_entities: list[EntityRecord],
     chunk_text_by_id: dict[str, str],
 ) -> EntityResolutionResult:
+    """Resolve entities deterministically within the active scope.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        extraction (KnowledgeExtractionOutput): Extraction required by the operation's typed
+                                                contract.
+        existing_entities (list[EntityRecord]): Existing entities required by the operation's typed
+                                                contract.
+        chunk_text_by_id (dict[str, str]): Canonical chunk text by id used as a safe operational
+                                           anchor.
+
+    Returns:
+        EntityResolutionResult: The typed result produced by the operation.
+    """
     result = EntityResolutionResult()
     resolved_by_id: dict[str, EntityRecord] = {}
     known: list[EntityRecord] = [entity.model_copy(deep=True) for entity in existing_entities]
@@ -91,6 +121,18 @@ def _resolve_candidate(
     entity_type: str,
     known: list[EntityRecord],
 ) -> EntityRecord:
+    """Resolve candidate deterministically within the active scope.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        normalized_name (str): Normalized name required by the operation's typed contract.
+        surface_text (str): Input text processed in memory and excluded from diagnostic logs.
+        entity_type (str): Entity type required by the operation's typed contract.
+        known (list[EntityRecord]): Known required by the operation's typed contract.
+
+    Returns:
+        EntityRecord: The typed result produced by the operation.
+    """
     same_type = [entity for entity in known if entity.entity_type == entity_type]
 
     for entity in same_type:
@@ -121,6 +163,12 @@ def _resolve_candidate(
 
 
 def _record_alias(entity: EntityRecord, surface_text: str) -> None:
+    """Record alias through the owning storage boundary.
+
+    Args:
+        entity (EntityRecord): Entity required by the operation's typed contract.
+        surface_text (str): Input text processed in memory and excluded from diagnostic logs.
+    """
     if surface_text == entity.canonical_name or surface_text in entity.aliases:
         return
     entity.aliases.append(surface_text)
@@ -132,6 +180,14 @@ def _register_reference(
     normalized_name: str,
     entity: EntityRecord,
 ) -> None:
+    """Execute the register reference operation within its declared architectural boundary.
+
+    Args:
+        result (EntityResolutionResult): Result required by the operation's typed contract.
+        chunk_id (str): Canonical chunk id used as a safe operational anchor.
+        normalized_name (str): Normalized name required by the operation's typed contract.
+        entity (EntityRecord): Entity required by the operation's typed contract.
+    """
     result.entity_id_by_chunk_name[(chunk_id, normalized_name)] = entity.entity_id
     result.entity_id_by_name.setdefault(normalized_name, entity.entity_id)
 
@@ -143,6 +199,17 @@ def _build_mention(
     surface_text: str,
     chunk_text: str,
 ) -> EntityMentionRecord:
+    """Build mention.
+
+    Args:
+        entity_id_value (str): Entity id value required by the operation's typed contract.
+        chunk_id (str): Canonical chunk id used as a safe operational anchor.
+        surface_text (str): Input text processed in memory and excluded from diagnostic logs.
+        chunk_text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        EntityMentionRecord: The typed result produced by the operation.
+    """
     start_char: int | None = None
     end_char: int | None = None
     index = chunk_text.casefold().find(surface_text.casefold())

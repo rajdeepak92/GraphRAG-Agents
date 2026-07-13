@@ -21,6 +21,20 @@ def write_canonical_requirements_artifact(
     run_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
+    """Write canonical requirements artifact through the owning storage boundary.
+
+    Args:
+        artifact (CanonicalRequirementsArtifact): Artifact required by the operation's typed
+                                                  contract.
+        run_dir (Path): Filesystem location authorized for this operation.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        Path: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     path = run_dir / "requirements.json"
     if logger is not None:
         logger.debug(
@@ -39,6 +53,19 @@ def write_requirement_identity_resolution_artifact(
     run_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
+    """Write requirement identity resolution artifact through the owning storage boundary.
+
+    Args:
+        artifact (RequirementArtifact): Artifact required by the operation's typed contract.
+        run_dir (Path): Filesystem location authorized for this operation.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        Path: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     path = run_dir / "identity_resolution.json"
     payload = RequirementIdentityResolutionArtifact(
         project=artifact.project,
@@ -63,6 +90,19 @@ def write_user_story_artifact(
     out_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
+    """Write user story artifact through the owning storage boundary.
+
+    Args:
+        artifact (UserStoryArtifact): Artifact required by the operation's typed contract.
+        out_dir (Path): Out dir required by the operation's typed contract.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        Path: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     path = out_dir / "user_stories.json"
     if logger is not None:
         logger.debug(
@@ -82,6 +122,19 @@ def write_test_scenario_artifact(
     out_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
+    """Write test scenario artifact through the owning storage boundary.
+
+    Args:
+        artifact (TestScenarioArtifact): Artifact required by the operation's typed contract.
+        out_dir (Path): Out dir required by the operation's typed contract.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        Path: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     path = out_dir / "test_scenarios.json"
     if logger is not None:
         logger.debug(
@@ -100,6 +153,15 @@ def write_test_scenario_artifact(
 def verify_requirement_artifact(
     path: Path,
 ) -> RequirementArtifact | CanonicalRequirementsArtifact:
+    """Verify requirement artifact against the enforced runtime contract.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        RequirementArtifact | CanonicalRequirementsArtifact: The typed result produced by the
+        operation.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and data.get("artifact_schema_version") == "5.0-requirements":
         return CanonicalRequirementsArtifact.model_validate(data)
@@ -107,16 +169,41 @@ def verify_requirement_artifact(
 
 
 def verify_user_story_artifact(path: Path) -> UserStoryArtifact:
+    """Verify user story artifact against the enforced runtime contract.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        UserStoryArtifact: The typed result produced by the operation.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     return UserStoryArtifact.model_validate(data)
 
 
 def verify_test_scenario_artifact(path: Path) -> TestScenarioArtifact:
+    """Verify test scenario artifact against the enforced runtime contract.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        TestScenarioArtifact: The typed result produced by the operation.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     return TestScenarioArtifact.model_validate(data)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    """Execute the atomic write json operation within its declared architectural boundary.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+        payload (dict[str, object]): Validated structured data for the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w",

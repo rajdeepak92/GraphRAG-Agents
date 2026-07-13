@@ -27,6 +27,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     KnowledgeGraphResult,
 )
 from multi_agentic_graph_rag.llm_models.factory import create_reasoning_model
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 from multi_agentic_graph_rag.observability.session import (
     RunSession,
     command_run_id,
@@ -38,6 +39,8 @@ from multi_agentic_graph_rag.services.knowledge_graph_state import (
 
 
 class KnowledgeGraphState(TypedDict, total=False):
+    """Describe the knowledge graph state state exchanged between typed workflow nodes."""
+
     request: dict[str, Any]
     run_id: str
     project: str
@@ -54,6 +57,15 @@ class KnowledgeGraphState(TypedDict, total=False):
 
 
 def build_knowledge_graph_workflow(session: RunSession | None = None) -> Any:
+    """Build knowledge graph workflow.
+
+    Args:
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        Any: The typed result produced by the operation.
+    """
     graph = StateGraph(KnowledgeGraphState)
     graph.add_node("validate_request", lambda state: _validate_request(state, session=session))
     graph.add_node("run_pipeline", lambda state: _run_pipeline(state, session=session))
@@ -68,6 +80,19 @@ def _validate_request(
     *,
     session: RunSession | None = None,
 ) -> KnowledgeGraphState:
+    """Validate request against the enforced runtime contract.
+
+    Args:
+        state (KnowledgeGraphState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        KnowledgeGraphState: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = KnowledgeGraphRequest.model_validate(state["request"])
     logger = session.logger if session is not None else None
     rid = state.get("run_id") or command_run_id(RuntimeCommand.BUILD_KNOWLEDGE_GRAPH.value)
@@ -87,6 +112,25 @@ def _run_pipeline(
     *,
     session: RunSession | None = None,
 ) -> KnowledgeGraphState:
+    """Run pipeline.
+
+    Args:
+        state (KnowledgeGraphState): State required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        KnowledgeGraphState: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     request = KnowledgeGraphRequest.model_validate(state["request"])
     settings = load_config()
     if session is not None:
@@ -99,6 +143,20 @@ def _run_pipeline(
     run_dir = session.run_dir if session is not None else None
 
     def pipeline() -> KnowledgeGraphState:
+        """Run the workflow pipeline while preserving its persistence boundaries.
+
+        Returns:
+            KnowledgeGraphState: The typed result produced by the operation.
+
+        Raises:
+            ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+            May write transactional or derivative state through the configured store.
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         _validate_required_knowledge_stack(settings)
         if logger is not None:
             logger.info(
@@ -205,7 +263,14 @@ def _run_pipeline(
         return result_payload
 
     try:
-        return pipeline()
+        if logger is None:
+            return pipeline()
+        with logger.span(
+            step="build_knowledge_graph",
+            operation="knowledge_graph.pipeline",
+            document_version_id=request.document_version_id,
+        ):
+            return pipeline()
     except Exception as exc:
         if logger is not None:
             logger.exception(
@@ -219,7 +284,7 @@ def _run_pipeline(
         _record_failed_run_safely(
             postgres=postgres,
             run_id=state["run_id"],
-            payload={"run_id": state["run_id"], "error": str(exc)},
+            payload={"run_id": state["run_id"], "error": sanitized_exception_summary(exc)},
             logger=logger,
         )
         raise
@@ -229,6 +294,19 @@ def run_knowledge_graph_build(
     request: KnowledgeGraphRequest,
     session: RunSession | None = None,
 ) -> KnowledgeGraphResult:
+    """Run knowledge graph build.
+
+    Args:
+        request (KnowledgeGraphRequest): Request required by the operation's typed contract.
+        session (RunSession | None): Optional command session that owns run artifacts and
+                                     diagnostics.
+
+    Returns:
+        KnowledgeGraphResult: The typed result produced by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     if session is None:
         with command_session(
             project=request.project,
@@ -260,10 +338,29 @@ def run_knowledge_graph_build(
 
 
 def _output_dir(settings: AppSettings, project: str, run_identifier: str) -> Path:
+    """Execute the output dir operation within its declared architectural boundary.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        project (str): Project scope that isolates persistence and retrieval.
+        run_identifier (str): Canonical run identifier used as a safe operational anchor.
+
+    Returns:
+        Path: The typed result produced by the operation.
+    """
     return settings.paths.generated_requirements_dir / project / "kg" / run_identifier
 
 
 def _validate_required_knowledge_stack(settings: AppSettings) -> None:
+    """Validate required knowledge stack against the enforced runtime contract.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     if settings.reasoning_model.provider in {ProviderName.LOCAL_HEURISTIC.value}:
         raise ConfigurationError(
             f"REASONING_MODEL_PROVIDER={settings.reasoning_model.provider} "
@@ -276,12 +373,30 @@ def _validate_required_knowledge_stack(settings: AppSettings) -> None:
 
 
 def _check_store(logger: Any | None, step: str, check: Any) -> None:
+    """Check store.
+
+    Args:
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        step (str): Step required by the operation's typed contract.
+        check (Any): Check required by the operation's typed contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     detail = check()
     if logger is not None:
         logger.info(detail, step=step, status="PASS", detail=detail)
 
 
 def _warmup_reasoning_model(reasoning_model: Any) -> None:
+    """Warm up reasoning model.
+
+    Args:
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+
+    Side Effects:
+        May invoke configured model or workflow providers.
+    """
     warmup = getattr(reasoning_model, "warmup", None)
     if callable(warmup):
         warmup()
@@ -294,6 +409,18 @@ def _record_failed_run_safely(
     payload: dict[str, Any],
     logger: Any,
 ) -> None:
+    """Record failed run safely through the owning storage boundary.
+
+    Args:
+        postgres (PostgresStore): Postgres required by the operation's typed contract.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        payload (dict[str, Any]): Validated structured data for the operation.
+        logger (Any): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Side Effects:
+        May write transactional or derivative state through the configured store.
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     try:
         postgres.record_run(run_id, "failed", payload)
     except Exception as record_error:
@@ -304,6 +431,6 @@ def _record_failed_run_safely(
                 step="record_failed_run",
                 run_id=run_id,
                 error_type=record_error.__class__.__name__,
-                error=str(record_error),
+                error_summary=sanitized_exception_summary(record_error),
                 status="warning",
             )

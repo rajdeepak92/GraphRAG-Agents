@@ -33,6 +33,14 @@ from multi_agentic_graph_rag.config.settings import (
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
+    """Read dotenv within the authorized project and version scope.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        dict[str, str]: The typed result produced by the operation.
+    """
     if not path.exists():
         return {}
     values: dict[str, str] = {}
@@ -46,6 +54,15 @@ def _read_dotenv(path: Path) -> dict[str, str]:
 
 
 def _deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Execute the deep update operation within its declared architectural boundary.
+
+    Args:
+        base (dict[str, Any]): Base required by the operation's typed contract.
+        override (dict[str, Any]): Override required by the operation's typed contract.
+
+    Returns:
+        dict[str, Any]: The typed result produced by the operation.
+    """
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):
             _deep_update(base[key], value)
@@ -55,12 +72,32 @@ def _deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
 
 
 def _cfg_path(root: Path, data: dict[str, Any], key: str, default: str) -> Path:
+    """Execute the cfg path operation within its declared architectural boundary.
+
+    Args:
+        root (Path): Filesystem location authorized for this operation.
+        data (dict[str, Any]): Validated structured data for the operation.
+        key (str): Key required by the operation's typed contract.
+        default (str): Default required by the operation's typed contract.
+
+    Returns:
+        Path: The typed result produced by the operation.
+    """
     raw = data.get("paths", {}).get(key, default)
     path = Path(str(raw))
     return path if path.is_absolute() else root / path
 
 
 def _positive_int(value: Any, *, default: int) -> int:
+    """Execute the positive int operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+        default (int): Default required by the operation's typed contract.
+
+    Returns:
+        int: The typed result produced by the operation.
+    """
     if value is None:
         return default
     try:
@@ -71,6 +108,14 @@ def _positive_int(value: Any, *, default: int) -> int:
 
 
 def _optional_positive_int(value: Any) -> int | None:
+    """Execute the optional positive int operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+
+    Returns:
+        int | None: The typed result produced by the operation.
+    """
     if value is None or value == "":
         return None
     try:
@@ -81,6 +126,15 @@ def _optional_positive_int(value: Any) -> int | None:
 
 
 def _float(value: Any, *, default: float) -> float:
+    """Execute the float operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+        default (float): Default required by the operation's typed contract.
+
+    Returns:
+        float: The typed result produced by the operation.
+    """
     if value is None or value == "":
         return default
     try:
@@ -90,6 +144,14 @@ def _float(value: Any, *, default: float) -> float:
 
 
 def _hfil_checkpointer(value: Any) -> Literal["postgres", "memory"]:
+    """Execute the hfil checkpointer operation within its declared architectural boundary.
+
+    Args:
+        value (Any): Value required by the operation's typed contract.
+
+    Returns:
+        Literal['postgres', 'memory']: The typed result produced by the operation.
+    """
     text = str(value or "postgres").strip().lower()
     return "memory" if text == "memory" else "postgres"
 
@@ -98,6 +160,16 @@ def load_config(
     config_path: Path | None = None,
     cli_overrides: dict[str, Any] | None = None,
 ) -> AppSettings:
+    """Load config within the authorized project and version scope.
+
+    Args:
+        config_path (Path | None): Filesystem location authorized for this operation.
+        cli_overrides (dict[str, Any] | None): Cli overrides required by the operation's typed
+                                               contract.
+
+    Returns:
+        AppSettings: The typed result produced by the operation.
+    """
     root = Path(os.environ.get("PROJECT_ROOT", Path.cwd())).resolve()
     config_file = config_path or root / "config.json"
     config_data: dict[str, Any] = {}
@@ -487,6 +559,14 @@ def load_config(
 
 
 def ensure_runtime_dirs(settings: AppSettings) -> None:
+    """Ensure runtime dirs.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     dirs = [
         settings.paths.global_cache_dir,
         settings.paths.documents_inbox_dir,

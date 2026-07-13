@@ -52,6 +52,8 @@ _CompactPriority = Literal["High", "Medium", "Low"]
 
 @dataclass
 class _RequirementAccumulator:
+    """Coordinate requirement accumulator behavior within the services boundary."""
+
     requirement_id: str
     revision_id: str
     requirement_key: str
@@ -91,6 +93,30 @@ def build_requirement_artifact(
     requirement_memory: RequirementMemory | None = None,
     logger: RunLogger | None = None,
 ) -> RequirementArtifact:
+    """Build requirement artifact.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        version (str): Document version label within the project scope.
+        source_path (str): Filesystem location authorized for this operation.
+        source_checksum (str): Source checksum required by the operation's typed contract.
+        discovery (RequirementDiscoveryOutput): Discovery required by the operation's typed
+                                                contract.
+        prior_revisions (Mapping[str, RequirementRevisionSnapshot] | None): Prior revisions required
+                                                                            by the operation's typed
+                                                                            contract.
+        requirement_memory (RequirementMemory | None): Requirement memory required by the
+                                                       operation's typed contract.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        RequirementArtifact: The typed result produced by the operation.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     if logger is not None:
         logger.debug(
             "Building requirement artifact for {document_version_id}",
@@ -434,6 +460,17 @@ def build_canonical_requirements_artifact(
 
 
 def _compact_priority(priority: str) -> _CompactPriority:
+    """Execute the compact priority operation within its declared architectural boundary.
+
+    Args:
+        priority (str): Priority required by the operation's typed contract.
+
+    Returns:
+        _CompactPriority: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+    """
     normalized = priority.strip().lower()
     if normalized == "high":
         return "High"
@@ -445,14 +482,39 @@ def _compact_priority(priority: str) -> _CompactPriority:
 
 
 def normalize_fact_text(text: str) -> str:
+    """Normalize fact text deterministically within the active scope.
+
+    Args:
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return _WHITESPACE.sub(" ", text.strip().lower())
 
 
 def normalize_requirement_statement(statement: str) -> str:
+    """Normalize requirement statement deterministically within the active scope.
+
+    Args:
+        statement (str): Statement required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return _WHITESPACE.sub(" ", statement.strip().lower())
 
 
 def derive_requirement_key(statement: str, provided_key: str | None) -> str:
+    """Derive requirement key deterministically within the active scope.
+
+    Args:
+        statement (str): Statement required by the operation's typed contract.
+        provided_key (str | None): Provided key required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     source = provided_key.strip() if provided_key and provided_key.strip() else statement
     key = source.lower()
     key = _QUOTED_VALUE.sub("{value}", key)
@@ -463,6 +525,15 @@ def derive_requirement_key(statement: str, provided_key: str | None) -> str:
 
 
 def _to_verified_requirement(accumulator: _RequirementAccumulator) -> VerifiedRequirement:
+    """Convert the value to verified requirement without mutating its source.
+
+    Args:
+        accumulator (_RequirementAccumulator): Accumulator required by the operation's typed
+                                               contract.
+
+    Returns:
+        VerifiedRequirement: The typed result produced by the operation.
+    """
     fact_ids = sorted(accumulator.fact_ids)
     return VerifiedRequirement(
         requirement_id=accumulator.requirement_id,
@@ -492,6 +563,15 @@ def _to_verified_requirement(accumulator: _RequirementAccumulator) -> VerifiedRe
 
 
 def _validated_source_req_id(source_req_id: str | None, trace: SourceTrace) -> str | None:
+    """Execute the validated source req id operation within its declared architectural boundary.
+
+    Args:
+        source_req_id (str | None): Canonical source req id used as a safe operational anchor.
+        trace (SourceTrace): Trace required by the operation's typed contract.
+
+    Returns:
+        str | None: The typed result produced by the operation.
+    """
     normalized = normalize_source_req_id(source_req_id)
     if normalized is None:
         return None
@@ -500,6 +580,14 @@ def _validated_source_req_id(source_req_id: str | None, trace: SourceTrace) -> s
 
 
 def _fact_chunks_for_requirement(requirement: VerifiedRequirement) -> dict[str, str]:
+    """Execute the fact chunks for requirement operation within its declared architectural boundary.
+
+    Args:
+        requirement (VerifiedRequirement): Requirement required by the operation's typed contract.
+
+    Returns:
+        dict[str, str]: The typed result produced by the operation.
+    """
     chunks: dict[str, str] = {}
     for evidence in requirement.evidence:
         for fact_id in evidence.fact_ids:
@@ -514,6 +602,18 @@ def _build_delta_events(
     document_version_id: str,
     prior_revisions: Mapping[str, RequirementRevisionSnapshot],
 ) -> list[RequirementDeltaEvent]:
+    """Build delta events.
+
+    Args:
+        requirements (list[_RequirementAccumulator]): Ordered requirements processed without
+                                                      changing their identities.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        prior_revisions (Mapping[str, RequirementRevisionSnapshot]): Prior revisions required by the
+                                                                     operation's typed contract.
+
+    Returns:
+        list[RequirementDeltaEvent]: The typed result produced by the operation.
+    """
     events: list[RequirementDeltaEvent] = []
     active_revisions = dict(prior_revisions)
     for requirement in requirements:
@@ -578,6 +678,23 @@ def _delta_event(
     previous_revision_id: str | None = None,
     superseded_by_revision_id: str | None = None,
 ) -> RequirementDeltaEvent:
+    """Execute the delta event operation within its declared architectural boundary.
+
+    Args:
+        event_type (_DeltaEventType): Event type required by the operation's typed contract.
+        requirement (_RequirementAccumulator): Requirement required by the operation's typed
+                                               contract.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        evidence_ids (list[str]): Evidence ids required by the operation's typed contract.
+        revision_id (str | None): Canonical revision id used as a safe operational anchor.
+        previous_revision_id (str | None): Canonical previous revision id used as a safe operational
+                                           anchor.
+        superseded_by_revision_id (str | None): Canonical superseded by revision id used as a safe
+                                                operational anchor.
+
+    Returns:
+        RequirementDeltaEvent: The typed result produced by the operation.
+    """
     target_revision_id = revision_id or requirement.revision_id
     return RequirementDeltaEvent(
         event_id=requirement_delta_event_id(

@@ -27,6 +27,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     KnowledgeGraphArtifact,
     KnowledgeGraphStateRecord,
 )
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 from multi_agentic_graph_rag.services.knowledge_graph_builder import (
     build_and_project_knowledge_graph,
 )
@@ -54,6 +55,8 @@ class GuardedKnowledgeGraphBuild:
 
 
 class _KnowledgeStateStore(Protocol):
+    """Specify the provider-neutral knowledge state store interface required by this boundary."""
+
     def get_knowledge_graph_state(
         self, document_version_id: str
     ) -> KnowledgeGraphStateRecord | None: ...
@@ -73,6 +76,14 @@ def knowledge_graph_rebuild_command(project: str, document_version_id: str) -> s
 def _is_transient(exc: BaseException) -> bool:
     # Deterministic failures must never be retried: retrying only wastes time and
     # re-persists the same failure.
+    """Return whether transient.
+
+    Args:
+        exc (BaseException): Failure being classified or converted without exposing its message.
+
+    Returns:
+        bool: The typed result produced by the operation.
+    """
     if isinstance(exc, (ConfigurationError, ModelOutputError, ValueError)):
         return False
     if isinstance(exc, _TRANSIENT_TYPES):
@@ -81,6 +92,14 @@ def _is_transient(exc: BaseException) -> bool:
 
 
 def _extractor_fingerprint(reasoning_model: Any) -> str:
+    """Execute the extractor fingerprint operation within its declared architectural boundary.
+
+    Args:
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     for attr in ("fingerprint", "model_id", "model_name"):
         value = getattr(reasoning_model, attr, None)
         if value:
@@ -174,7 +193,7 @@ def run_guarded_knowledge_graph_build(
             status="failed",
             run_id=run_id,
             attempt=attempt,
-            failure_reason=str(exc),
+            failure_reason=sanitized_exception_summary(exc),
             chunk_count=len(chunks),
             extractor_fingerprint=_extractor_fingerprint(reasoning_model),
             started_at=started_at,
@@ -196,6 +215,23 @@ def _ready_state(
     reasoning_model: Any,
     started_at: datetime,
 ) -> KnowledgeGraphStateRecord:
+    """Execute the ready state operation within its declared architectural boundary.
+
+    Args:
+        project (str): Project scope that isolates persistence and retrieval.
+        document_id (str): Canonical document id used as a safe operational anchor.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        doc_version (str): Document version label within the project scope.
+        run_id (str): Canonical run id used as a safe operational anchor.
+        attempt (int): Bounded attempt used for deterministic processing.
+        chunk_count (int): Bounded chunk count used for deterministic processing.
+        artifact (KnowledgeGraphArtifact): Artifact required by the operation's typed contract.
+        reasoning_model (Any): Provider-neutral model adapter used by the operation.
+        started_at (datetime): Started at required by the operation's typed contract.
+
+    Returns:
+        KnowledgeGraphStateRecord: The typed result produced by the operation.
+    """
     return KnowledgeGraphStateRecord(
         document_version_id=document_version_id,
         project=project,
@@ -221,9 +257,36 @@ def _build_with_retry(
     document_version_id: str,
     build_call: Any,
 ) -> KnowledgeGraphArtifact:
+    """Build with retry.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        document_version_id (str): Canonical document version id used as a safe operational anchor.
+        build_call (Any): Build call required by the operation's typed contract.
+
+    Returns:
+        KnowledgeGraphArtifact: The typed result produced by the operation.
+
+    Raises:
+        last_exc: If validated inputs or required dependencies cannot satisfy the contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     attempts = max(1, settings.knowledge_graph.build_max_attempts)
     last_exc: BaseException | None = None
     for index in range(1, attempts + 1):
+        if logger is not None:
+            logger.debug(
+                "retry.attempt_started",
+                step="build_knowledge_graph",
+                operation="knowledge_graph.build",
+                document_version_id=document_version_id,
+                attempt=index,
+                max_attempts=attempts,
+                status="attempting",
+            )
         try:
             return build_call()  # type: ignore[no-any-return]
         except Exception as exc:
@@ -234,12 +297,28 @@ def _build_with_retry(
                         "Transient knowledge-graph build failure; retrying",
                         step="build_knowledge_graph",
                         document_version_id=document_version_id,
+                        operation="knowledge_graph.build",
                         attempt=index,
                         max_attempts=attempts,
-                        error=str(exc),
+                        retry_delay_seconds=0.0,
+                        exception_type=exc.__class__.__name__,
+                        error_summary=sanitized_exception_summary(exc),
                         status="retrying",
                     )
                 continue
+            if index == attempts and attempts > 1 and logger is not None:
+                logger.exception(
+                    "Knowledge-graph build retries exhausted",
+                    step="build_knowledge_graph",
+                    operation="knowledge_graph.build",
+                    document_version_id=document_version_id,
+                    attempt=index,
+                    max_attempts=attempts,
+                    total_attempts=index,
+                    attempts_exhausted=True,
+                    status="failed",
+                    exc=exc,
+                )
             raise
     assert last_exc is not None  # pragma: no cover - loop always raises or returns
     raise last_exc

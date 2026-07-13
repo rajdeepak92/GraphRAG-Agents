@@ -78,9 +78,12 @@ runtime/logs/*
 # Markdown docs
 *.md
 !/README.md
-!/huggingface-workflow.md
-!/azure-huggingface-workflow.md
-!/representation.md
 
 # Local test workspace
-tests/
+tests/*
+# Reviewable acceptance tests: tracked despite the local test workspace being
+# ignored, so the proof of correctness never lives only in an ignored file.
+!tests/test_story_scenario_identity.py
+!tests/test_chunk_retention_contract.py
+!tests/test_knowledge_graph_readiness.py
+!tests/test_master_projection.py

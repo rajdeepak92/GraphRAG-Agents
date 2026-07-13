@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any, cast
@@ -36,13 +37,29 @@ def parse_json_object(raw: str) -> dict[str, Any]:
 
 
 def sanitized_output_preview(raw: str, *, limit: int = 400) -> str:
-    preview = re.sub(r"\s+", " ", raw).strip()
-    if len(preview) > limit:
-        preview = preview[:limit] + "..."
-    return repr(preview)
+    """Return content-free response diagnostics for exception messages.
+
+    Args:
+        raw (str): Provider response that must not be exposed.
+        limit (int): Retained compatibility parameter; response text is never returned.
+
+    Returns:
+        str: A response length and stable truncated SHA-256 fingerprint.
+    """
+    del limit
+    fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"<response len={len(raw)} sha256={fingerprint}>"
 
 
 def _cleanup_model_output(raw: str) -> str:
+    """Execute the cleanup model output operation within its declared architectural boundary.
+
+    Args:
+        raw (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     text = re.sub(r"(?is)<think>.*?</think>", "", raw)
     text = re.sub(r"(?is)<think>.*?(?=\{)", "", text)
     fenced = re.findall(r"(?is)```(?:json)?\s*(.*?)```", text)
@@ -52,6 +69,15 @@ def _cleanup_model_output(raw: str) -> str:
 
 
 def _parse_balanced_object(raw: str, start: int) -> tuple[dict[str, Any] | None, int, bool]:
+    """Parse balanced object.
+
+    Args:
+        raw (str): Input text processed in memory and excluded from diagnostic logs.
+        start (int): Start required by the operation's typed contract.
+
+    Returns:
+        tuple[dict[str, Any] | None, int, bool]: The typed result produced by the operation.
+    """
     depth = 0
     in_string = False
     escaped = False

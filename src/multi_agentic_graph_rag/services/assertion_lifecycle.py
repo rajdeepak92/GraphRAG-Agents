@@ -42,6 +42,8 @@ class LifecycleUpdate:
 
 @dataclass
 class LifecycleResult:
+    """Coordinate lifecycle result behavior within the services boundary."""
+
     assertions: list[AssertionRecord] = field(default_factory=list)
     prior_updates: list[LifecycleUpdate] = field(default_factory=list)
     ambiguous_lineage_keys: list[str] = field(default_factory=list)
@@ -52,6 +54,17 @@ def reconcile_assertion_lifecycle(
     new_assertions: list[AssertionRecord],
     prior_assertions: list[PriorAssertion],
 ) -> LifecycleResult:
+    """Reconcile assertion lifecycle deterministically within the active scope.
+
+    Args:
+        new_assertions (list[AssertionRecord]): New assertions required by the operation's typed
+                                                contract.
+        prior_assertions (list[PriorAssertion]): Prior assertions required by the operation's typed
+                                                 contract.
+
+    Returns:
+        LifecycleResult: The typed result produced by the operation.
+    """
     new_by_lineage: dict[str, list[AssertionRecord]] = {}
     for assertion in new_assertions:
         new_by_lineage.setdefault(assertion.assertion_lineage_key, []).append(assertion)

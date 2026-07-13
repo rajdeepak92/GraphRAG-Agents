@@ -57,6 +57,15 @@ def master_content_checksum(
 
 
 def _derive_document_id(records: list[dict[str, Any]], fallback: str) -> str:
+    """Derive document id deterministically within the active scope.
+
+    Args:
+        records (list[dict[str, Any]]): Ordered records processed without changing their identities.
+        fallback (str): Fallback required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     for record in records:
         document_id = record.get("document_id")
         if document_id:

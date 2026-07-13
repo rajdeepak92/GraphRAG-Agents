@@ -26,6 +26,20 @@ def create_reasoning_model(
     logger: Any | None = None,
     run_dir: Path | None = None,
 ) -> ReasoningModel:
+    """Create reasoning model.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+        run_dir (Path | None): Filesystem location authorized for this operation.
+
+    Returns:
+        ReasoningModel: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     provider = settings.reasoning_model.provider
     if provider == "azure_openai":
         if not settings.azure_openai.endpoint:
@@ -67,6 +81,18 @@ def create_reasoning_model(
 
 
 def create_embedding_model(settings: AppSettings) -> EmbeddingModel:
+    """Create embedding model.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Returns:
+        EmbeddingModel: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     provider = settings.embedding_model.provider
     if provider == "azure_openai":
         if not settings.azure_openai.endpoint:
@@ -98,6 +124,18 @@ def create_embedding_model(settings: AppSettings) -> EmbeddingModel:
 
 
 def create_reranker_model(settings: AppSettings) -> RerankerModel:
+    """Create reranker model.
+
+    Args:
+        settings (AppSettings): Validated settings that control this operation.
+
+    Returns:
+        RerankerModel: The typed result produced by the operation.
+
+    Raises:
+        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
+        contract.
+    """
     provider = settings.reranker_model.provider
     if provider == "huggingface":
         if not settings.huggingface.reranker_model:

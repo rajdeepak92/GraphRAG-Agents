@@ -6,6 +6,8 @@ from enum import StrEnum
 
 
 class PromptSharedFragments(StrEnum):
+    """Define canonical prompt shared fragments literals shared across runtime boundaries."""
+
     JSON_ONLY = (
         "Return exactly one valid JSON object and no other text.\n"
         "Do not include markdown, code fences, commentary, XML tags, hidden reasoning, or "
@@ -16,6 +18,8 @@ class PromptSharedFragments(StrEnum):
 
 
 class PromptRequirementIdentity(StrEnum):
+    """Define canonical prompt requirement identity literals shared across runtime boundaries."""
+
     BIDIRECTIONAL_ENTAILMENT = (
         "Decide whether the PREMISE fully entails the HYPOTHESIS as the same atomic "
         "requirement, including actor, action, object, modality, conditions, exclusions, "
@@ -25,6 +29,8 @@ class PromptRequirementIdentity(StrEnum):
 
 
 class PromptRequirementDiscovery(StrEnum):
+    """Define canonical prompt requirement discovery literals shared across runtime boundaries."""
+
     SYS_PROMPT_REQUIREMENT_DISCOVERY = (
         "You are extracting requirement traceability data from exactly one document chunk.\n"
         f"{PromptSharedFragments.JSON_ONLY.value}\n\n"
@@ -226,6 +232,8 @@ class PromptRequirementDiscovery(StrEnum):
 
 
 class PromptUserStoryGeneration(StrEnum):
+    """Define canonical prompt user story generation literals shared across runtime boundaries."""
+
     SYS_PROMPT_USER_STORY_GENERATION = (
         "You are an enterprise business analyst generating implementation-ready user stories "
         "for exactly one approved requirement.\n"
@@ -263,6 +271,8 @@ class PromptUserStoryGeneration(StrEnum):
 
 
 class PromptTestScenarioGeneration(StrEnum):
+    """Define canonical test-scenario prompt literals shared across runtime boundaries."""
+
     SYS_PROMPT_TEST_SCENARIO_GENERATION = (
         "You are a test scenario generation engine. Output exactly one JSON object matching "
         "TestScenarioGenerationOutput and nothing else. Do not include markdown, code fences, "
@@ -369,6 +379,8 @@ DUPLICATE_JUDGE_PROMPT = (
 
 
 class PromptKnowledgeExtraction(StrEnum):
+    """Define canonical prompt knowledge extraction literals shared across runtime boundaries."""
+
     SYS_PROMPT_KNOWLEDGE_EXTRACTION = (
         "You are extracting a source-knowledge graph from exactly one document chunk.\n"
         f"{PromptSharedFragments.JSON_ONLY.value}\n\n"

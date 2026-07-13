@@ -16,6 +16,7 @@ from multi_agentic_graph_rag.llm_models.json_output import (
     parse_json_object,
     sanitized_output_preview,
 )
+from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -23,6 +24,8 @@ _DEFAULT_SYSTEM_MESSAGE = PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISC
 
 
 class HuggingFaceReasoningModel:
+    """Coordinate hugging face reasoning model behavior within the llm_models boundary."""
+
     provider_name = "huggingface"
 
     def __init__(
@@ -32,6 +35,13 @@ class HuggingFaceReasoningModel:
         logger: Any | None = None,
         run_dir: Path | None = None,
     ) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (HuggingFaceSettings): Validated settings that control this operation.
+            logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
+            run_dir (Path | None): Filesystem location authorized for this operation.
+        """
         self.settings = settings
         self.discovery_batch_size = settings.discovery_batch_size
         self.logger = logger
@@ -46,9 +56,15 @@ class HuggingFaceReasoningModel:
         self._model: Any | None = None
 
     def warmup(self) -> None:
+        """Warm up warmup."""
         self._load_components()
 
     def set_system_message(self, text: str) -> None:
+        """Execute the set system message operation within its declared architectural boundary.
+
+        Args:
+            text (str): Input text processed in memory and excluded from diagnostic logs.
+        """
         self._system_message = text
 
     def set_response_context(
@@ -58,6 +74,13 @@ class HuggingFaceReasoningModel:
         attempt: int,
         chunk_ids: list[str],
     ) -> None:
+        """Execute the set response context operation within its declared architectural boundary.
+
+        Args:
+            batch_index (int): Batch index required by the operation's typed contract.
+            attempt (int): Bounded attempt used for deterministic processing.
+            chunk_ids (list[str]): Chunk ids required by the operation's typed contract.
+        """
         self._response_context = {
             "batch_index": batch_index,
             "validation_attempt": attempt,
@@ -66,9 +89,21 @@ class HuggingFaceReasoningModel:
         self.last_response_path = None
 
     def clear_response_context(self) -> None:
+        """Clear safe response anchors after a provider call finishes."""
         self._response_context = {}
 
     def persist_last_response(self, *, filename: str | None = None) -> Path | None:
+        """Persist last response through the owning storage boundary.
+
+        Args:
+            filename (str | None): Filename required by the operation's typed contract.
+
+        Returns:
+            Path | None: The typed result produced by the operation.
+
+        Side Effects:
+            May create or atomically replace files in the configured artifact boundary.
+        """
         if self.run_dir is None or self._last_completion is None:
             return None
         response_name = filename
@@ -85,6 +120,20 @@ class HuggingFaceReasoningModel:
         return response_path
 
     def generate_structured(self, *, prompt: str, schema: type[T]) -> T:
+        """Generate structured.
+
+        Args:
+            prompt (str): Prompt text passed only to the selected model provider and never logged.
+            schema (type[T]): Schema required by the operation's typed contract.
+
+        Returns:
+            T: The typed result produced by the operation.
+
+        Raises:
+            RuntimeError: If validated inputs or required dependencies cannot satisfy the contract.
+            ModelOutputError: If validated inputs or required dependencies cannot satisfy the
+            contract.
+        """
         self.last_response_path = None
         if not self.settings.reasoning_model:
             raise RuntimeError("Hugging Face reasoning model is not configured")
@@ -122,7 +171,8 @@ class HuggingFaceReasoningModel:
             )
             raise ModelOutputError(
                 "Hugging Face model output could not be validated after retry: "
-                f"{retry_error}; preview={sanitized_output_preview(retry_completion)}"
+                f"{sanitized_exception_summary(retry_error)}; "
+                f"diagnostic={sanitized_output_preview(retry_completion)}"
             ) from retry_error
         self._record_response(
             prompt=prompt,
@@ -134,6 +184,14 @@ class HuggingFaceReasoningModel:
         return parsed
 
     def _generate_completion(self, prompt: str) -> str:
+        """Generate completion.
+
+        Args:
+            prompt (str): Prompt text passed only to the selected model provider and never logged.
+
+        Returns:
+            str: The typed result produced by the operation.
+        """
         tokenizer, model = self._load_components()
         rendered_prompt = _build_chat_prompt(tokenizer, prompt, self._system_message)
         inputs = tokenizer(rendered_prompt, return_tensors="pt")
@@ -154,6 +212,15 @@ class HuggingFaceReasoningModel:
         return cast(str, tokenizer.decode(completion_ids, skip_special_tokens=True))
 
     def _parse_completion(self, completion: str, schema: type[T]) -> T:
+        """Parse completion.
+
+        Args:
+            completion (str): Completion required by the operation's typed contract.
+            schema (type[T]): Schema required by the operation's typed contract.
+
+        Returns:
+            T: The typed result produced by the operation.
+        """
         return schema.model_validate(parse_json_object(completion))
 
     def _record_response(
@@ -165,6 +232,19 @@ class HuggingFaceReasoningModel:
         parse_failed: bool,
         error: Exception | None,
     ) -> None:
+        """Record response through the owning storage boundary.
+
+        Args:
+            prompt (str): Prompt text passed only to the selected model provider and never logged.
+            completion (str): Completion required by the operation's typed contract.
+            attempt (int): Bounded attempt used for deterministic processing.
+            parse_failed (bool): Parse failed required by the operation's typed contract.
+            error (Exception | None): Failure being classified or converted without exposing its
+                                      message.
+
+        Side Effects:
+            Emits sanitized run-scoped diagnostics when a logger is available.
+        """
         self._last_completion = completion
         self._last_prompt = prompt
         self._last_parse_attempt = attempt
@@ -181,18 +261,22 @@ class HuggingFaceReasoningModel:
             return
 
         if parse_failed:
-            self.logger.info(
-                "Raw Hugging Face response failed structured parsing",
+            self.logger.warning(
+                "Hugging Face response failed structured parsing",
                 step="discover_requirements.llm_response",
+                operation="huggingface.parse_structured",
                 attempt=attempt,
+                max_attempts=2,
+                retry_delay_seconds=0.0,
                 response_path=str(response_path) if response_path else None,
-                error=str(error) if error else None,
+                exception_type=error.__class__.__name__ if error else None,
+                error_summary=sanitized_exception_summary(error) if error else None,
                 raw_response=completion,
-                status="failed",
+                status="retrying" if attempt < 2 else "failed",
             )
         else:
             self.logger.info(
-                "Raw Hugging Face response captured",
+                "Hugging Face response diagnostic captured",
                 step="discover_requirements.llm_response",
                 attempt=attempt,
                 response_path=str(response_path) if response_path else None,
@@ -208,6 +292,11 @@ class HuggingFaceReasoningModel:
             )
 
     def _load_components(self) -> tuple[Any, Any]:
+        """Load components within the authorized project and version scope.
+
+        Returns:
+            tuple[Any, Any]: The typed result produced by the operation.
+        """
         if self._tokenizer is not None and self._model is not None:
             return self._tokenizer, self._model
         transformers = import_module("transformers")
@@ -226,6 +315,11 @@ class HuggingFaceReasoningModel:
         return tokenizer, model
 
     def _from_pretrained_kwargs(self) -> dict[str, Any]:
+        """Execute the from pretrained kwargs operation within its declared architectural boundary.
+
+        Returns:
+            dict[str, Any]: The typed result produced by the operation.
+        """
         kwargs: dict[str, Any] = {"local_files_only": self.settings.offline}
         if self.settings.token:
             kwargs["token"] = self.settings.token
@@ -233,9 +327,16 @@ class HuggingFaceReasoningModel:
 
 
 class HuggingFaceEmbeddingModel:
+    """Coordinate hugging face embedding model behavior within the llm_models boundary."""
+
     provider_name = "huggingface"
 
     def __init__(self, settings: HuggingFaceSettings) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (HuggingFaceSettings): Validated settings that control this operation.
+        """
         self.settings = settings
         self.embedding_fingerprint = f"hf:{settings.embedding_model}"
         from sentence_transformers import SentenceTransformer
@@ -246,14 +347,29 @@ class HuggingFaceEmbeddingModel:
         self.model = SentenceTransformer(settings.embedding_model, **kwargs)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Execute the embed documents operation within its declared architectural boundary.
+
+        Args:
+            texts (list[str]): Texts required by the operation's typed contract.
+
+        Returns:
+            list[list[float]]: The typed result produced by the operation.
+        """
         encoded = self.model.encode(texts, normalize_embeddings=True)
         return cast(list[list[float]], encoded.tolist())
 
 
 class HuggingFaceRerankerModel:
+    """Coordinate hugging face reranker model behavior within the llm_models boundary."""
+
     provider_name = "huggingface"
 
     def __init__(self, settings: HuggingFaceSettings) -> None:
+        """Execute the init operation within its declared architectural boundary.
+
+        Args:
+            settings (HuggingFaceSettings): Validated settings that control this operation.
+        """
         self.settings = settings
         self.reranker_fingerprint = f"hf:{settings.reranker_model}"
         from sentence_transformers import CrossEncoder
@@ -264,6 +380,15 @@ class HuggingFaceRerankerModel:
         self.model = CrossEncoder(settings.reranker_model, **kwargs)
 
     def rerank(self, query: str, documents: list[str]) -> list[int]:
+        """Execute the rerank operation within its declared architectural boundary.
+
+        Args:
+            query (str): Input text processed in memory and excluded from diagnostic logs.
+            documents (list[str]): Documents required by the operation's typed contract.
+
+        Returns:
+            list[int]: The typed result produced by the operation.
+        """
         if not documents:
             return []
         scores = self.model.predict([(query, document) for document in documents])
@@ -276,6 +401,16 @@ class HuggingFaceRerankerModel:
 
 
 def _build_chat_prompt(tokenizer: Any, prompt: str, system_message: str) -> str:
+    """Build chat prompt.
+
+    Args:
+        tokenizer (Any): Tokenizer required by the operation's typed contract.
+        prompt (str): Prompt text passed only to the selected model provider and never logged.
+        system_message (str): System message required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user", "content": prompt},
@@ -295,6 +430,15 @@ def _build_chat_prompt(tokenizer: Any, prompt: str, system_message: str) -> str:
 
 
 def _build_retry_prompt(prompt: str, error: Exception) -> str:
+    """Build retry prompt.
+
+    Args:
+        prompt (str): Prompt text passed only to the selected model provider and never logged.
+        error (Exception): Failure being classified or converted without exposing its message.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return (
         f"{prompt}\n\n"
         "The previous response failed validation. "
@@ -304,6 +448,15 @@ def _build_retry_prompt(prompt: str, error: Exception) -> str:
 
 
 def _move_inputs_to_model(inputs: Any, model: Any) -> Any:
+    """Execute the move inputs to model operation within its declared architectural boundary.
+
+    Args:
+        inputs (Any): Inputs required by the operation's typed contract.
+        model (Any): Provider-neutral model adapter used by the operation.
+
+    Returns:
+        Any: The typed result produced by the operation.
+    """
     device = getattr(model, "device", None)
     if device is None:
         return inputs
@@ -315,10 +468,26 @@ def _move_inputs_to_model(inputs: Any, model: Any) -> Any:
 
 
 def _prompt_token_count(input_ids: Any) -> int:
+    """Execute the prompt token count operation within its declared architectural boundary.
+
+    Args:
+        input_ids (Any): Input ids required by the operation's typed contract.
+
+    Returns:
+        int: The typed result produced by the operation.
+    """
     return len(input_ids[0])
 
 
 def _extract_chunks(prompt: str) -> list[tuple[str, str]]:
+    """Extract chunks.
+
+    Args:
+        prompt (str): Prompt text passed only to the selected model provider and never logged.
+
+    Returns:
+        list[tuple[str, str]]: The typed result produced by the operation.
+    """
     matches = re.findall(r"<chunk id=\"([^\"]+)\">\n(.*?)\n</chunk>", prompt, flags=re.S)
     return [(chunk_id, text.strip()) for chunk_id, text in matches]
 
@@ -328,6 +497,16 @@ def _response_filename(
     attempt: int,
     context: dict[str, Any] | None = None,
 ) -> str:
+    """Execute the response filename operation within its declared architectural boundary.
+
+    Args:
+        prompt (str): Prompt text passed only to the selected model provider and never logged.
+        attempt (int): Bounded attempt used for deterministic processing.
+        context (dict[str, Any] | None): Context required by the operation's typed contract.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     if context:
         batch_index = context.get("batch_index")
         validation_attempt = context.get("validation_attempt")

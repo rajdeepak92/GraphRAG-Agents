@@ -13,10 +13,26 @@ PARSER_FINGERPRINT = "parsing-v1"
 
 
 def checksum_bytes(data: bytes) -> str:
+    """Execute the checksum bytes operation within its declared architectural boundary.
+
+    Args:
+        data (bytes): Validated structured data for the operation.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return hashlib.sha256(data).hexdigest()
 
 
 def normalize_text(text: str) -> str:
+    """Normalize text deterministically within the active scope.
+
+    Args:
+        text (str): Input text processed in memory and excluded from diagnostic logs.
+
+    Returns:
+        str: The typed result produced by the operation.
+    """
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -24,6 +40,21 @@ def parse_document(
     path: Path,
     logger: RunLogger | None = None,
 ) -> tuple[list[ParsedBlock], str]:
+    """Parse document.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+        logger (RunLogger | None): Optional run-scoped logger used only for sanitized diagnostics.
+
+    Returns:
+        tuple[list[ParsedBlock], str]: The typed result produced by the operation.
+
+    Raises:
+        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
+
+    Side Effects:
+        Emits sanitized run-scoped diagnostics when a logger is available.
+    """
     if logger is not None:
         logger.debug(
             "Parsing document at {path}",
@@ -66,6 +97,14 @@ def parse_document(
 
 
 def _parse_text(path: Path) -> list[ParsedBlock]:
+    """Parse text.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        list[ParsedBlock]: The typed result produced by the operation.
+    """
     text = path.read_text(encoding="utf-8")
     blocks: list[ParsedBlock] = []
     cursor = 0
@@ -105,6 +144,14 @@ def _parse_text(path: Path) -> list[ParsedBlock]:
 
 
 def _parse_docx(path: Path) -> list[ParsedBlock]:
+    """Parse docx.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        list[ParsedBlock]: The typed result produced by the operation.
+    """
     from docx import Document
 
     doc = Document(str(path))
@@ -134,6 +181,17 @@ def _parse_docx(path: Path) -> list[ParsedBlock]:
 
 
 def _parse_pdf(path: Path) -> list[ParsedBlock]:
+    """Parse pdf.
+
+    Args:
+        path (Path): Filesystem location authorized for this operation.
+
+    Returns:
+        list[ParsedBlock]: The typed result produced by the operation.
+
+    Side Effects:
+        May create or atomically replace files in the configured artifact boundary.
+    """
     import fitz  # type: ignore[import-untyped]
 
     blocks: list[ParsedBlock] = []
