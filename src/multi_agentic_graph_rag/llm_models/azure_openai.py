@@ -17,6 +17,9 @@ from multi_agentic_graph_rag.observability.logging import sanitized_exception_su
 T = TypeVar("T", bound=BaseModel)
 _SAFE_RESPONSE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _SAFE_SCHEMA_NAME = re.compile(r"[^A-Za-z0-9_-]+")
+_EMBEDDING_MAX_INPUTS = 2_048
+_EMBEDDING_MAX_INPUT_TOKENS = 8_192
+_EMBEDDING_MAX_REQUEST_TOKENS = 300_000
 _AZURE_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
     {
         "default",
@@ -360,14 +363,27 @@ class AzureOpenAIEmbeddingModel:
 
     provider_name = "azure_openai"
 
-    def __init__(self, settings: AzureOpenAISettings) -> None:
+    def __init__(self, settings: AzureOpenAISettings, *, logger: Any | None = None) -> None:
         """Execute the init operation within its declared architectural boundary.
 
         Args:
             settings (AzureOpenAISettings): Validated settings that control this operation.
+            logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
         """
         self.settings = settings
         self.embedding_fingerprint = f"azure:{settings.embedding_deployment}"
+        self.logger = logger
+        if not all([settings.endpoint, settings.api_key, settings.embedding_deployment]):
+            raise RuntimeError("Azure OpenAI embeddings are not configured")
+        openai = import_module("openai")
+        self._client = cast(Any, openai).AzureOpenAI(
+            azure_endpoint=settings.endpoint,
+            api_key=settings.api_key,
+            api_version=settings.api_version,
+        )
+        tiktoken = import_module("tiktoken")
+        self._tokenizer = cast(Any, tiktoken).get_encoding("cl100k_base")
+        self._embedding_dimension: int | None = None
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Execute the embed documents operation within its declared architectural boundary.
@@ -381,24 +397,112 @@ class AzureOpenAIEmbeddingModel:
         Raises:
             RuntimeError: If validated inputs or required dependencies cannot satisfy the contract.
         """
-        if not all(
-            [
-                self.settings.endpoint,
-                self.settings.api_key,
-                self.settings.embedding_deployment,
-            ]
+        if not texts:
+            return []
+        if any(not isinstance(text, str) for text in texts):
+            raise ValueError("Azure embedding inputs must all be text")
+
+        token_counts: list[int] = []
+        for index, text in enumerate(texts):
+            try:
+                token_count = len(self._tokenizer.encode(text, disallowed_special=()))
+            except Exception:
+                raise ValueError(
+                    f"Azure embedding input at index {index} could not be tokenized"
+                ) from None
+            if token_count > _EMBEDDING_MAX_INPUT_TOKENS:
+                raise ValueError(
+                    f"Azure embedding input at index {index} exceeds the per-input token limit"
+                )
+            token_counts.append(token_count)
+
+        batches = _embedding_batches(texts, token_counts)
+        ordered_vectors: list[list[float]] = []
+        dimension = self._embedding_dimension
+        for batch in batches:
+            response = self._client.embeddings.create(
+                model=self.settings.embedding_deployment,
+                input=batch,
+            )
+            vectors, dimension = _validated_embedding_response(
+                response,
+                expected_count=len(batch),
+                expected_dimension=dimension,
+            )
+            ordered_vectors.extend(vectors)
+
+        self._embedding_dimension = dimension
+        debug = getattr(self.logger, "debug", None)
+        if callable(debug):
+            debug(
+                "Azure embedding request completed",
+                step="embed_documents",
+                operation="azure_openai.embed_documents",
+                input_count=len(texts),
+                batch_count=len(batches),
+                provider_call_count=len(batches),
+                status="completed",
+            )
+        return ordered_vectors
+
+
+def _embedding_batches(texts: list[str], token_counts: list[int]) -> list[list[str]]:
+    """Build stable Azure embedding batches within item and aggregate token limits."""
+    batches: list[list[str]] = []
+    batch: list[str] = []
+    batch_tokens = 0
+    for text, token_count in zip(texts, token_counts, strict=True):
+        if batch and (
+            len(batch) >= _EMBEDDING_MAX_INPUTS
+            or batch_tokens + token_count > _EMBEDDING_MAX_REQUEST_TOKENS
         ):
-            raise RuntimeError("Azure OpenAI embeddings are not configured")
+            batches.append(batch)
+            batch = []
+            batch_tokens = 0
+        batch.append(text)
+        batch_tokens += token_count
+    if batch:
+        batches.append(batch)
+    return batches
 
-        AzureOpenAI = cast(Any, import_module("openai")).AzureOpenAI
 
-        client = AzureOpenAI(
-            azure_endpoint=self.settings.endpoint,
-            api_key=self.settings.api_key,
-            api_version=self.settings.api_version,
-        )
-        response = client.embeddings.create(model=self.settings.embedding_deployment, input=texts)
-        return [item.embedding for item in response.data]
+def _validated_embedding_response(
+    response: Any,
+    *,
+    expected_count: int,
+    expected_dimension: int | None,
+) -> tuple[list[list[float]], int]:
+    """Validate and reorder one Azure embedding response by its explicit indices."""
+    data = getattr(response, "data", None)
+    if not isinstance(data, list) or len(data) != expected_count:
+        raise ModelOutputError("Azure OpenAI embedding response count did not match the request")
+
+    ordered: list[list[float] | None] = [None] * expected_count
+    dimension = expected_dimension
+    for item in data:
+        index = getattr(item, "index", None)
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ModelOutputError("Azure OpenAI embedding response contained an invalid index")
+        if index < 0 or index >= expected_count:
+            raise ModelOutputError(
+                "Azure OpenAI embedding response contained an out-of-range index"
+            )
+        if ordered[index] is not None:
+            raise ModelOutputError("Azure OpenAI embedding response contained a duplicate index")
+        vector = getattr(item, "embedding", None)
+        if not isinstance(vector, list) or not vector:
+            raise ModelOutputError("Azure OpenAI embedding response contained an empty vector")
+        if dimension is None:
+            dimension = len(vector)
+        elif len(vector) != dimension:
+            raise ModelOutputError(
+                "Azure OpenAI embedding response contained inconsistent vector dimensions"
+            )
+        ordered[index] = vector
+
+    if dimension is None or any(vector is None for vector in ordered):
+        raise ModelOutputError("Azure OpenAI embedding response omitted one or more indices")
+    return [vector for vector in ordered if vector is not None], dimension
 
 
 def _strict_response_format(schema: type[BaseModel]) -> dict[str, Any]:

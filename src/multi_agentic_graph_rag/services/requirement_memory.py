@@ -31,6 +31,7 @@ from typing import Literal, Protocol
 
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementIdentity
 from multi_agentic_graph_rag.config.settings import RequirementIdentitySettings
+from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.domain.schemas import StrictModel
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
 from multi_agentic_graph_rag.services.requirement_identity_resolver import (
@@ -259,8 +260,12 @@ class RequirementMemory:
         self._judge = judge
         self._logger = logger
         self._entries: list[MemoryEntry] = []
+        self._semantic_entries: list[MemoryEntry] = []
         self._by_hash: dict[str, MemoryEntry] = {}
         self._by_signature: dict[str, MemoryEntry] = {}
+        self._embedding_dimension: int | None = None
+        self._embedding_invocations = 0
+        self._embedding_items = 0
         self._entailment_cache: dict[tuple[str, str], bool] = {}
         self._entailment_calls_used = 0
         self._entailment_cache_hits = 0
@@ -285,6 +290,16 @@ class RequirementMemory:
         """Return the number of cached pairwise decisions reused by this memory."""
         return self._entailment_cache_hits
 
+    @property
+    def embedding_invocations(self) -> int:
+        """Return the number of logical embedding operations requested by this memory."""
+        return self._embedding_invocations
+
+    @property
+    def embedding_items(self) -> int:
+        """Return the number of texts submitted by logical embedding operations."""
+        return self._embedding_items
+
     def seed(self, entries: Iterable[MemoryEntry]) -> None:
         """Seed seed.
 
@@ -292,8 +307,36 @@ class RequirementMemory:
             entries (Iterable[MemoryEntry]): Ordered entries processed without changing their
                                              identities.
         """
-        for entry in entries:
-            self.add(entry)
+        seed_entries = list(entries)
+        missing = [
+            entry
+            for entry in seed_entries
+            if entry.semantic_recall_enabled and entry.embedding is None
+        ]
+        generated: list[list[float]] = []
+        if missing and self._embedder is not None:
+            generated = self._embed([entry.statement for entry in missing])
+
+        vectors = [
+            entry.embedding
+            for entry in seed_entries
+            if entry.semantic_recall_enabled and entry.embedding is not None
+        ]
+        vectors.extend(generated)
+        dimension = self._validate_vectors(vectors)
+
+        for entry, vector in zip(missing, generated, strict=True):
+            entry.embedding = vector
+        if dimension is not None:
+            self._embedding_dimension = dimension
+        for entry in seed_entries:
+            self._register(entry)
+        self._log_seed(
+            entry_count=len(seed_entries),
+            semantic_entry_count=sum(entry.semantic_recall_enabled for entry in seed_entries),
+            embedding_invocation_count=1 if generated else 0,
+            embedding_item_count=len(generated),
+        )
 
     def add(self, entry: MemoryEntry) -> None:
         """Execute the add operation within its declared architectural boundary.
@@ -304,10 +347,21 @@ class RequirementMemory:
         Side Effects:
             May invoke configured model or workflow providers.
         """
-        if entry.embedding is None and self._embedder is not None:
-            vectors = self._embedder.embed_documents([entry.statement])
-            entry.embedding = vectors[0] if vectors else None
+        if entry.semantic_recall_enabled:
+            vector = entry.embedding
+            if vector is None and self._embedder is not None:
+                vector = self._embed([entry.statement])[0]
+            dimension = self._validate_vectors([vector] if vector is not None else [])
+            if dimension is not None:
+                self._embedding_dimension = dimension
+            entry.embedding = vector
+        self._register(entry)
+
+    def _register(self, entry: MemoryEntry) -> None:
+        """Register one validated entry in exact and eligible recall indexes."""
         self._entries.append(entry)
+        if entry.semantic_recall_enabled:
+            self._semantic_entries.append(entry)
         self._by_hash.setdefault(
             _family_hash(entry.requirement_type, entry.normalized_statement or entry.statement),
             entry,
@@ -346,12 +400,13 @@ class RequirementMemory:
         source_req_id: str | None = None,
     ) -> list[Candidate]:
         """Bounded, deduped candidate recall combining every non-authoritative signal."""
+        if not self._semantic_entries:
+            return []
         signature = requirement_lineage_signature(statement, requirement_type)
         query_tokens = _tokens(statement)
         query_vector: list[float] | None = None
         if self._embedder is not None:
-            vectors = self._embedder.embed_documents([statement])
-            query_vector = vectors[0] if vectors else None
+            query_vector = self._embed([statement])[0]
 
         scored: dict[str, tuple[float, list[str]]] = {}
 
@@ -372,9 +427,7 @@ class RequirementMemory:
             else:
                 current[1].append(reason)
 
-        for entry in self._entries:
-            if not entry.semantic_recall_enabled:
-                continue
+        for entry in self._semantic_entries:
             if entry.signature == signature:
                 _bump(entry, 1.0, "signature")
             if source_req_id and entry.source_req_id and entry.source_req_id == source_req_id:
@@ -387,7 +440,9 @@ class RequirementMemory:
                 if cosine >= self._settings.recall_cosine_threshold:
                     _bump(entry, cosine, "embedding_cosine")
 
-        entries_by_key = {e.revision_id or e.requirement_id: e for e in self._entries}
+        entries_by_key = {
+            entry.revision_id or entry.requirement_id: entry for entry in self._semantic_entries
+        }
         pool = [
             Candidate(entry=entries_by_key[key], score=score, reasons=tuple(reasons))
             for key, (score, reasons) in scored.items()
@@ -414,6 +469,8 @@ class RequirementMemory:
         started = perf_counter()
         calls_before = self._entailment_calls_used
         cache_hits_before = self._entailment_cache_hits
+        embedding_invocations_before = self._embedding_invocations
+        embedding_items_before = self._embedding_items
         candidate_count = 0
 
         def _finish(result: ReconcileResult) -> ReconcileResult:
@@ -425,6 +482,10 @@ class RequirementMemory:
                 candidate_count=candidate_count,
                 model_call_count=self._entailment_calls_used - calls_before,
                 cache_hits=self._entailment_cache_hits - cache_hits_before,
+                embedding_invocation_count=(
+                    self._embedding_invocations - embedding_invocations_before
+                ),
+                embedding_item_count=self._embedding_items - embedding_items_before,
                 elapsed_ms=(perf_counter() - started) * 1000.0,
             )
             return result
@@ -635,6 +696,8 @@ class RequirementMemory:
         candidate_count: int,
         model_call_count: int,
         cache_hits: int,
+        embedding_invocation_count: int,
+        embedding_item_count: int,
         elapsed_ms: float,
     ) -> None:
         """Emit one safe terminal reconciliation record for a requirement identity."""
@@ -651,6 +714,8 @@ class RequirementMemory:
                 candidate_count=candidate_count,
                 cache_hits=cache_hits,
                 model_call_count=model_call_count,
+                embedding_invocation_count=embedding_invocation_count,
+                embedding_item_count=embedding_item_count,
                 entailment_calls_used=self._entailment_calls_used,
                 budget_remaining=max(
                     0,
@@ -659,5 +724,59 @@ class RequirementMemory:
                 decision=result.decision,
                 reason=result.reasons[0] if result.reasons else "unspecified",
                 elapsed_ms=round(elapsed_ms, 3),
+                status="completed",
+            )
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        """Invoke the configured embedder once and validate its ordered output."""
+        if self._embedder is None:
+            raise RuntimeError("Requirement memory embedding model is unavailable")
+        self._embedding_invocations += 1
+        self._embedding_items += len(texts)
+        vectors = self._embedder.embed_documents(texts)
+        if len(vectors) != len(texts):
+            raise ModelOutputError(
+                "Requirement memory embedding output count did not match the requested item count"
+            )
+        self._validate_vectors(vectors)
+        return vectors
+
+    def _validate_vectors(self, vectors: list[list[float]]) -> int | None:
+        """Validate non-empty, dimensionally consistent vectors without mutating memory."""
+        if not vectors:
+            return self._embedding_dimension
+        if any(not vector for vector in vectors):
+            raise ModelOutputError("Requirement memory embedding output contained an empty vector")
+        dimensions = {len(vector) for vector in vectors}
+        if len(dimensions) != 1:
+            raise ModelOutputError(
+                "Requirement memory embedding output contained inconsistent vector dimensions"
+            )
+        dimension = dimensions.pop()
+        if self._embedding_dimension is not None and dimension != self._embedding_dimension:
+            raise ModelOutputError(
+                "Requirement memory embedding output dimension changed within the memory instance"
+            )
+        return dimension
+
+    def _log_seed(
+        self,
+        *,
+        entry_count: int,
+        semantic_entry_count: int,
+        embedding_invocation_count: int,
+        embedding_item_count: int,
+    ) -> None:
+        """Emit sanitized seed metrics without requirement text or vectors."""
+        debug = getattr(self._logger, "debug", None)
+        if callable(debug):
+            debug(
+                "Requirement identity memory seed completed",
+                step="seed_prior_requirements",
+                operation="requirement_identity.seed",
+                entry_count=entry_count,
+                semantic_entry_count=semantic_entry_count,
+                embedding_invocation_count=embedding_invocation_count,
+                embedding_item_count=embedding_item_count,
                 status="completed",
             )

@@ -48,7 +48,9 @@ class UserStoryWorkflowTests(unittest.TestCase):
                     )
                 )
                 stack.enter_context(
-                    patch.object(usg, "create_embedding_model", lambda settings: _FakeEmbedding())
+                    patch.object(
+                        usg, "create_embedding_model", lambda settings, **kwargs: _FakeEmbedding()
+                    )
                 )
                 stack.enter_context(
                     patch.object(usg, "create_reranker_model", lambda settings: _FakeReranker())

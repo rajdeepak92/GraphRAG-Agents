@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementIdentity
 from multi_agentic_graph_rag.config.settings import RequirementIdentitySettings
+from multi_agentic_graph_rag.domain.errors import ModelOutputError
 from multi_agentic_graph_rag.services.requirement_memory import (
     MemoryEntry,
     ModelEntailmentJudge,
@@ -108,9 +109,41 @@ class _RecordingLogger:
 class _ConstEmbedder:
     def __init__(self, vector: list[float]) -> None:
         self._vector = vector
+        self.calls: list[list[str]] = []
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
         return [list(self._vector) for _ in texts]
+
+
+class _FixedEmbedder:
+    def __init__(self, responses: list[list[list[float]]]) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[str]] = []
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return self._responses.pop(0)
+
+
+class _RecordingReranker:
+    def __init__(self, order: list[int]) -> None:
+        self._order = order
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def rerank(self, query: str, documents: list[str]) -> list[int]:
+        self.calls.append((query, list(documents)))
+        return list(self._order)
+
+
+class _SequenceJudge:
+    def __init__(self, results: list[bool]) -> None:
+        self._results = list(results)
+        self.calls = 0
+
+    def equivalent(self, premise: str, hypothesis: str) -> bool:
+        self.calls += 1
+        return self._results.pop(0)
 
 
 class ReconcileTests(unittest.TestCase):
@@ -151,6 +184,186 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(result.decision, "EXACT")
         self.assertEqual(result.requirement_id, "REQ-1")
         self.assertEqual(result.revision_id, "REV-1")
+
+    def test_disabled_add_skips_embedding_but_keeps_exact_indexes(self) -> None:
+        embedder = _ConstEmbedder([1.0, 0.0])
+        memory = RequirementMemory(settings=_settings(), embedder=embedder)
+        entry = _entry(
+            "REQ-1",
+            "REV-1",
+            "The controller shall trip at 70C.",
+            semantic_recall_enabled=False,
+        )
+
+        memory.add(entry)
+
+        self.assertEqual(embedder.calls, [])
+        self.assertIs(memory.exact_statement_match(entry.statement, entry.requirement_type), entry)
+        self.assertIs(
+            memory.exact_signature_match(
+                "The controller shall trip at 80C.", entry.requirement_type
+            ),
+            entry,
+        )
+
+    def test_empty_semantic_memory_skips_query_embedding(self) -> None:
+        embedder = _ConstEmbedder([1.0, 0.0])
+        memory = RequirementMemory(settings=_settings(), embedder=embedder)
+        memory.add(
+            _entry(
+                "REQ-1",
+                "REV-1",
+                "A current-run requirement.",
+                semantic_recall_enabled=False,
+            )
+        )
+
+        candidates = memory.candidates(
+            statement="An unrelated incoming requirement.",
+            requirement_type="Functional Requirement",
+        )
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(embedder.calls, [])
+
+    def test_exact_reuse_skips_embedding_reranking_and_entailment(self) -> None:
+        embedder = _ConstEmbedder([1.0, 0.0])
+        reranker = _RecordingReranker([0])
+        judge = _AlwaysJudge(forward=True, backward=True)
+        memory = RequirementMemory(
+            settings=_settings(use_reranker=True),
+            embedder=embedder,
+            reranker=reranker,
+            judge=judge,
+        )
+        memory.seed(
+            [_entry("REQ-1", "REV-1", "The gateway shall expose Modbus.", embedding=[1.0, 0.0])]
+        )
+        embedder.calls.clear()
+
+        result = memory.reconcile(
+            statement="The gateway shall expose Modbus.",
+            requirement_type="Functional Requirement",
+            normalized_statement="the gateway shall expose modbus.",
+        )
+
+        self.assertEqual(result.decision, "EXACT")
+        self.assertEqual(embedder.calls, [])
+        self.assertEqual(reranker.calls, [])
+        self.assertEqual(judge.calls, 0)
+
+    def test_current_run_only_entries_make_zero_identity_embedding_calls(self) -> None:
+        embedder = _ConstEmbedder([1.0, 0.0])
+        memory = RequirementMemory(settings=_settings(), embedder=embedder)
+
+        for index in range(216):
+            memory.add(
+                _entry(
+                    f"REQ-{index}",
+                    f"REV-{index}",
+                    f"Current-run requirement {index}.",
+                    semantic_recall_enabled=False,
+                )
+            )
+
+        self.assertEqual(memory.size, 216)
+        self.assertEqual(memory.embedding_invocations, 0)
+        self.assertEqual(memory.embedding_items, 0)
+        self.assertEqual(embedder.calls, [])
+
+    def test_prior_entries_retain_full_semantic_reconciliation_pipeline(self) -> None:
+        embedder = _FixedEmbedder(
+            [
+                [[1.0, 0.0], [1.0, 0.0]],
+                [[1.0, 0.0]],
+            ]
+        )
+        reranker = _RecordingReranker([1, 0])
+        judge = _SequenceJudge([True, False])
+        memory = RequirementMemory(
+            settings=_settings(use_reranker=True, token_overlap_threshold=0.99),
+            embedder=embedder,
+            reranker=reranker,
+            judge=judge,
+        )
+        memory.seed(
+            [
+                _entry("REQ-1", "REV-1", "Prior statement one."),
+                _entry("REQ-2", "REV-2", "Prior statement two."),
+            ]
+        )
+
+        result = memory.reconcile(
+            statement="A completely reworded candidate requirement.",
+            requirement_type="Functional Requirement",
+            normalized_statement="a completely reworded candidate requirement.",
+        )
+
+        self.assertEqual(result.decision, "EXACT")
+        self.assertEqual(result.requirement_id, "REQ-2")
+        self.assertEqual(len(embedder.calls), 2)
+        self.assertEqual(len(reranker.calls), 1)
+        self.assertEqual(judge.calls, 2)
+
+    def test_seed_batches_missing_vectors_once_in_order(self) -> None:
+        expected_vectors = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]]
+        embedder = _FixedEmbedder([[list(vector) for vector in expected_vectors]])
+        logger = _RecordingLogger()
+        memory = RequirementMemory(settings=_settings(), embedder=embedder, logger=logger)
+        entries = [
+            _entry(f"REQ-{index}", f"REV-{index}", f"Prior statement {index}.")
+            for index in range(3)
+        ]
+
+        memory.seed(entries)
+
+        self.assertEqual(embedder.calls, [[entry.statement for entry in entries]])
+        self.assertEqual([entry.embedding for entry in entries], expected_vectors)
+        self.assertEqual(memory.embedding_invocations, 1)
+        self.assertEqual(memory.embedding_items, 3)
+        self.assertEqual(logger.debugs[0]["embedding_invocation_count"], 1)
+        self.assertEqual(logger.debugs[0]["embedding_item_count"], 3)
+
+    def test_seed_preserves_provided_vectors_and_excludes_disabled_entries(self) -> None:
+        embedder = _FixedEmbedder([[[0.0, 1.0]]])
+        memory = RequirementMemory(settings=_settings(), embedder=embedder)
+        provided = _entry("REQ-1", "REV-1", "Provided.", embedding=[1.0, 0.0])
+        missing = _entry("REQ-2", "REV-2", "Missing.")
+        disabled = _entry("REQ-3", "REV-3", "Disabled.", semantic_recall_enabled=False)
+
+        memory.seed([provided, missing, disabled])
+
+        self.assertEqual(embedder.calls, [["Missing."]])
+        self.assertEqual(provided.embedding, [1.0, 0.0])
+        self.assertEqual(missing.embedding, [0.0, 1.0])
+        self.assertIsNone(disabled.embedding)
+
+    def test_invalid_seed_embedding_output_rejects_entire_seed(self) -> None:
+        invalid_outputs = (
+            [],
+            [[1.0]],
+            [[1.0], [1.0], [1.0]],
+            [[], [1.0]],
+            [[1.0], [1.0, 0.0]],
+        )
+        for vectors in invalid_outputs:
+            with self.subTest(vectors=vectors):
+                memory = RequirementMemory(
+                    settings=_settings(),
+                    embedder=_FixedEmbedder([vectors]),
+                )
+                entries = [
+                    _entry("REQ-1", "REV-1", "Prior one."),
+                    _entry("REQ-2", "REV-2", "Prior two."),
+                ]
+
+                with self.assertRaises(ModelOutputError):
+                    memory.seed(entries)
+
+                self.assertEqual(memory.size, 0)
+                self.assertIsNone(
+                    memory.exact_statement_match("Prior one.", "Functional Requirement")
+                )
 
     def test_same_signature_different_wording_is_new_revision(self) -> None:
         memory = RequirementMemory(settings=_settings())
@@ -406,6 +619,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(logger.debugs[0]["candidate_count"], 0)
         self.assertEqual(logger.debugs[0]["cache_hits"], 0)
         self.assertEqual(logger.debugs[0]["model_call_count"], 0)
+        self.assertEqual(logger.debugs[0]["embedding_invocation_count"], 0)
+        self.assertEqual(logger.debugs[0]["embedding_item_count"], 0)
         self.assertEqual(logger.debugs[0]["budget_remaining"], 200)
         self.assertEqual(logger.debugs[0]["decision"], "DISTINCT")
         self.assertEqual(logger.debugs[0]["reason"], "no_recall_candidate")

@@ -38,6 +38,7 @@ marag = "multi_agentic_graph_rag.cli:main"
 azure = [
     "azure-identity>=1.25.3",
     "openai>=2.44.0",
+    "tiktoken>=0.12.0",
 ]
 local-llm = [
     "accelerate>=1.14.0",

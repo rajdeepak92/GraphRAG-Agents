@@ -210,7 +210,7 @@ def _run_pipeline(
         postgres.ensure_schema()
 
         reasoning_model = create_reasoning_model(settings, logger=logger, run_dir=run_dir)
-        embedding_model = create_embedding_model(settings)
+        embedding_model = create_embedding_model(settings, logger=logger)
         reranker_model = create_reranker_model(settings)
         _warmup_reasoning_model(reasoning_model)
         neo4j.ensure_search_index()

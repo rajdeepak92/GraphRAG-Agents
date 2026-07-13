@@ -269,7 +269,7 @@ def _run_pipeline(
             logger=logger,
             run_dir=run_dir,
         )
-        embedding_model = create_embedding_model(settings)
+        embedding_model = create_embedding_model(settings, logger=logger)
         reranker_model = create_reranker_model(settings)
         _warmup_reasoning_model(reasoning_model)
         if logger is not None:

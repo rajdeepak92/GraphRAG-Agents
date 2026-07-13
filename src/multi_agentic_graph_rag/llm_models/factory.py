@@ -80,11 +80,16 @@ def create_reasoning_model(
     raise ConfigurationError(f"Unsupported reasoning model provider for ingest: {provider}")
 
 
-def create_embedding_model(settings: AppSettings) -> EmbeddingModel:
+def create_embedding_model(
+    settings: AppSettings,
+    *,
+    logger: Any | None = None,
+) -> EmbeddingModel:
     """Create embedding model.
 
     Args:
         settings (AppSettings): Validated settings that control this operation.
+        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
 
     Returns:
         EmbeddingModel: The typed result produced by the operation.
@@ -108,7 +113,12 @@ def create_embedding_model(settings: AppSettings) -> EmbeddingModel:
                 "EMBEDDING_MODEL_PROVIDER=azure_openai requires openai; "
                 "install with: uv sync --dev --extra azure"
             )
-        return AzureOpenAIEmbeddingModel(settings.azure_openai)
+        if find_spec("tiktoken") is None:
+            raise ConfigurationError(
+                "EMBEDDING_MODEL_PROVIDER=azure_openai requires tiktoken; "
+                "install with: uv sync --dev --extra azure"
+            )
+        return AzureOpenAIEmbeddingModel(settings.azure_openai, logger=logger)
     if provider == "huggingface":
         if not settings.huggingface.embedding_model:
             raise ConfigurationError(
