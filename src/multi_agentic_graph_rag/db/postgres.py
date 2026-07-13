@@ -1126,6 +1126,14 @@ class PostgresStore:
 
         Side Effects:
             May write transactional or derivative state through the configured store.
+
+        Invariant:
+            Callers MUST hold ``document_identity_lock(project, document_id)`` for this document
+            lineage. That session-level advisory lock is the sole serializer for a document's
+            requirement persistence and rejects a second concurrent ingest of the same document,
+            so no additional per-write advisory lock is taken here. Acquiring one on this method's
+            separate connection would self-deadlock against the caller's already-held session lock
+            (same key, shared advisory-lock space).
         """
         public_payload = build_canonical_requirements_artifact(artifact).model_dump(mode="json")
         if self.settings.postgres.mode == "local_json":
@@ -1150,10 +1158,9 @@ class PostgresStore:
             return artifact
         with self._connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"{artifact.project}:{artifact.document_id}",),
-                )
+                # No advisory lock here: the caller holds document_identity_lock for this
+                # lineage (see Invariant above). Re-locking the same key on this separate
+                # connection would self-deadlock against the caller's held session lock.
                 cursor.execute(
                     """
                     insert into requirement_artifacts

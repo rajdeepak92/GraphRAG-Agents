@@ -75,6 +75,41 @@ class IngestionPersistenceBoundaryTests(unittest.TestCase):
         self.assertIn("pg_try_advisory_lock", statements[0])
         self.assertIn("pg_advisory_unlock", statements[-1])
 
+    def test_persist_artifact_takes_no_per_write_advisory_lock(self) -> None:
+        # Regression: persist_artifact runs inside the caller's document_identity_lock, which
+        # holds a session-level pg_try_advisory_lock on f"{project}:{document_id}". Taking a
+        # pg_advisory_xact_lock on the same key here (a separate, unpooled connection) blocked
+        # forever against that held session lock -> the ingest hung at persistence. The artifact
+        # upsert must still run; the redundant advisory lock must be gone.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = PostgresStore(
+                _settings(
+                    Path(temp_dir),
+                    postgres_mode="postgres",
+                    neo4j_mode="neo4j",
+                )
+            )
+            connection = MagicMock()
+            cursor = connection.cursor.return_value.__enter__.return_value
+
+            with (
+                patch.object(store, "_connect", return_value=nullcontext(connection)),
+                patch.object(store, "_persist_requirement_ledger_postgres"),
+                patch.object(store, "refresh_stage_master"),
+            ):
+                store.persist_artifact(_artifact(), "/tmp/requirements.json", "RUN-1")
+
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertFalse(
+            any("pg_advisory_xact_lock" in sql for sql in statements),
+            msg=f"persist_artifact must not take a per-write advisory lock; saw: {statements}",
+        )
+        self.assertTrue(
+            any("insert into requirement_artifacts" in sql for sql in statements),
+            msg=f"persist_artifact must still upsert the artifact; saw: {statements}",
+        )
+        connection.commit.assert_called_once()
+
     def test_ingestion_persists_chunks_and_requirements_to_separate_stores(self) -> None:
         events: list[str] = []
         artifact = _artifact()
