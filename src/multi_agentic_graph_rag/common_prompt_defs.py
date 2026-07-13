@@ -15,6 +15,15 @@ class PromptSharedFragments(StrEnum):
     VALIDATION_ERROR_PREFIX = "Validation error: "
 
 
+class PromptRequirementIdentity(StrEnum):
+    BIDIRECTIONAL_ENTAILMENT = (
+        "Decide whether the PREMISE fully entails the HYPOTHESIS as the same atomic "
+        "requirement, including actor, action, object, modality, conditions, exclusions, "
+        "and scope. Similar topic or wording is not entailment. Return JSON only as "
+        '{"entails": true} or {"entails": false}.\n'
+    )
+
+
 class PromptRequirementDiscovery(StrEnum):
     SYS_PROMPT_REQUIREMENT_DISCOVERY = (
         "You are extracting requirement traceability data from exactly one document chunk.\n"
@@ -35,6 +44,15 @@ class PromptRequirementDiscovery(StrEnum):
         '          "priority": "Medium",\n'
         '          "requirement_key": "...",\n'
         '          "source_req_id": "BR-SEN-001",\n'
+        '          "actor": "controller",\n'
+        '          "modality": "shall",\n'
+        '          "action": "poll",\n'
+        '          "object": "Sensor-1",\n'
+        '          "condition": "every 5 seconds",\n'
+        '          "polarity": "positive",\n'
+        '          "requirement_family": "Functional Requirement",\n'
+        '          "entity_discriminators": ["Sensor-1"],\n'
+        '          "mutable_parameters": ["5 seconds"],\n'
         '          "confidence": 0.85\n'
         "        }\n"
         "      ]\n"
@@ -44,9 +62,10 @@ class PromptRequirementDiscovery(StrEnum):
         "Required root field: facts.\n"
         "Each fact entry must contain exactly these fields: fact_text, quote, requirements.\n"
         "Each requirement entry must contain exactly these fields: req_text, requirement_type, "
-        "priority, requirement_key, source_req_id, confidence.\n"
-        "All returned field values must be JSON strings except facts and requirements, which "
-        "must be JSON arrays.\n"
+        "priority, requirement_key, source_req_id, actor, modality, action, object, condition, "
+        "polarity, requirement_family, entity_discriminators, mutable_parameters, confidence.\n"
+        "entity_discriminators and mutable_parameters must be JSON arrays of strings; confidence "
+        "must be a JSON number; other requirement fields must be strings.\n"
         "Never return null for fact_text, quote, requirements, req_text, requirement_type, "
         "priority, requirement_key, or confidence. Use an empty string for source_req_id when "
         "the source row has no explicit identifier.\n"
@@ -141,12 +160,21 @@ class PromptRequirementDiscovery(StrEnum):
         "Use Low only for explicit optional, future, or nice-to-have language.\n"
         "Otherwise use Medium.\n\n"
         "requirement_key rules:\n"
-        "requirement_key must be a stable functional identity.\n"
+        "requirement_key is a non-authoritative reuse hint only; Python independently resolves "
+        "permanent identity.\n"
         "requirement_key must not be null.\n"
         "requirement_key must not be a source identifier.\n"
         "Exclude revision values such as thresholds, dates, amounts, counts, and temperatures "
         "when possible.\n"
         "Use lowercase snake_case when possible.\n\n"
+        "Semantic identity fields:\n"
+        "Return exactly one atomic obligation per requirement record. Split coordinated actors "
+        "or actions into separate records. actor/action/object/condition/polarity and "
+        "requirement_family describe stable semantics. entity_discriminators must preserve names "
+        "such as Sensor-1, Sensor-2, registers, APIs, roles, equipment IDs, and named channels. "
+        "mutable_parameters contains only values such as thresholds, timeouts, dates, limits, "
+        "and capacities that can change without changing the obligation. Never classify a number "
+        "inside a named entity as mutable. polarity must be positive or negative.\n\n"
         "source_req_id and confidence rules:\n"
         "source_req_id must contain only an explicit source row identifier copied from the "
         "same quote, such as BR-SEN-001, AC-001, FR-001, NFR-001, or SYS_REQ_001. If no "

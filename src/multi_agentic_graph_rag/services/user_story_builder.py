@@ -65,8 +65,6 @@ def build_user_story_artifact(
         document_version_id=document_version_id,
         doc_version=doc_version,
         records=stories,
-        requirement_display_ids={},
-        story_display_ids={},
     )
     return UserStoryBuildResult(artifact=artifact, records=stories, coverage=coverage)
 
@@ -78,21 +76,16 @@ def project_user_story_artifact(
     document_version_id: str,
     doc_version: str,
     records: dict[str, UserStoryRecord],
-    requirement_display_ids: dict[str, str],
-    story_display_ids: dict[str, str],
+    **_legacy_aliases: object,
 ) -> UserStoryArtifact:
     projections: list[UserStoryProjection] = []
     traceability: list[UserStoryTraceability] = []
     for story_id, record in records.items():
-        display_id = story_display_ids.get(story_id, record.display_id or story_id)
-        req_id = requirement_display_ids.get(
-            record.requirement_id,
-            record.requirement_display_id or record.requirement_id,
-        )
         projections.append(
             UserStoryProjection(
-                display_id=display_id,
-                req_id=req_id,
+                story_id=story_id,
+                requirement_id=record.requirement_id,
+                revision_id=record.requirement_revision_id,
                 source_req_id=record.source_req_id,
                 title=record.title,
                 priority=record.priority,
@@ -104,8 +97,9 @@ def project_user_story_artifact(
         )
         traceability.append(
             UserStoryTraceability(
-                us_id=display_id,
-                req_id=req_id,
+                story_id=story_id,
+                requirement_id=record.requirement_id,
+                revision_id=record.requirement_revision_id,
                 source_req_id=record.source_req_id,
                 evidence_chunk_ids=list(record.evidence_chunk_ids),
                 generation_context_run_id=record.generation_context_run_id,
@@ -139,7 +133,6 @@ def _to_record(
     return UserStoryRecord(
         story_id=story_id,
         requirement_id=requirement.requirement_id,
-        requirement_display_id=requirement.display_id,
         requirement_revision_id=requirement.revision_id,
         source_req_id=requirement.source_req_id,
         project=project,

@@ -3,18 +3,46 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from multi_agentic_graph_rag.domain.errors import ConfigurationError
 from multi_agentic_graph_rag.domain.schemas import (
-    CompactRequirementArtifact,
+    CanonicalRequirementsArtifact,
     RequirementArtifact,
     RequirementInput,
-    RequirementsCatalogArtifact,
     normalize_priority_label,
 )
+
+
+def _select_active_revision_entries[Entry](
+    requirement_id: str,
+    entries: list[Entry],
+    *,
+    status_of: Callable[[Entry], str],
+    revision_of: Callable[[Entry], str],
+) -> list[Entry]:
+    """Return the entries of the single active revision for one requirement.
+
+    Fails loudly when a requirement has no active revision or more than one
+    distinct active revision, so a superseded (or ambiguous) requirement can never
+    be silently fed into generation.
+    """
+    active = [entry for entry in entries if status_of(entry).strip().lower() == "active"]
+    if not active:
+        raise ConfigurationError(
+            f"requirement {requirement_id} has no active revision; "
+            "run `marag reconcile` or repair identities"
+        )
+    revisions = {revision_of(entry) for entry in active}
+    if len(revisions) > 1:
+        raise ConfigurationError(
+            f"requirement {requirement_id} has multiple active revisions "
+            f"{sorted(revisions)}; exactly one revision must be active"
+        )
+    return active
 
 
 @dataclass(frozen=True)
@@ -28,51 +56,31 @@ class RequirementSource:
 
 def load_requirement_source_local(path: Path) -> RequirementSource:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(data, dict) and data.get("artifact_schema_version") == "4.0-catalog":
-        return _load_requirement_source_from_catalog(data)
-    compact = CompactRequirementArtifact.model_validate(data)
+    if not isinstance(data, dict):
+        raise ValueError("requirement artifact payload must be an object")
+    return load_requirement_source_from_canonical_payload(data)
+
+
+def load_requirement_source_from_canonical_payload(
+    payload: dict[str, Any],
+) -> RequirementSource:
+    artifact = CanonicalRequirementsArtifact.model_validate(payload)
+    by_requirement: dict[str, list[Any]] = {}
+    for requirement in artifact.requirements:
+        by_requirement.setdefault(requirement.requirement_id, []).append(requirement)
     requirements: list[RequirementInput] = []
-    for requirement_id, occurrences in compact.requirements.items():
-        if not occurrences:
-            continue
-        head = occurrences[0]
+    for requirement_id, group in by_requirement.items():
+        active = _select_active_revision_entries(
+            requirement_id,
+            group,
+            status_of=lambda requirement: str(requirement.status),
+            revision_of=lambda requirement: requirement.revision_id,
+        )
+        head = active[0]
         requirements.append(
             RequirementInput(
                 requirement_id=requirement_id,
-                requirement_text=head.requirement_text,
-                requirement_type=head.requirement_type,
-                priority=head.priority,
-                evidence_chunk_ids=unique_strings(
-                    occurrence.chunk_id for occurrence in occurrences
-                ),
-            )
-        )
-    return RequirementSource(
-        project=compact.project,
-        document_id=compact.document_id,
-        document_version_id=compact.document_version_id,
-        doc_version=compact.doc_version,
-        requirements=requirements,
-    )
-
-
-def _load_requirement_source_from_catalog(payload: dict[str, Any]) -> RequirementSource:
-    catalog = RequirementsCatalogArtifact.model_validate(payload)
-    by_requirement: dict[str, list[Any]] = {}
-    for entry in catalog.requirements:
-        by_requirement.setdefault(entry.requirement_uid, []).append(entry)
-    traceability: dict[str, list[str]] = {}
-    for row in catalog.traceability:
-        traceability.setdefault(row.requirement_uid, []).append(row.chunk_id)
-
-    requirements: list[RequirementInput] = []
-    for requirement_uid, entries in by_requirement.items():
-        head = entries[0]
-        requirements.append(
-            RequirementInput(
-                requirement_id=requirement_uid,
                 revision_id=head.revision_id,
-                display_id=head.display_id,
                 source_req_id=head.source_req_id,
                 id_generation_type=head.id_generation_type,
                 confidence=head.confidence,
@@ -80,36 +88,50 @@ def _load_requirement_source_from_catalog(payload: dict[str, Any]) -> Requiremen
                 requirement_type=head.requirement_type,
                 priority=head.priority,
                 evidence_chunk_ids=unique_strings(
-                    [*traceability.get(requirement_uid, []), *(entry.chunk_id for entry in entries)]
+                    evidence.chunk_id for requirement in active for evidence in requirement.evidence
                 ),
             )
         )
     return RequirementSource(
-        project=catalog.project,
-        document_id=catalog.document_id,
-        document_version_id=catalog.document_version_id,
-        doc_version=catalog.doc_version,
+        project=artifact.project,
+        document_id=artifact.document_id,
+        document_version_id=artifact.document_version_id,
+        doc_version=artifact.doc_version,
         requirements=requirements,
     )
 
 
 def load_requirement_source_from_full_payload(payload: dict[str, Any]) -> RequirementSource:
     artifact = RequirementArtifact.model_validate(payload)
-    requirements: list[RequirementInput] = []
+    by_requirement: dict[str, list[Any]] = {}
     for requirement in artifact.requirements:
-        chunk_ids = [requirement.source_trace.chunk_id]
-        chunk_ids.extend(evidence.source_trace.chunk_id for evidence in requirement.evidence)
+        by_requirement.setdefault(requirement.requirement_id, []).append(requirement)
+
+    requirements: list[RequirementInput] = []
+    for requirement_id, group in by_requirement.items():
+        # Downstream generation must run against the active revision only, never
+        # the first array entry (which may be superseded).
+        active = _select_active_revision_entries(
+            requirement_id,
+            group,
+            status_of=lambda requirement: str(requirement.status),
+            revision_of=lambda requirement: requirement.revision_id,
+        )
+        head = active[0]
+        chunk_ids: list[str] = []
+        for requirement in active:
+            chunk_ids.append(requirement.source_trace.chunk_id)
+            chunk_ids.extend(evidence.source_trace.chunk_id for evidence in requirement.evidence)
         requirements.append(
             RequirementInput(
-                requirement_id=requirement.requirement_id,
-                revision_id=requirement.revision_id,
-                display_id=requirement.display_id,
-                source_req_id=requirement.source_req_id,
-                id_generation_type=requirement.id_generation_type,
-                confidence=requirement.confidence,
-                requirement_text=requirement.statement,
-                requirement_type=requirement.requirement_type,
-                priority=normalize_priority_label(requirement.priority),
+                requirement_id=requirement_id,
+                revision_id=head.revision_id,
+                source_req_id=head.source_req_id,
+                id_generation_type=head.id_generation_type,
+                confidence=head.confidence,
+                requirement_text=head.statement,
+                requirement_type=head.requirement_type,
+                priority=normalize_priority_label(head.priority),
                 evidence_chunk_ids=unique_strings(chunk_ids),
             )
         )

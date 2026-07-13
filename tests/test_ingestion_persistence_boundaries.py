@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -120,9 +121,9 @@ class IngestionPersistenceBoundaryTests(unittest.TestCase):
         self.assertLess(events.index("chroma.index_chunks"), events.index("requirements.discover"))
         self.assertIs(postgres.persisted_artifact, artifact)
         self.assertEqual(postgres.persisted_run_id, "RUN-1")
-        self.assertTrue(str(postgres.persisted_artifact_path).endswith("requirements_full.json"))
+        self.assertTrue(str(postgres.persisted_artifact_path).endswith("requirements.json"))
         self.assertTrue(str(result["artifact_path"]).endswith("requirements.json"))
-        self.assertTrue(str(result["full_artifact_path"]).endswith("requirements_full.json"))
+        self.assertNotIn("full_artifact_path", result)
         self.assertEqual(result["requirement_ids"], ["REQ-1"])
 
 
@@ -139,6 +140,10 @@ class _FakePostgres:
 
     def ensure_schema(self) -> None:
         self.events.append("postgres.ensure_schema")
+
+    def document_identity_lock(self, project: str, document_id: str) -> object:
+        self.events.append("postgres.document_identity_lock")
+        return nullcontext()
 
     def assert_version_allowed(self, manifest: object, replace_version: bool) -> None:
         self.events.append("postgres.assert_version_allowed")

@@ -10,25 +10,24 @@ from typing import Literal
 from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.schemas import (
     ArtifactReadResult,
-    CompactRequirementArtifact,
+    CanonicalRequirementsArtifact,
     ReconcileReport,
     RequirementArtifact,
-    RequirementsCatalogArtifact,
     TestScenarioArtifact,
     TestScenarioBuildResult,
     UserStoryArtifact,
     UserStoryBuildResult,
 )
 from multi_agentic_graph_rag.services.artifacts import (
-    write_compact_requirement_artifact,
-    write_requirement_artifact,
-    write_requirements_catalog_artifact,
+    write_canonical_requirements_artifact,
     write_test_scenario_artifact,
     write_user_story_artifact,
 )
-from multi_agentic_graph_rag.services.requirement_builder import build_requirements_catalog_artifact
+from multi_agentic_graph_rag.services.requirement_builder import (
+    build_canonical_requirements_artifact,
+)
 
-ArtifactKind = Literal["requirements", "requirements_full", "user_stories", "test_scenarios"]
+ArtifactKind = Literal["requirements", "user_stories", "test_scenarios"]
 
 
 class ArtifactMirror:
@@ -40,8 +39,7 @@ class ArtifactMirror:
         *,
         artifact: (
             RequirementArtifact
-            | CompactRequirementArtifact
-            | RequirementsCatalogArtifact
+            | CanonicalRequirementsArtifact
             | UserStoryArtifact
             | UserStoryBuildResult
             | TestScenarioArtifact
@@ -57,11 +55,11 @@ class ArtifactMirror:
         """
         if isinstance(artifact, RequirementArtifact):
             persisted = self.postgres.persist_artifact(artifact, str(artifact_path), run_id)
-            return write_requirement_artifact(persisted, artifact_path.parent)
-        if isinstance(artifact, CompactRequirementArtifact):
-            return write_compact_requirement_artifact(artifact, artifact_path.parent)
-        if isinstance(artifact, RequirementsCatalogArtifact):
-            return write_requirements_catalog_artifact(artifact, artifact_path.parent)
+            return write_canonical_requirements_artifact(
+                build_canonical_requirements_artifact(persisted), artifact_path.parent
+            )
+        if isinstance(artifact, CanonicalRequirementsArtifact):
+            return write_canonical_requirements_artifact(artifact, artifact_path.parent)
         if isinstance(artifact, UserStoryBuildResult):
             self.postgres.persist_user_story_artifact(artifact, str(artifact_path), run_id)
             return write_user_story_artifact(artifact.artifact, artifact_path.parent)
@@ -159,13 +157,6 @@ class ArtifactMirror:
                 continue
             _write_payload(path, payload)
             report.repaired_paths.append(str(path))
-            if row["artifact_kind"] == "requirements_full":
-                catalog = build_requirements_catalog_artifact(
-                    RequirementArtifact.model_validate(payload)
-                )
-                compact_path = path.parent / "requirements.json"
-                _write_payload(compact_path, catalog.model_dump(mode="json"))
-                report.repaired_paths.append(str(compact_path))
         return report
 
     def _load_from_postgres(
@@ -182,16 +173,8 @@ class ArtifactMirror:
             )
             if payload is None:
                 return None
-            catalog = build_requirements_catalog_artifact(
-                RequirementArtifact.model_validate(payload)
-            )
-            return catalog.model_dump(mode="json")
-        if kind == "requirements_full":
-            payload = self.postgres.load_requirement_artifact_payload(
-                artifact_path=str(artifact_path),
-                document_version_id=document_version_id,
-            )
-        elif kind == "user_stories":
+            return CanonicalRequirementsArtifact.model_validate(payload).model_dump(mode="json")
+        if kind == "user_stories":
             payload = self.postgres.load_user_story_artifact_payload(
                 artifact_path=str(artifact_path),
                 document_version_id=document_version_id,
@@ -224,8 +207,6 @@ def _kind_from_path(path: Path) -> ArtifactKind:
     name = path.name
     if name in {"requirements.json", "requirement.json"}:
         return "requirements"
-    if name == "requirements_full.json":
-        return "requirements_full"
     if name == "user_stories.json":
         return "user_stories"
     if name == "test_scenarios.json":
@@ -237,11 +218,7 @@ def _validate_payload(kind: ArtifactKind, payload: object) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError("artifact payload must be a JSON object")
     if kind == "requirements":
-        if payload.get("artifact_schema_version") == "4.0-catalog":
-            return RequirementsCatalogArtifact.model_validate(payload).model_dump(mode="json")
-        return CompactRequirementArtifact.model_validate(payload).model_dump(mode="json")
-    if kind == "requirements_full":
-        return RequirementArtifact.model_validate(payload).model_dump(mode="json")
+        return CanonicalRequirementsArtifact.model_validate(payload).model_dump(mode="json")
     if kind == "user_stories":
         return UserStoryArtifact.model_validate(payload).model_dump(mode="json")
     return TestScenarioArtifact.model_validate(payload).model_dump(mode="json")

@@ -26,6 +26,7 @@ from multi_agentic_graph_rag.config.settings import (
     Neo4jSettings,
     PathsSettings,
     PostgresSettings,
+    RequirementIdentitySettings,
     TestScenarioSettings,
     UserStorySettings,
 )
@@ -287,6 +288,35 @@ def load_config(
         ),
     )
 
+    requirement_identity_cfg = config_data.get("requirement_identity", {})
+    requirement_identity = RequirementIdentitySettings(
+        candidate_top_k=_positive_int(
+            env.get(
+                EnvVar.REQUIREMENT_CANDIDATE_TOP_K.value,
+                requirement_identity_cfg.get("candidate_top_k"),
+            ),
+            default=8,
+        ),
+        recall_cosine_threshold=_float(
+            env.get(
+                EnvVar.REQUIREMENT_RECALL_COSINE_THRESHOLD.value,
+                requirement_identity_cfg.get("recall_cosine_threshold"),
+            ),
+            default=0.62,
+        ),
+        token_overlap_threshold=_float(
+            requirement_identity_cfg.get("token_overlap_threshold"),
+            default=0.6,
+        ),
+        use_reranker=env_bool(
+            env.get(EnvVar.REQUIREMENT_USE_RERANKER.value),
+            default=bool(requirement_identity_cfg.get("use_reranker", True)),
+        ),
+        require_entailment_for_merge=bool(
+            requirement_identity_cfg.get("require_entailment_for_merge", True)
+        ),
+    )
+
     settings = AppSettings(
         app_env=env.get(
             EnvVar.APP_ENV.value, config_data.get("application", {}).get("app_env", "development")
@@ -385,6 +415,7 @@ def load_config(
         user_story=user_story,
         test_scenario=test_scenario,
         knowledge_graph=knowledge_graph,
+        requirement_identity=requirement_identity,
         azure_openai=AzureOpenAISettings(
             endpoint=env.get(EnvVar.AZURE_OPENAI_ENDPOINT.value, ""),
             api_key=env.get(EnvVar.AZURE_OPENAI_API_KEY.value, ""),

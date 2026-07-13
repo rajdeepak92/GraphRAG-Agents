@@ -74,9 +74,11 @@ class UserStoryWorkflowTests(unittest.TestCase):
                 json.loads(artifact_path.read_text(encoding="utf-8"))
             )
             self.assertEqual(len(artifact.stories), 2)
-            self.assertTrue(all(story.display_id.startswith("US-") for story in artifact.stories))
+            self.assertTrue(all(story.story_id.startswith("US-") for story in artifact.stories))
             self.assertEqual(len(artifact.traceability), 2)
-            self.assertTrue(all(row.req_id.startswith("REQ-") for row in artifact.traceability))
+            self.assertTrue(
+                all(row.requirement_id.startswith("REQ-") for row in artifact.traceability)
+            )
 
             postgres_rows = _read_jsonl(settings.postgres.local_path)
             self.assertEqual(
@@ -160,36 +162,56 @@ def _story_payload() -> dict[str, Any]:
 
 def _compact_requirements() -> dict[str, Any]:
     return {
-        "artifact_schema_version": "3.0-compact",
+        "artifact_schema_version": "5.0-requirements",
         "project": "SIIMCS",
         "document_id": "DOC-SIIMCS-1",
         "document_version_id": "DV-1",
         "doc_version": "1.0",
         "generated_at": "2026-07-01T00:00:00Z",
-        "requirements": {
-            "REQ-1": [
-                {
-                    "chunk_id": "CHUNK-0001",
-                    "fact_id": "FACT-1",
-                    "requirement_text": "Users shall configure warning thresholds.",
-                    "requirement_type": "Functional Requirement",
-                    "priority": "Medium",
-                    "status": "Active",
-                    "doc_version": "1.0",
-                }
-            ],
-            "REQ-2": [
-                {
-                    "chunk_id": "CHUNK-0002",
-                    "fact_id": "FACT-2",
-                    "requirement_text": "The system shall notify responsible teams on alerts.",
-                    "requirement_type": "Functional Requirement",
-                    "priority": "High",
-                    "status": "Active",
-                    "doc_version": "1.0",
-                }
-            ],
-        },
+        "requirements": [
+            {
+                "requirement_id": "REQ-1",
+                "revision_id": "REQREV-1",
+                "semantic_signature": "functional::users::configure::warning-thresholds",
+                "confidence": 0.9,
+                "requirement_text": "Users shall configure warning thresholds.",
+                "requirement_type": "Functional Requirement",
+                "priority": "Medium",
+                "status": "Active",
+                "evidence": [
+                    {
+                        "evidence_id": "REQEVID-1",
+                        "document_version_id": "DV-1",
+                        "chunk_id": "CHUNK-0001",
+                        "fact_ids": ["FACT-1"],
+                        "quote": "Users shall configure warning thresholds.",
+                        "start_char": 0,
+                        "end_char": 41,
+                    }
+                ],
+            },
+            {
+                "requirement_id": "REQ-2",
+                "revision_id": "REQREV-2",
+                "semantic_signature": "functional::system::notify::teams",
+                "confidence": 0.9,
+                "requirement_text": "The system shall notify responsible teams on alerts.",
+                "requirement_type": "Functional Requirement",
+                "priority": "High",
+                "status": "Active",
+                "evidence": [
+                    {
+                        "evidence_id": "REQEVID-2",
+                        "document_version_id": "DV-1",
+                        "chunk_id": "CHUNK-0002",
+                        "fact_ids": ["FACT-2"],
+                        "quote": "The system shall notify responsible teams on alerts.",
+                        "start_char": 0,
+                        "end_char": 51,
+                    }
+                ],
+            },
+        ],
     }
 
 

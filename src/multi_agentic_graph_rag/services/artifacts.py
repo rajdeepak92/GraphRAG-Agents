@@ -7,72 +7,54 @@ import tempfile
 from pathlib import Path
 
 from multi_agentic_graph_rag.domain.schemas import (
-    CompactRequirementArtifact,
+    CanonicalRequirementsArtifact,
     RequirementArtifact,
-    RequirementsCatalogArtifact,
+    RequirementIdentityResolutionArtifact,
     TestScenarioArtifact,
     UserStoryArtifact,
 )
 from multi_agentic_graph_rag.observability.logging import RunLogger
 
 
-def write_requirement_artifact(
-    artifact: RequirementArtifact,
+def write_canonical_requirements_artifact(
+    artifact: CanonicalRequirementsArtifact,
     run_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
-    path = run_dir / "requirements_full.json"
+    path = run_dir / "requirements.json"
     if logger is not None:
         logger.debug(
-            "Writing requirement artifact for {document_version_id} to {path}",
-            step="write_requirement_artifact",
+            "Writing canonical requirements for {document_version_id} to {path}",
+            step="write_canonical_requirements_artifact",
             document_version_id=artifact.document_version_id,
             path=str(path),
             requirement_count=len(artifact.requirements),
-            fact_count=len(artifact.facts),
         )
     _atomic_write_json(path, artifact.model_dump(mode="json"))
     return path
 
 
-def write_compact_requirement_artifact(
-    compact_artifact: CompactRequirementArtifact,
+def write_requirement_identity_resolution_artifact(
+    artifact: RequirementArtifact,
     run_dir: Path,
     logger: RunLogger | None = None,
 ) -> Path:
-    path = run_dir / "requirements.json"
-    occurrence_count = sum(
-        len(occurrences) for occurrences in compact_artifact.requirements.values()
+    path = run_dir / "identity_resolution.json"
+    payload = RequirementIdentityResolutionArtifact(
+        project=artifact.project,
+        document_id=artifact.document_id,
+        document_version_id=artifact.document_version_id,
+        generated_at=artifact.generated_at,
+        resolutions=artifact.identity_resolutions,
     )
     if logger is not None:
         logger.debug(
-            "Writing compact requirement artifact for {document_version_id} to {path}",
-            step="write_compact_requirement_artifact",
-            document_version_id=compact_artifact.document_version_id,
+            "Writing requirement identity-resolution audit to {path}",
+            step="write_requirement_identity_resolution_artifact",
             path=str(path),
-            requirement_count=len(compact_artifact.requirements),
-            occurrence_count=occurrence_count,
+            resolution_count=len(payload.resolutions),
         )
-    _atomic_write_json(path, compact_artifact.model_dump(mode="json"))
-    return path
-
-
-def write_requirements_catalog_artifact(
-    catalog_artifact: RequirementsCatalogArtifact,
-    run_dir: Path,
-    logger: RunLogger | None = None,
-) -> Path:
-    path = run_dir / "requirements.json"
-    if logger is not None:
-        logger.debug(
-            "Writing requirement catalog artifact for {document_version_id} to {path}",
-            step="write_requirements_catalog_artifact",
-            document_version_id=catalog_artifact.document_version_id,
-            path=str(path),
-            requirement_count=len(catalog_artifact.requirements),
-            traceability_count=len(catalog_artifact.traceability),
-        )
-    _atomic_write_json(path, catalog_artifact.model_dump(mode="json"))
+    _atomic_write_json(path, payload.model_dump(mode="json"))
     return path
 
 
@@ -89,7 +71,7 @@ def write_user_story_artifact(
             document_version_id=artifact.document_version_id,
             path=str(path),
             story_count=len(artifact.stories),
-            requirement_count=len({row.req_id for row in artifact.traceability}),
+            requirement_count=len({row.requirement_id for row in artifact.traceability}),
         )
     _atomic_write_json(path, artifact.model_dump(mode="json"))
     return path
@@ -108,17 +90,19 @@ def write_test_scenario_artifact(
             document_version_id=artifact.document_version_id,
             path=str(path),
             scenario_count=len(artifact.scenarios),
-            story_count=len({row.us_id for row in artifact.traceability}),
-            requirement_count=len({row.req_id for row in artifact.traceability}),
+            story_count=len({row.story_id for row in artifact.traceability}),
+            requirement_count=len({row.requirement_id for row in artifact.traceability}),
         )
     _atomic_write_json(path, artifact.model_dump(mode="json"))
     return path
 
 
-def verify_requirement_artifact(path: Path) -> RequirementArtifact | RequirementsCatalogArtifact:
+def verify_requirement_artifact(
+    path: Path,
+) -> RequirementArtifact | CanonicalRequirementsArtifact:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(data, dict) and data.get("artifact_schema_version") == "4.0-catalog":
-        return RequirementsCatalogArtifact.model_validate(data)
+    if isinstance(data, dict) and data.get("artifact_schema_version") == "5.0-requirements":
+        return CanonicalRequirementsArtifact.model_validate(data)
     return RequirementArtifact.model_validate(data)
 
 

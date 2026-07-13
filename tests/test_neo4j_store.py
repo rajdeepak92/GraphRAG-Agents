@@ -84,6 +84,7 @@ class Neo4jStoreTests(unittest.TestCase):
         projection = rows[1]
         self.assertEqual(projection["story_id"], "US-STORY-1")
         self.assertEqual(projection["requirement_id"], "REQ-1")
+        self.assertEqual(projection["revision_id"], "REQREV-1")
         self.assertTrue(projection["covered"])
         self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
 
@@ -110,8 +111,20 @@ class Neo4jStoreTests(unittest.TestCase):
         self.assertEqual(projection["scenario_id"], "SC-SCENARIO-1")
         self.assertEqual(projection["story_id"], "US-STORY-1")
         self.assertEqual(projection["requirement_id"], "REQ-1")
+        self.assertEqual(projection["revision_id"], "REQREV-1")
         self.assertEqual(projection["scenario_type"], "Positive")
         self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
+
+    def test_cleanup_identity_projections_preserves_source_graph_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = Neo4jStore(_settings(root))
+            store.project_manifest(_manifest())
+            store.project_user_story_coverage(_user_story_artifact(), {"REQ-1": ["CHUNK-1"]})
+            store.project_test_scenario_coverage(_test_scenario_artifact(), {"REQ-1": ["CHUNK-1"]})
+            store.cleanup_identity_projections("PROJECT")
+            kinds = [row["kind"] for row in store._read_local_rows()]
+        self.assertEqual(kinds, ["manifest_projection"])
 
     def test_manifest_projection_keeps_document_chunk_metadata(self) -> None:
         tx = _FakeTx()
@@ -224,6 +237,7 @@ def _user_story_artifact() -> UserStoryBuildResult:
     record = UserStoryRecord(
         story_id="US-STORY-1",
         requirement_id="REQ-1",
+        requirement_revision_id="REQREV-1",
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
@@ -247,8 +261,6 @@ def _user_story_artifact() -> UserStoryBuildResult:
         document_version_id="DOC-v1",
         doc_version="1.0",
         records={record.story_id: record},
-        requirement_display_ids={},
-        story_display_ids={},
     )
     return UserStoryBuildResult(
         artifact=artifact,
@@ -262,6 +274,7 @@ def _test_scenario_artifact() -> TestScenarioBuildResult:
         scenario_id="SC-SCENARIO-1",
         story_id="US-STORY-1",
         requirement_id="REQ-1",
+        requirement_revision_id="REQREV-1",
         project="PROJECT",
         document_id="DOC",
         document_version_id="DOC-v1",
@@ -280,7 +293,6 @@ def _test_scenario_artifact() -> TestScenarioBuildResult:
         document_version_id="DOC-v1",
         doc_version="1.0",
         records={record.scenario_id: record},
-        scenario_display_ids={},
     )
     return TestScenarioBuildResult(
         artifact=artifact,

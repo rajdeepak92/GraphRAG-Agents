@@ -1,132 +1,36 @@
-# Azure OpenAI + Hugging Face Reranker Workflow
+# Azure OpenAI + Hugging Face Workflow
 
-This guide sets up Agentic-GraphRAG from scratch with:
+This is the current Windows PowerShell workflow for Azure OpenAI reasoning and
+embeddings, a Hugging Face reranker, PostgreSQL canonical generated-content
+storage, Neo4j source-knowledge/projection storage, and local Chroma retrieval.
 
-- reasoning: Azure OpenAI chat/completions deployment
-- embeddings: Azure OpenAI embeddings deployment
-- reranking: Hugging Face reranker model
-- persistence: PostgreSQL
-- graph store: Neo4j
-- vector store: ChromaDB local persistence
+## 1. Install and configure
 
-Commands are written for Windows PowerShell from the repository root.
-
-## 1. Prerequisites
-
-Install or verify:
-
-- Python 3.12.
-- `uv`.
-- Git.
-- PostgreSQL server with `psql` available on PATH.
-- Neo4j server or Neo4j Desktop DBMS with `cypher-shell` available on PATH.
-- Azure OpenAI resource with a chat/reasoning deployment.
-- Azure OpenAI resource with an embeddings deployment.
-- Azure OpenAI API key for the resource.
-- Hugging Face account/token if the reranker model is private or gated.
-
-Azure requirements:
-
-- `AZURE_OPENAI_ENDPOINT` must be the resource endpoint, for example
-  `https://my-resource.openai.azure.com/`.
-- `AZURE_OPENAI_REASONING_DEPLOYMENT` is the Azure deployment name, not
-  necessarily the base model name.
-- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` is the Azure deployment name.
-- The API key must belong to the same Azure OpenAI resource as the deployments.
-- The API version must support both selected deployments.
-
-Hugging Face reranker requirements:
-
-- Use an exact Hub model ID for `HUGGINGFACE_RERANKER_MODEL`.
-- If private/gated, accept license terms and use a token with read access.
-
-## 2. Clone And Bootstrap
+Requirements: Python 3.12, `uv`, PostgreSQL, Neo4j, an Azure OpenAI reasoning
+deployment, an Azure embeddings deployment, and access to the configured Hugging
+Face reranker.
 
 ```powershell
-git clone <repo-url>
-cd Agentic-GraphRAG
 Copy-Item .env.example .env
-```
-
-Create and activate a Python 3.12 virtual environment:
-
-```powershell
-& C:\Users\rdmpr\AppData\Local\Programs\Python\Python312\python.exe -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Install Azure OpenAI and Hugging Face runtime dependencies:
-
-```powershell
 uv sync --dev --extra azure --extra local-llm
 ```
 
-Baseline CLI check:
+Set these values in `.env`:
 
-```powershell
-uv run python -m multi_agentic_graph_rag version
-uv run python -m multi_agentic_graph_rag doctor
-```
-
-## 3. PostgreSQL Setup
-
-Create a local app database and app user if they do not already exist.
-
-Run as a PostgreSQL admin user:
-
-```powershell
-psql -h 127.0.0.1 -U postgres -c "CREATE USER marag WITH PASSWORD 'pwd';"
-psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE marag OWNER marag;"
-psql -h 127.0.0.1 -U postgres -d marag -c "GRANT ALL ON SCHEMA public TO marag;"
-```
-
-Expected DSN format:
-
-```powershell
-POSTGRES_DSN=postgresql://marag:pwd@127.0.0.1:5432/marag
-```
-
-## 4. Neo4j Setup
-
-Start Neo4j before running the pipeline.
-
-Verify Bolt connectivity:
-
-```powershell
-cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <neo4j-password> "RETURN 1;"
-```
-
-Use these `.env` values for the default local Neo4j database:
-
-```powershell
-NEO4J_MODE=neo4j
-NEO4J_URI=bolt://127.0.0.1:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=<neo4j-password>
-NEO4J_DATABASE=neo4j
-```
-
-## 5. ChromaDB Setup
-
-No separate Chroma service is required. The project persists Chroma under:
-
-```text
-runtime/databases/chroma/
-```
-
-The directory is created automatically during pipeline runs.
-
-## 6. Configure `.env` For Azure + Hugging Face
-
-Edit `.env` and set this profile.
-
-```powershell
-APP_ENV=development
-LOG_LEVEL=INFO
-
+```dotenv
 REASONING_MODEL_PROVIDER=azure_openai
 EMBEDDING_MODEL_PROVIDER=azure_openai
 RERANKER_MODEL_PROVIDER=huggingface
+
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/
+AZURE_OPENAI_API_KEY=<key>
+AZURE_OPENAI_API_VERSION=2024-10-21
+AZURE_OPENAI_REASONING_DEPLOYMENT=<reasoning-deployment>
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=<embedding-deployment>
+
+HF_TOKEN=<token-if-required>
+HUGGINGFACE_RERANKER_MODEL=BAAI/bge-reranker-base
+HUGGINGFACE_OFFLINE=false
 
 POSTGRES_MODE=postgres
 POSTGRES_DSN=postgresql://marag:pwd@127.0.0.1:5432/marag
@@ -134,286 +38,108 @@ POSTGRES_DSN=postgresql://marag:pwd@127.0.0.1:5432/marag
 NEO4J_MODE=neo4j
 NEO4J_URI=bolt://127.0.0.1:7687
 NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=<neo4j-password>
+NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=neo4j
-
-AZURE_OPENAI_ENDPOINT=https://<resource-name>.openai.azure.com/
-AZURE_OPENAI_API_KEY=<azure-openai-key>
-AZURE_OPENAI_API_VERSION=2024-10-21
-AZURE_OPENAI_REASONING_DEPLOYMENT=<chat-or-reasoning-deployment-name>
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT=<embedding-deployment-name>
-
-HF_TOKEN=<hf-read-token-if-reranker-private>
-HUGGINGFACE_TOKEN=
-HUGGING_FACE_HUB_TOKEN=
-HUGGINGFACE_REASONING_MODEL=
-HUGGINGFACE_EMBEDDING_MODEL=
-HUGGINGFACE_RERANKER_MODEL=<org/private-or-public-reranker-model>
-HUGGINGFACE_OFFLINE=false
-HUGGINGFACE_MAX_NEW_TOKENS=4096
-DISCOVERY_BATCH_SIZE=1
-LOG_LLM_RESPONSES=true
-
-TEST_SCENARIO_TOP_K=4
-TEST_SCENARIO_DENSE_K=8
-TEST_SCENARIO_SPARSE_K=8
-TEST_SCENARIO_NEIGHBOR_WINDOW=1
-TEST_SCENARIO_MAX_NEW_TOKENS=
-
-KNOWLEDGE_GRAPH_ENABLED=false
-KNOWLEDGE_GRAPH_SHADOW_MODE=true
-GRAPH_PRIMARY_STORY=false
-GRAPH_PRIMARY_SCENARIO=false
-KNOWLEDGE_GRAPH_EXPANSION_K=6
-
-ENABLE_HFIL=false
-HFIL_MATCH_THRESHOLD_PCT=60.0
-HFIL_OUT_OF_CONTEXT_PCT=5.0
-HFIL_COS_FLOOR=0.30
-HFIL_COS_CEIL=0.80
-DEDUP_RECALL_COSINE=0.55
-HFIL_CHECKPOINTER=postgres
-HFIL_EMIT_MD=false
 ```
 
-Notes:
+Requirement identity recall is configured separately from scenario deduplication:
 
-- Keep `RERANKER_MODEL_PROVIDER=huggingface`; stage 3 and stage 4 require a
-  real reranker provider.
-- Leave `HUGGINGFACE_REASONING_MODEL` and `HUGGINGFACE_EMBEDDING_MODEL` blank
-  to avoid accidental local model loading in this Azure profile.
-- If the reranker is private, set `HF_TOKEN`.
-- Azure deployment names are configured separately from Hugging Face model IDs.
+```dotenv
+REQUIREMENT_CANDIDATE_TOP_K=8
+REQUIREMENT_RECALL_COSINE_THRESHOLD=0.62
+REQUIREMENT_USE_RERANKER=true
+```
 
-## 7. Configuration And Provider Checks
+These values retrieve and reorder candidates only. They never prove identity.
+Permanent merging requires compatible structured semantics and, for semantic
+duplicates, strict bidirectional entailment. Ambiguity creates a distinct lineage
+and an audit warning.
 
-Verify the project loads the intended providers:
+The checked-in example profile enables the source knowledge graph and graph-primary
+story/scenario retrieval:
+
+```dotenv
+KNOWLEDGE_GRAPH_ENABLED=true
+KNOWLEDGE_GRAPH_SHADOW_MODE=true
+GRAPH_PRIMARY_STORY=true
+GRAPH_PRIMARY_SCENARIO=true
+KNOWLEDGE_GRAPH_EXPANSION_K=6
+KNOWLEDGE_GRAPH_MIN_ASSERTIONS=3
+```
+
+Set `KNOWLEDGE_GRAPH_ENABLED=false` for the explicit chunk-only path. Neo4j holds
+source entities/assertions/text units and derivative coverage projections;
+PostgreSQL remains authoritative for requirements, stories, and scenarios.
+
+## 2. Validate providers and stores
 
 ```powershell
 uv run python -m multi_agentic_graph_rag config-check
-```
-
-Expected provider lines:
-
-```text
-reasoning_model.provider = azure_openai
-embedding_model.provider = azure_openai
-reranker_model.provider = huggingface
-```
-
-Check Hugging Face dependency/token state for the reranker:
-
-```powershell
 uv run python -m multi_agentic_graph_rag hf-check
-```
-
-Check reranker repository access if it is private:
-
-```powershell
-@'
-from huggingface_hub import HfApi
-from multi_agentic_graph_rag.config.config_loader import load_config
-
-settings = load_config()
-api = HfApi(token=settings.huggingface.token)
-info = api.model_info(settings.huggingface.reranker_model)
-print(f"PASS {info.id}")
-'@ | uv run python -
-```
-
-## 8. Azure OpenAI Connection Checks
-
-Run a direct Azure embeddings check:
-
-```powershell
-@'
-from multi_agentic_graph_rag.config.config_loader import load_config
-from multi_agentic_graph_rag.llm_models.azure_openai import AzureOpenAIEmbeddingModel
-
-settings = load_config()
-embedder = AzureOpenAIEmbeddingModel(settings.azure_openai)
-vectors = embedder.embed_documents(["connection check"])
-print(f"PASS embeddings vectors={len(vectors)} dimensions={len(vectors[0])}")
-'@ | uv run python -
-```
-
-Run a direct Azure reasoning check:
-
-```powershell
-@'
-from pydantic import BaseModel, ConfigDict
-
-from multi_agentic_graph_rag.config.config_loader import load_config
-from multi_agentic_graph_rag.llm_models.azure_openai import AzureOpenAIReasoningModel
-
-class Ping(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    ok: bool
-
-settings = load_config()
-reasoner = AzureOpenAIReasoningModel(settings.azure_openai)
-reasoner.set_system_message("Return strict JSON only.")
-result = reasoner.generate_structured(prompt='Return {"ok": true}.', schema=Ping)
-print(f"PASS reasoning ok={result.ok}")
-'@ | uv run python -
-```
-
-If either check fails:
-
-- Confirm endpoint includes `https://` and ends with `.openai.azure.com/`.
-- Confirm the API key belongs to that resource.
-- Confirm deployment names are exact.
-- Confirm the API version supports the deployments.
-- Confirm network/firewall/proxy access to the Azure endpoint.
-
-## 9. Database Connection Checks
-
-Run the project database check:
-
-```powershell
 uv run python -m multi_agentic_graph_rag db-check
+uv run python -m multi_agentic_graph_rag doctor
 ```
 
-Expected:
+`config-check` must report Azure for reasoning/embeddings and Hugging Face for
+reranking. `db-check` must report PostgreSQL, Neo4j, and Chroma as available.
+Schema creation/migration is idempotent; do not run `postgres-reset` for an
+upgrade or identity repair. Reset commands are only for disposable development
+stores.
 
-- PostgreSQL: PASS.
-- Neo4j: PASS.
-- Chroma: PASS.
-
-Direct PostgreSQL check:
-
-```powershell
-psql "postgresql://marag:pwd@127.0.0.1:5432/marag" -c "select current_database(), current_user;"
-```
-
-Direct Neo4j check:
-
-```powershell
-cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <neo4j-password> "MATCH (n) RETURN count(n);"
-```
-
-Direct Chroma directory check:
-
-```powershell
-Get-ChildItem runtime\databases\chroma -Force
-```
-
-## 10. Reset Databases And Runtime State
-
-Use these commands only for disposable/local development data.
-
-Reset PostgreSQL app-managed tables:
-
-```powershell
-uv run python -m multi_agentic_graph_rag postgres-reset --yes
-```
-
-If the PostgreSQL DSN points to a non-local host and you intentionally want to
-reset it:
-
-```powershell
-uv run python -m multi_agentic_graph_rag postgres-reset --yes --allow-nonlocal
-```
-
-Reset Neo4j:
-
-```powershell
-cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p <neo4j-password> "MATCH (n) DETACH DELETE n;"
-```
-
-Reset Chroma:
-
-```powershell
-Remove-Item -Recurse -Force runtime\databases\chroma -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force runtime\databases\chroma | Out-Null
-```
-
-Optional cleanup of generated local artifacts and run logs:
-
-```powershell
-Remove-Item -Recurse -Force generated\<PROJECT> -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force .generated\<PROJECT> -ErrorAction SilentlyContinue
-```
-
-Recheck after reset:
-
-```powershell
-uv run python -m multi_agentic_graph_rag db-check
-```
-
-## 11. Prepare An Input Document
-
-Place the source document under the inbox:
-
-```powershell
-New-Item -ItemType Directory -Force documents\inbox\PROJECT_1 | Out-Null
-Copy-Item .\path\to\source-document.pdf documents\inbox\PROJECT_1\source-document.pdf
-```
-
-## 12. Run Ingestion With Azure OpenAI
+## 3. Ingest a document
 
 ```powershell
 uv run python -m multi_agentic_graph_rag ingest `
   --project PROJECT_1 `
   --document documents\inbox\PROJECT_1\source-document.pdf `
-  --version V1 `
+  --version 1.0 `
   --logical-name source-document `
   --reasoning-provider azure_openai `
   --embedding-provider azure_openai `
   --json-output
 ```
 
-The command writes:
+Ingestion parses and chunks the document, indexes chunks in Chroma, acquires a
+per-document identity lock, loads prior active revisions before discovery, and
+supplies bounded prior requirement memory to the extraction prompt. The LLM emits
+atomic semantic candidates; Python validates traces and semantic slots, resolves
+identity, allocates UUIDv7 IDs, persists PostgreSQL first, then writes local JSON.
+
+When enabled, ingestion also attempts the evidence-grounded source knowledge graph
+build. A graph-build warning does not discard a successfully committed requirement
+artifact.
+
+The run directory contains:
 
 ```text
 generated/PROJECT_1/req/<RUN_ID>/
   requirements.json
-  requirements_full.json
+  identity_resolution.json
   chunk_manifest.json
   run.log
   run.jsonl
 ```
 
-Store the latest run ID:
+`requirements.json` is the sole public requirement contract:
+`5.0-requirements`, one object per `(requirement_id, revision_id)`, with all source
+occurrences nested as evidence. Newly allocated identifiers use
+`REQ-<uuid7>`, `REQREV-<uuid7>`, and `REQEVID-<uuid7>`. There is no
+`requirements_full.json` or display-ID namespace.
 
 ```powershell
-$RUN_ID = (Get-ChildItem generated\PROJECT_1\req | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
-```
+$RUN_ID = (Get-ChildItem generated\PROJECT_1\req |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).Name
 
-Verify the requirement artifact:
-
-```powershell
 uv run python -m multi_agentic_graph_rag artifact verify `
-  generated\PROJECT_1\req\$RUN_ID\requirements_full.json
+  generated\PROJECT_1\req\$RUN_ID\requirements.json
 ```
 
-### Optional: Build The Source-Knowledge Graph
+`identity_resolution.json` records the incoming fingerprint, recalled candidates
+and scores, reranker order, deterministic outcome, entailment result when used,
+reason, and assigned canonical IDs.
 
-After ingestion you can extract an evidence-grounded source-knowledge graph
-(entities plus subject/predicate/object assertions with exact-quote evidence and
-atomic text units) and project it into Neo4j. This stage is optional, uses the
-reasoning model only, and does not change requirement/story/scenario generation
-unless the knowledge-graph flags are enabled (see section 6).
-
-Use the `document_version_id` (`DV-...`) reported by `ingest` (it is also present
-in the requirement artifact):
-
-```powershell
-uv run python -m multi_agentic_graph_rag build-knowledge-graph `
-  --project PROJECT_1 `
-  --document-version-id <DV-ID> `
-  --reasoning-provider azure_openai `
-  --json-output
-```
-
-The audit copy is written to
-`generated\PROJECT_1\kg\<RUN_ID>\knowledge_graph.json`; Neo4j remains the source
-of truth for the graph. With `KNOWLEDGE_GRAPH_ENABLED=true` and shadow mode on,
-later story/scenario retrieval records comparison snapshots to PostgreSQL without
-changing generated output; the `GRAPH_PRIMARY_*` flags opt a stage into
-assertion-hop retrieval.
-
-## 13. Generate User Stories With Azure + Hugging Face Reranker
+## 4. Generate user stories
 
 ```powershell
 uv run python -m multi_agentic_graph_rag generate-user-stories `
@@ -423,18 +149,16 @@ uv run python -m multi_agentic_graph_rag generate-user-stories `
   --embedding-provider azure_openai `
   --reranker-provider huggingface `
   --json-output
-```
 
-Verify:
-
-```powershell
 uv run python -m multi_agentic_graph_rag artifact verify-user-stories `
   generated\PROJECT_1\req\$RUN_ID\user_stories.json
 ```
 
-## 14. Generate Test Scenarios With Azure + Hugging Face Reranker
+The loader accepts canonical schema 5 only, groups by canonical identity, requires
+exactly one active revision, and never selects the first array entry implicitly.
+Story records retain both `requirement_id` and `revision_id`.
 
-Non-interactive path:
+## 5. Generate test scenarios
 
 ```powershell
 uv run python -m multi_agentic_graph_rag generate-test-scenarios `
@@ -446,127 +170,101 @@ uv run python -m multi_agentic_graph_rag generate-test-scenarios `
   --reranker-provider huggingface `
   --no-hfil `
   --json-output
-```
-
-Interactive HFIL path:
-
-```powershell
-uv run python -m multi_agentic_graph_rag generate-test-scenarios `
-  --user-stories generated\PROJECT_1\req\$RUN_ID\user_stories.json `
-  --requirements generated\PROJECT_1\req\$RUN_ID\requirements.json `
-  --project PROJECT_1 `
-  --reasoning-provider azure_openai `
-  --embedding-provider azure_openai `
-  --reranker-provider huggingface `
-  --hfil `
-  --thread-id PROJECT_1-$RUN_ID-hfil
-```
-
-Inside HFIL:
-
-- Type `remove duplicates` to run semantic duplicate detection.
-- Type a feedback sentence to request one missing scenario.
-- Type `exit` to finalize and persist.
-
-Verify:
-
-```powershell
-uv run python -m multi_agentic_graph_rag artifact verify-test-scenarios `
-  generated\PROJECT_1\req\$RUN_ID\test_scenarios.json
-```
-
-## 15. Coverage And Reconcile
-
-Coverage:
-
-```powershell
-uv run python -m multi_agentic_graph_rag coverage --project PROJECT_1
-```
-
-Repair local JSON mirrors from PostgreSQL:
-
-```powershell
-uv run python -m multi_agentic_graph_rag reconcile --project PROJECT_1
-```
-
-Verify artifacts after reconcile:
-
-```powershell
-uv run python -m multi_agentic_graph_rag artifact verify-user-stories `
-  generated\PROJECT_1\req\$RUN_ID\user_stories.json
 
 uv run python -m multi_agentic_graph_rag artifact verify-test-scenarios `
   generated\PROJECT_1\req\$RUN_ID\test_scenarios.json
 ```
 
-## 16. Run A V2 Document Version
+Use `--hfil --thread-id PROJECT_1-$RUN_ID-hfil` for the optional scenario-review
+loop. HFIL is limited to test-scenario review before final persistence.
 
-Use the same `--logical-name` to preserve document lineage.
+## 6. Ingest a later document version
+
+Reuse the same project and `--logical-name`:
 
 ```powershell
 uv run python -m multi_agentic_graph_rag ingest `
   --project PROJECT_1 `
   --document documents\inbox\PROJECT_1\source-document-v2.pdf `
-  --version V2 `
+  --version 2.0 `
   --logical-name source-document `
-  --replace-version `
   --reasoning-provider azure_openai `
   --embedding-provider azure_openai `
   --json-output
 ```
 
-Then repeat user-story and test-scenario generation for the new run directory.
+Unchanged meaning reuses the requirement and revision IDs. A mutable threshold,
+timeout, or limit change normally reuses the requirement ID and creates a new
+revision ID while superseding the old active revision. Entity discriminators such
+as `Sensor-1` and `Sensor-2`, and incompatible requirement families, remain
+separate lineages. Use `--replace-version` only when intentionally replacing an
+already stored version label.
 
-Expected behavior:
+## 7. Repair legacy identities
 
-- New requirements append new child stories/scenarios.
-- Updated requirements preserve requirement lineage and update children in place.
-- Explicitly outdated requirements cascade-delete child stories/scenarios.
-- Unchanged requirements do not duplicate existing children.
+Always inspect the machine-readable dry run first:
 
-## 17. Troubleshooting
+```powershell
+uv run python -m multi_agentic_graph_rag requirements repair-identities `
+  --project PROJECT_1 `
+  --dry-run `
+  --json-output
+```
 
-Azure embeddings fail:
+Apply only after resolving every reported ambiguity and taking a database backup:
 
-- Confirm `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`.
-- Confirm the deployment is an embedding model deployment.
-- Confirm the API key/resource endpoint pair is correct.
+```powershell
+uv run python -m multi_agentic_graph_rag requirements repair-identities `
+  --project PROJECT_1 `
+  --apply `
+  --json-output
+```
 
-Azure reasoning fails:
+Project apply runs under one PostgreSQL advisory transaction (or the equivalent
+local file lock), upgrades legacy IDs to UUIDv7, splits incompatible polluted
+lineages, merges exact canonical duplicates, remaps evidence/story/scenario
+references, rewrites canonical artifact payloads, and cleans/rebuilds Neo4j
+derivative projections. Apply aborts on unresolved ambiguity and repeated execution
+is idempotent. Do not execute `--apply` against shared/production infrastructure
+without an approved change window.
 
-- Confirm `AZURE_OPENAI_REASONING_DEPLOYMENT`.
-- Confirm the deployment supports chat completions.
-- Confirm the API version supports the deployment.
-- Inspect saved `llm_response_*.txt` files when `LOG_LLM_RESPONSES=true`.
+For a standalone legacy `4.0-catalog` file, use the explicit adapter:
 
-Hugging Face reranker fails:
+```powershell
+uv run python -m multi_agentic_graph_rag requirements repair-identities `
+  --artifact .\legacy\requirements.json `
+  --dry-run `
+  --json-output
+```
 
-- Confirm `HF_TOKEN` if the reranker is private.
-- Confirm `HUGGINGFACE_RERANKER_MODEL`.
-- Confirm local memory/GPU is sufficient for the reranker.
+The adapter is the only runtime path that reads legacy catalog/display fields.
 
-PostgreSQL fails:
+## 8. Coverage, mirror repair, and troubleshooting
 
-- Confirm the server is running.
-- Confirm `POSTGRES_DSN`.
-- Run the direct `psql` check.
-- Run `postgres-reset --yes` only on disposable/local DBs.
+```powershell
+uv run python -m multi_agentic_graph_rag coverage --project PROJECT_1
+uv run python -m multi_agentic_graph_rag reconcile --project PROJECT_1
+```
 
-Neo4j fails:
+`reconcile` rematerializes local canonical JSON from PostgreSQL; it does not make
+semantic identity decisions.
 
-- Confirm the DBMS is started.
-- Confirm `NEO4J_PASSWORD`.
-- Run the direct `cypher-shell` check.
+- Azure failures: verify endpoint, key, deployment names, API version, and saved
+  `llm_response_*.txt` files when response logging is enabled.
+- Reranker failures: verify `HF_TOKEN`, the exact Hub model ID, license access,
+  and local RAM/GPU capacity.
+- PostgreSQL failures: verify `POSTGRES_DSN` and run `db-check`; never fix a
+  migration problem with a destructive reset on retained data.
+- Neo4j failures: verify Bolt credentials and database name. Requirement/story/
+  scenario ledgers remain safe in PostgreSQL if a best-effort graph build fails.
+- Chroma failures: rebuild only the local Chroma directory, then re-ingest.
 
-Chroma problems:
+## 9. Repository verification
 
-- Delete `runtime\databases\chroma`.
-- Rerun ingestion to rebuild indexes.
-
-Provider mismatch:
-
-- Run `config-check`.
-- Confirm `REASONING_MODEL_PROVIDER=azure_openai`.
-- Confirm `EMBEDDING_MODEL_PROVIDER=azure_openai`.
-- Confirm `RERANKER_MODEL_PROVIDER=huggingface`.
-
+```powershell
+uv lock
+uv run ruff format --check src tests
+uv run ruff check src tests
+uv run mypy
+uv run pytest -q
+```

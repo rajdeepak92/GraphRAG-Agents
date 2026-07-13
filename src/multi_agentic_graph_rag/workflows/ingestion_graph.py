@@ -32,7 +32,7 @@ from multi_agentic_graph_rag.llm_models.factory import (
 from multi_agentic_graph_rag.observability.session import RunSession, command_session
 from multi_agentic_graph_rag.services.artifact_mirror import ArtifactMirror
 from multi_agentic_graph_rag.services.artifacts import (
-    write_requirements_catalog_artifact,
+    write_requirement_identity_resolution_artifact,
 )
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.coverage_ledger import CoverageLedger
@@ -42,8 +42,13 @@ from multi_agentic_graph_rag.services.knowledge_graph_builder import (
 from multi_agentic_graph_rag.services.manifest import build_manifest, write_manifest
 from multi_agentic_graph_rag.services.parsing import checksum_bytes, parse_document
 from multi_agentic_graph_rag.services.requirement_builder import (
+    build_canonical_requirements_artifact,
     build_requirement_artifact,
-    build_requirements_catalog_artifact,
+)
+from multi_agentic_graph_rag.services.requirement_memory import (
+    MemoryEntry,
+    ModelEntailmentJudge,
+    RequirementMemory,
 )
 
 
@@ -55,7 +60,6 @@ class IngestionState(TypedDict, total=False):
     document_version_id: str
     manifest_path: str
     artifact_path: str
-    full_artifact_path: str
     chunk_ids: list[str]
     fact_ids: list[str]
     requirement_ids: list[str]
@@ -295,92 +299,30 @@ def _run_pipeline(
                 store_responsibility="chunk_embeddings_only",
             )
         chroma.index_chunks(manifest, embedding_model)
-        coverage_ledger = None
-        if settings.discovery.ledger_enabled:
-            coverage_ledger = CoverageLedger(
-                max_entries=settings.discovery.ledger_max_entries,
-                injection_top_k=settings.discovery.ledger_top_k,
-                embedder=embedding_model,
-            )
-        discovery_agent = RequirementDiscoveryAgent(
-            reasoning_model,
-            logger=logger,
-            coverage_ledger=coverage_ledger,
-        )
-        if logger is not None:
-            logger.info(
-                "Discovering requirements from {document_version_id}",
-                step="discover_requirements",
-                document_version_id=manifest.document_version_id,
-            )
-        discovery = discovery_agent.run(manifest)
-        if logger is not None:
-            logger.debug(
-                "Loaded requirement ledger snapshot for {document_id}",
-                step="load_requirement_ledger_snapshot",
-                document_id=manifest.document_id,
-            )
-        prior_revisions = postgres.load_requirement_revision_snapshot(
+        artifact, artifact_path = _resolve_and_persist_requirements(
+            settings=settings,
+            manifest=manifest,
             project=project,
-            document_id=manifest.document_id,
-        )
-        artifact = build_requirement_artifact(
-            project=project,
-            document_id=manifest.document_id,
-            document_version_id=manifest.document_version_id,
             version=version,
-            source_path=manifest.source_path,
-            source_checksum=checksum,
-            discovery=discovery,
-            prior_revisions=prior_revisions,
-            logger=logger,
-        )
-        artifact = _apply_strictly_outdated_cascade(
-            artifact=artifact,
-            prior_revisions=prior_revisions,
-            postgres=postgres,
-            replace_version=request.replace_version,
-        )
-        postgres.persist_manifest(manifest)
-        full_artifact_target = run_dir / "requirements_full.json"
-        if logger is not None:
-            logger.info(
-                "Persisting generated requirements_full.json payload and "
-                "requirement ledger to PostgreSQL",
-                step="persist_requirements_postgres",
-                document_version_id=artifact.document_version_id,
-                artifact_path=str(full_artifact_target),
-                fact_count=len(artifact.facts),
-                requirement_count=len(artifact.requirements),
-                store_responsibility="requirement_artifact_and_ledger_only",
-            )
-        full_artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
-            artifact=artifact,
-            artifact_path=full_artifact_target,
+            checksum=checksum,
             run_id=state["run_id"],
-        )
-        persisted_payload = postgres.load_requirement_artifact_payload(
-            artifact_path=str(full_artifact_target)
-        )
-        persisted_artifact = (
-            RequirementArtifact.model_validate(persisted_payload)
-            if persisted_payload is not None
-            else artifact
-        )
-        catalog_artifact = build_requirements_catalog_artifact(persisted_artifact)
-        artifact_path = write_requirements_catalog_artifact(
-            catalog_artifact,
-            run_dir,
+            run_dir=run_dir,
+            replace_version=request.replace_version,
+            postgres=postgres,
+            reasoning_model=reasoning_model,
+            embedding_model=embedding_model,
+            reranker_model=reranker_model,
             logger=logger,
         )
         if session is not None:
-            session.artifact_payload = catalog_artifact.model_dump(mode="json")
+            session.artifact_payload = build_canonical_requirements_artifact(artifact).model_dump(
+                mode="json"
+            )
         if logger is not None:
             logger.info(
-                "Requirement artifacts persisted/written to {path} and {full_path}",
+                "Canonical requirement artifact persisted/written to {path}",
                 step="write_requirement_artifact",
                 path=str(artifact_path),
-                full_path=str(full_artifact_path),
                 document_version_id=artifact.document_version_id,
                 status="completed",
             )
@@ -402,7 +344,6 @@ def _run_pipeline(
             "document_version_id": manifest.document_version_id,
             "manifest_path": str(manifest_path),
             "artifact_path": str(artifact_path),
-            "full_artifact_path": str(full_artifact_path),
             "chunk_ids": [chunk.chunk_id for chunk in manifest.chunks],
             "fact_ids": [fact.fact_id for fact in artifact.facts],
             "requirement_ids": [req.requirement_id for req in artifact.requirements],
@@ -449,6 +390,114 @@ def _run_pipeline(
             logger=logger,
         )
         raise
+
+
+def _resolve_and_persist_requirements(
+    *,
+    settings: AppSettings,
+    manifest: Any,
+    project: str,
+    version: str,
+    checksum: str,
+    run_id: str,
+    run_dir: Path,
+    replace_version: bool,
+    postgres: PostgresStore,
+    reasoning_model: Any,
+    embedding_model: Any,
+    reranker_model: Any,
+    logger: Any | None,
+) -> tuple[RequirementArtifact, Path]:
+    with postgres.document_identity_lock(project, manifest.document_id):
+        prior_revisions = postgres.load_requirement_revision_snapshot(
+            project=project,
+            document_id=manifest.document_id,
+        )
+        requirement_memory = RequirementMemory(
+            settings=settings.requirement_identity,
+            embedder=embedding_model,
+            reranker=reranker_model,
+            judge=ModelEntailmentJudge(reasoning_model),
+        )
+        requirement_memory.seed(
+            MemoryEntry(
+                requirement_id=snapshot.requirement_id,
+                revision_id=snapshot.revision_id,
+                statement=snapshot.statement,
+                normalized_statement=snapshot.normalized_statement,
+                requirement_type=snapshot.requirement_type,
+                signature=snapshot.semantic_signature,
+            )
+            for snapshot in prior_revisions.values()
+        )
+        coverage_ledger = None
+        if settings.discovery.ledger_enabled:
+            coverage_ledger = CoverageLedger(
+                max_entries=settings.discovery.ledger_max_entries,
+                injection_top_k=settings.discovery.ledger_top_k,
+                embedder=embedding_model,
+            )
+            primed = coverage_ledger.prime_prior_revisions(prior_revisions.values())
+            if logger is not None and primed:
+                logger.info(
+                    "Seeded requirement memory with {primed} prior-version requirements",
+                    step="seed_prior_requirements",
+                    primed=primed,
+                    document_id=manifest.document_id,
+                )
+        discovery_agent = RequirementDiscoveryAgent(
+            reasoning_model,
+            logger=logger,
+            coverage_ledger=coverage_ledger,
+        )
+        if logger is not None:
+            logger.info(
+                "Discovering requirements from {document_version_id}",
+                step="discover_requirements",
+                document_version_id=manifest.document_version_id,
+            )
+        discovery = discovery_agent.run(manifest)
+        artifact = build_requirement_artifact(
+            project=project,
+            document_id=manifest.document_id,
+            document_version_id=manifest.document_version_id,
+            version=version,
+            source_path=manifest.source_path,
+            source_checksum=checksum,
+            discovery=discovery,
+            prior_revisions=prior_revisions,
+            requirement_memory=requirement_memory,
+            logger=logger,
+        )
+        artifact = _apply_strictly_outdated_cascade(
+            artifact=artifact,
+            prior_revisions=prior_revisions,
+            postgres=postgres,
+            replace_version=replace_version,
+        )
+        postgres.persist_manifest(manifest)
+        artifact_target = run_dir / "requirements.json"
+        if logger is not None:
+            logger.info(
+                "Persisting canonical requirements and requirement ledger to PostgreSQL",
+                step="persist_requirements_postgres",
+                document_version_id=artifact.document_version_id,
+                artifact_path=str(artifact_target),
+                fact_count=len(artifact.facts),
+                requirement_count=len(artifact.requirements),
+                store_responsibility="requirement_artifact_and_ledger_only",
+            )
+        artifact_path = ArtifactMirror(postgres).persist_committed_artifact(
+            artifact=artifact,
+            artifact_path=artifact_target,
+            run_id=run_id,
+        )
+        write_requirement_identity_resolution_artifact(
+            artifact,
+            run_dir,
+            logger=logger,
+        )
+        return artifact, artifact_path
 
 
 def _apply_strictly_outdated_cascade(
@@ -553,7 +602,6 @@ def run_ingestion(
         checksum=final_state["checksum"],
         manifest_path=Path(final_state["manifest_path"]),
         artifact_path=Path(final_state["artifact_path"]),
-        full_artifact_path=Path(final_state["full_artifact_path"]),
         chunk_ids=final_state["chunk_ids"],
         fact_ids=final_state["fact_ids"],
         requirement_ids=final_state["requirement_ids"],

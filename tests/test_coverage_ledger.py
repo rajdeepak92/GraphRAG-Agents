@@ -17,6 +17,25 @@ from multi_agentic_graph_rag.services.requirement_builder import (
 
 
 class CoverageLedgerTests(unittest.TestCase):
+    def test_prime_prior_requirements_seeds_and_injects(self) -> None:
+        ledger = CoverageLedger(max_entries=10, injection_top_k=10)
+        added = ledger.prime_prior_requirements(
+            [
+                "The gateway shall expose readings over Modbus.",
+                "The controller shall trip at 70C.",
+                "   ",  # blank ignored
+            ]
+        )
+        self.assertEqual(added, 2)
+        section = ledger.render_prompt_section(ledger.select_for_chunk("modbus readings"))
+        self.assertIn("Modbus", section)
+
+    def test_prime_is_idempotent_on_identity(self) -> None:
+        ledger = CoverageLedger(max_entries=10, injection_top_k=10)
+        ledger.prime_prior_requirements(["The system shall import files."])
+        again = ledger.prime_prior_requirements(["The system shall import files."])
+        self.assertEqual(again, 0)
+
     def test_record_adds_entries_from_output(self) -> None:
         ledger = CoverageLedger(max_entries=10, injection_top_k=10)
 

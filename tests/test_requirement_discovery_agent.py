@@ -48,8 +48,12 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
                 _fact(
                     "BR-CFG-01: The system shall import and export files.",
                     requirements=[
-                        _requirement("The system shall import files."),
-                        _requirement("The system shall export files."),
+                        _requirement(
+                            "The system shall import files.", requirement_key="import_files"
+                        ),
+                        _requirement(
+                            "The system shall export files.", requirement_key="export_files"
+                        ),
                     ],
                 )
             ]
@@ -369,9 +373,7 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
 
         RequirementDiscoveryAgent(reasoner, coverage_ledger=ledger).run(manifest)
 
-        ledger_json = (
-            '[{"requirement_key":"system behavior","statement":"The system shall import files."}]'
-        )
+        ledger_json = '"statement":"The system shall import files."'
         # prompts: chunk1, chunk2 attempt1 (bad quote), chunk2 attempt2 (repaired).
         self.assertEqual(len(reasoner.prompts), 3)
         self.assertIn(ledger_json, reasoner.prompts[1])
@@ -686,12 +688,17 @@ def _fact(
     }
 
 
-def _requirement(req_text: str, *, source_req_id: str = "") -> dict[str, object]:
+def _requirement(
+    req_text: str,
+    *,
+    source_req_id: str = "",
+    requirement_key: str = "system behavior",
+) -> dict[str, object]:
     return {
         "req_text": req_text,
         "requirement_type": "functional",
         "priority": "medium",
-        "requirement_key": "system behavior",
+        "requirement_key": requirement_key,
         "source_req_id": source_req_id,
         "confidence": 0.85,
     }

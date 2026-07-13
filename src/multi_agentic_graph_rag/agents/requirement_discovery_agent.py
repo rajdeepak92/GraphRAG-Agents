@@ -112,6 +112,7 @@ class RequirementDiscoveryAgent:
                     schema=RequirementDiscoveryChunkOutput,
                 )
                 try:
+                    _validate_candidate_semantics(chunk_output)
                     output = _chunk_to_nested(context, chunk_output)
                     _verify_traces(manifest, output)
                 except TraceValidationError as error:
@@ -361,6 +362,15 @@ def _fact_to_candidate(
             source_req_id=requirement.source_req_id,
             confidence=requirement.confidence,
             source_trace=trace.model_copy(),
+            actor=requirement.actor,
+            modality=requirement.modality,
+            action=requirement.action,
+            object=requirement.object,
+            condition=requirement.condition,
+            polarity=requirement.polarity,
+            requirement_family=requirement.requirement_family,
+            entity_discriminators=list(requirement.entity_discriminators),
+            mutable_parameters=list(requirement.mutable_parameters),
         )
         for requirement_index, requirement in enumerate(fact.requirements, start=1)
     ]
@@ -370,6 +380,67 @@ def _fact_to_candidate(
         source_trace=trace,
         requirements=requirements,
     )
+
+
+def _validate_candidate_semantics(output: RequirementDiscoveryChunkOutput) -> None:
+    signatures_by_key: dict[str, tuple[str, ...]] = {}
+    for fact in output.facts:
+        for requirement in fact.requirements:
+            if " and " in requirement.action.casefold() or " or " in requirement.action.casefold():
+                raise TraceValidationError("one candidate contains multiple independent actions")
+            if requirement.object.casefold().startswith(("and ", "or ")):
+                raise TraceValidationError("one candidate contains multiple independent actions")
+            if (
+                " and " in requirement.actor.casefold()
+                and len(requirement.entity_discriminators) > 1
+            ):
+                raise TraceValidationError("one candidate contains multiple independent actors")
+            statement_tokens = _semantic_support_tokens(requirement.req_text)
+            quote_tokens = _semantic_support_tokens(fact.quote)
+            if statement_tokens and (
+                len(statement_tokens & quote_tokens) / len(statement_tokens) < 0.5
+            ):
+                raise TraceValidationError(
+                    "source trace does not support the extracted requirement statement"
+                )
+            signature = (
+                requirement.requirement_family.casefold(),
+                requirement.actor.casefold(),
+                requirement.action.casefold(),
+                requirement.object.casefold(),
+                requirement.condition.casefold(),
+                requirement.polarity,
+                *sorted(value.casefold() for value in requirement.entity_discriminators),
+            )
+            hint = (requirement.requirement_key or "").strip().casefold()
+            previous = signatures_by_key.get(hint) if hint else None
+            if previous is not None and previous != signature:
+                raise TraceValidationError(
+                    "one requirement_key hint maps to incompatible atomic semantic signatures"
+                )
+            if hint:
+                signatures_by_key[hint] = signature
+
+
+def _semantic_support_tokens(value: str) -> set[str]:
+    ignored = {
+        "a",
+        "an",
+        "and",
+        "be",
+        "is",
+        "of",
+        "or",
+        "shall",
+        "should",
+        "the",
+        "to",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) > 1 and token not in ignored
+    }
 
 
 def _source_trace_from_quote(

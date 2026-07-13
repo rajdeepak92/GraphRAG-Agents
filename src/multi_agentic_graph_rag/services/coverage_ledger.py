@@ -20,14 +20,21 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
-from multi_agentic_graph_rag.domain.schemas import RequirementDiscoveryOutput
+from multi_agentic_graph_rag.domain.schemas import (
+    RequirementDiscoveryOutput,
+    RequirementRevisionSnapshot,
+)
 from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel
 from multi_agentic_graph_rag.services.requirement_builder import (
     derive_requirement_key,
     normalize_requirement_statement,
+)
+from multi_agentic_graph_rag.services.requirement_identity_resolver import (
+    requirement_lineage_signature,
 )
 
 
@@ -36,6 +43,8 @@ class LedgerEntry:
     requirement_key: str
     statement: str
     normalized_statement: str
+    requirement_family: str = "Functional Requirement"
+    semantic_signature: str = ""
 
 
 class CoverageLedger:
@@ -86,6 +95,58 @@ class CoverageLedger:
             self._evict_overflow()
         return added
 
+    def prime_prior_requirements(self, statements: Iterable[str]) -> int:
+        """Seed the ledger with prior document-version active requirement statements.
+
+        Loaded *before* discovery so the discovery prompt can show the model the
+        obligations already established in earlier versions. The model is then
+        nudged to reuse canonical wording (reducing paraphrase drift), but is still
+        free to emit a fresh occurrence whenever the current chunk supports it —
+        the ledger never suppresses evidence.
+        """
+        added = 0
+        for statement in statements:
+            text = statement.strip()
+            if not text:
+                continue
+            entry = LedgerEntry(
+                requirement_key=derive_requirement_key(text, None),
+                statement=text,
+                normalized_statement=normalize_requirement_statement(text),
+                semantic_signature=requirement_lineage_signature(text, "Functional Requirement"),
+            )
+            identity = self._identity(entry)
+            if identity in self._identities:
+                continue
+            self._entries.append(entry)
+            self._identities.add(identity)
+            added += 1
+            self._evict_overflow()
+        return added
+
+    def prime_prior_revisions(self, revisions: Iterable[RequirementRevisionSnapshot]) -> int:
+        added = 0
+        for revision in revisions:
+            text = revision.statement.strip()
+            if not text:
+                continue
+            family = revision.requirement_type or "Functional Requirement"
+            entry = LedgerEntry(
+                requirement_key=derive_requirement_key(text, None),
+                statement=text,
+                normalized_statement=revision.normalized_statement,
+                requirement_family=family,
+                semantic_signature=requirement_lineage_signature(text, family),
+            )
+            identity = self._identity(entry)
+            if identity in self._identities:
+                continue
+            self._entries.append(entry)
+            self._identities.add(identity)
+            added += 1
+            self._evict_overflow()
+        return added
+
     def count_exact_converged(self, output: RequirementDiscoveryOutput) -> int:
         """Count output requirements exactly matching an existing ledger entry.
 
@@ -120,7 +181,12 @@ class CoverageLedger:
         if not entries:
             return ""
         payload = [
-            {"requirement_key": entry.requirement_key, "statement": entry.statement}
+            {
+                "requirement_key": entry.requirement_key,
+                "statement": entry.statement,
+                "requirement_family": entry.requirement_family,
+                "semantic_signature": entry.semantic_signature,
+            }
             for entry in entries
         ]
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -158,6 +224,10 @@ def _entries_from_output(output: RequirementDiscoveryOutput) -> list[LedgerEntry
                         ),
                         statement=requirement.statement.strip(),
                         normalized_statement=normalize_requirement_statement(requirement.statement),
+                        requirement_family=requirement.requirement_family,
+                        semantic_signature=requirement_lineage_signature(
+                            requirement.statement, requirement.requirement_family
+                        ),
                     )
                 )
     return entries

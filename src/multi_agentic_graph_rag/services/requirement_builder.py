@@ -10,29 +10,35 @@ from typing import Literal
 from multi_agentic_graph_rag.domain.identifiers import (
     canonical_fact_id,
     fact_occurrence_id,
+    new_requirement_evidence_id,
+    new_requirement_id,
+    new_requirement_revision_id,
     requirement_delta_event_id,
-    requirement_evidence_id,
-    requirement_lineage_id,
-    requirement_revision_id,
+    requirement_evidence_occurrence_key,
 )
 from multi_agentic_graph_rag.domain.schemas import (
     CanonicalFact,
-    CompactRequirementArtifact,
-    CompactRequirementOccurrence,
+    CanonicalRequirement,
+    CanonicalRequirementEvidence,
+    CanonicalRequirementsArtifact,
     RequirementArtifact,
-    RequirementCatalogEntry,
-    RequirementCatalogTraceability,
     RequirementDeltaEvent,
     RequirementDiscoveryOutput,
     RequirementEvidence,
+    RequirementIdentityResolutionRecord,
     RequirementRevisionSnapshot,
-    RequirementsCatalogArtifact,
     SourceTrace,
     VerifiedFact,
     VerifiedRequirement,
     normalize_source_req_id,
 )
 from multi_agentic_graph_rag.observability.logging import RunLogger
+from multi_agentic_graph_rag.services.requirement_identity_resolver import (
+    requirement_lineage_signature,
+    resolve_requirement_identity,
+    structured_requirement_signature,
+)
+from multi_agentic_graph_rag.services.requirement_memory import MemoryEntry, RequirementMemory
 
 _WHITESPACE = re.compile(r"\s+")
 _QUOTED_VALUE = re.compile(r"(['\"])(?:(?=(\\?))\2.)*?\1")
@@ -42,14 +48,12 @@ _NON_KEY_CHARS = re.compile(r"[^a-z0-9{}]+")
 _DOWNSTREAM_ARTIFACT_TYPES = ["user_story", "scenario", "test_case"]
 _DeltaEventType = Literal["new", "duplicate", "changed", "superseded"]
 _CompactPriority = Literal["High", "Medium", "Low"]
-_CompactStatus = Literal["Active", "Superseded"]
 
 
 @dataclass
 class _RequirementAccumulator:
     requirement_id: str
     revision_id: str
-    display_id: str
     requirement_key: str
     source_req_id: str | None
     id_generation_type: Literal["source", "generated"]
@@ -58,6 +62,16 @@ class _RequirementAccumulator:
     normalized_statement: str
     requirement_type: str
     priority: str
+    semantic_signature: str
+    actor: str
+    modality: str
+    action: str
+    object_text: str
+    condition: str
+    polarity: Literal["positive", "negative"]
+    requirement_family: str
+    entity_discriminators: list[str]
+    mutable_parameters: list[str]
     source_trace: SourceTrace
     first_ordinal: int
     fact_ids: set[str] = field(default_factory=set)
@@ -74,6 +88,7 @@ def build_requirement_artifact(
     source_checksum: str,
     discovery: RequirementDiscoveryOutput,
     prior_revisions: Mapping[str, RequirementRevisionSnapshot] | None = None,
+    requirement_memory: RequirementMemory | None = None,
     logger: RunLogger | None = None,
 ) -> RequirementArtifact:
     if logger is not None:
@@ -86,6 +101,18 @@ def build_requirement_artifact(
     canonical_facts: dict[str, CanonicalFact] = {}
     fact_occurrences: dict[str, VerifiedFact] = {}
     requirements: dict[tuple[str, str], _RequirementAccumulator] = {}
+    allocated_lineages: dict[str, str] = {}
+    allocated_revisions: dict[tuple[str, str], str] = {}
+    evidence_occurrences: dict[tuple[object, ...], str] = {}
+    identity_resolutions: list[RequirementIdentityResolutionRecord] = []
+    prior_by_signature = {
+        (
+            snapshot.semantic_signature
+            or requirement_lineage_signature(snapshot.statement, snapshot.requirement_type)
+        ): snapshot
+        for snapshot in (prior_revisions or {}).values()
+        if snapshot.requirement_type
+    }
     requirement_ordinal = 0
 
     for chunk_output in discovery.chunks:
@@ -118,26 +145,88 @@ def build_requirement_artifact(
 
             for requirement_candidate in fact_candidate.requirements:
                 requirement_ordinal += 1
+                # ``requirement_key`` is retained only as a non-authoritative hint;
+                # the permanent lineage is decided by the deterministic identity
+                # resolver from a discriminator-preserving semantic signature.
                 requirement_key = derive_requirement_key(
                     requirement_candidate.statement,
                     requirement_candidate.requirement_key,
                 )
-                lineage_id = requirement_lineage_id(project, document_id, requirement_key)
                 normalized_statement = normalize_requirement_statement(
                     requirement_candidate.statement
                 )
-                revision_id = requirement_revision_id(lineage_id, normalized_statement)
-                accumulator_key = (lineage_id, revision_id)
-                accumulator = requirements.get(accumulator_key)
                 source_req_id = _validated_source_req_id(
                     requirement_candidate.source_req_id,
                     requirement_candidate.source_trace,
                 )
+                identity = resolve_requirement_identity(
+                    project=project,
+                    document_id=document_id,
+                    statement=requirement_candidate.statement,
+                    requirement_type=requirement_candidate.requirement_type,
+                    normalized_statement=normalized_statement,
+                )
+                signature = structured_requirement_signature(
+                    statement=requirement_candidate.statement,
+                    requirement_type=requirement_candidate.requirement_type,
+                    actor=requirement_candidate.actor,
+                    modality=requirement_candidate.modality,
+                    action=requirement_candidate.action,
+                    object_text=requirement_candidate.object,
+                    condition=requirement_candidate.condition,
+                    polarity=requirement_candidate.polarity,
+                    requirement_family=requirement_candidate.requirement_family,
+                    entity_discriminators=requirement_candidate.entity_discriminators,
+                    mutable_parameters=requirement_candidate.mutable_parameters,
+                )
+                prior = prior_by_signature.get(signature)
+                reconciliation = (
+                    requirement_memory.reconcile(
+                        statement=requirement_candidate.statement,
+                        requirement_type=requirement_candidate.requirement_type,
+                        normalized_statement=normalized_statement,
+                        source_req_id=source_req_id,
+                    )
+                    if requirement_memory is not None
+                    else None
+                )
+                if (
+                    reconciliation is not None
+                    and reconciliation.decision == "AMBIGUOUS"
+                    and logger is not None
+                ):
+                    logger.warning(
+                        "Requirement identity was ambiguous; allocated a distinct lineage",
+                        step="resolve_requirement_identity",
+                        candidate_ids=list(reconciliation.candidate_ids),
+                        statement=requirement_candidate.statement,
+                    )
+                if reconciliation is not None and reconciliation.requirement_id is not None:
+                    lineage_id = reconciliation.requirement_id
+                else:
+                    # Compatibility bridge: existing hash-era rows can still be reused
+                    # until the explicit repair migration rewrites them to UUIDv7.
+                    if prior is None:
+                        prior = (prior_revisions or {}).get(identity.requirement_id)
+                    lineage_id = (
+                        prior.requirement_id
+                        if prior is not None
+                        else allocated_lineages.setdefault(signature, new_requirement_id())
+                    )
+                revision_key = (lineage_id, normalized_statement)
+                revision_id = (
+                    reconciliation.revision_id
+                    if reconciliation is not None and reconciliation.revision_id is not None
+                    else prior.revision_id
+                    if prior is not None and prior.normalized_statement == normalized_statement
+                    else allocated_revisions.setdefault(revision_key, new_requirement_revision_id())
+                )
+                accumulator_key = (lineage_id, revision_id)
+                accumulator = requirements.get(accumulator_key)
                 if accumulator is None:
                     accumulator = _RequirementAccumulator(
                         requirement_id=lineage_id,
                         revision_id=revision_id,
-                        display_id="",
                         requirement_key=requirement_key,
                         source_req_id=source_req_id,
                         id_generation_type="source" if source_req_id else "generated",
@@ -146,10 +235,32 @@ def build_requirement_artifact(
                         normalized_statement=normalized_statement,
                         requirement_type=requirement_candidate.requirement_type,
                         priority=requirement_candidate.priority,
+                        semantic_signature=signature,
+                        actor=requirement_candidate.actor,
+                        modality=requirement_candidate.modality,
+                        action=requirement_candidate.action,
+                        object_text=requirement_candidate.object,
+                        condition=requirement_candidate.condition,
+                        polarity=requirement_candidate.polarity,
+                        requirement_family=requirement_candidate.requirement_family,
+                        entity_discriminators=list(requirement_candidate.entity_discriminators),
+                        mutable_parameters=list(requirement_candidate.mutable_parameters),
                         source_trace=requirement_candidate.source_trace,
                         first_ordinal=requirement_ordinal,
                     )
                     requirements[accumulator_key] = accumulator
+                    if requirement_memory is not None:
+                        requirement_memory.add(
+                            MemoryEntry(
+                                requirement_id=lineage_id,
+                                revision_id=revision_id,
+                                statement=accumulator.statement,
+                                normalized_statement=normalized_statement,
+                                requirement_type=accumulator.requirement_type,
+                                source_req_id=source_req_id,
+                                signature=signature,
+                            )
+                        )
                 else:
                     if accumulator.source_req_id is None and source_req_id is not None:
                         accumulator.source_req_id = source_req_id
@@ -159,15 +270,64 @@ def build_requirement_artifact(
                         requirement_candidate.confidence,
                     )
 
+                if reconciliation is not None:
+                    decision = reconciliation.decision
+                    reasons = reconciliation.reasons
+                    candidate_ids = list(reconciliation.candidate_ids)
+                    candidate_scores = dict(reconciliation.candidate_scores)
+                    reranker_order = list(reconciliation.reranker_order)
+                    judge_result = reconciliation.judge_result
+                elif prior is not None and prior.normalized_statement == normalized_statement:
+                    decision = "EXACT"
+                    reasons = ("prior_exact_normalized_statement",)
+                    candidate_ids = [prior.requirement_id]
+                    candidate_scores = {}
+                    reranker_order = []
+                    judge_result = None
+                elif prior is not None:
+                    decision = "SAME_LINEAGE_REVISION"
+                    reasons = ("prior_structured_signature",)
+                    candidate_ids = [prior.requirement_id]
+                    candidate_scores = {}
+                    reranker_order = []
+                    judge_result = None
+                else:
+                    decision = "DISTINCT"
+                    reasons = ("no_compatible_canonical_candidate",)
+                    candidate_ids = []
+                    candidate_scores = {}
+                    reranker_order = []
+                    judge_result = None
+                identity_resolutions.append(
+                    RequirementIdentityResolutionRecord(
+                        incoming_fingerprint=signature,
+                        document_version_id=document_version_id,
+                        chunk_id=requirement_candidate.source_trace.chunk_id,
+                        candidate_ids=candidate_ids,
+                        candidate_scores=candidate_scores,
+                        reranker_order=reranker_order,
+                        deterministic_rule=reasons[0],
+                        judge_result=judge_result,
+                        decision=decision,
+                        reason=";".join(reasons),
+                        requirement_id=lineage_id,
+                        revision_id=revision_id,
+                    )
+                )
+
                 accumulator.fact_ids.add(fact_occurrence.fact_id)
-                evidence_id = requirement_evidence_id(
-                    requirement_identifier=lineage_id,
-                    revision_identifier=revision_id,
+                occurrence_lookup_key = requirement_evidence_occurrence_key(
                     document_version_identifier=document_version_id,
                     chunk_identifier=requirement_candidate.source_trace.chunk_id,
                     quote=requirement_candidate.source_trace.quote,
                     start_char=requirement_candidate.source_trace.start_char,
                     end_char=requirement_candidate.source_trace.end_char,
+                )
+                occurrence_key = (lineage_id, revision_id, occurrence_lookup_key)
+                evidence_id = evidence_occurrences.setdefault(
+                    occurrence_key,
+                    (prior.evidence_ids.get(occurrence_lookup_key) if prior is not None else None)
+                    or new_requirement_evidence_id(),
                 )
                 evidence = accumulator.evidence.get(evidence_id)
                 if evidence is None:
@@ -199,6 +359,7 @@ def build_requirement_artifact(
             _to_verified_requirement(accumulator) for accumulator in ordered_requirements
         ],
         delta_events=delta_events,
+        identity_resolutions=identity_resolutions,
     )
     if logger is not None:
         logger.debug(
@@ -212,113 +373,63 @@ def build_requirement_artifact(
     return artifact
 
 
-def build_compact_requirement_artifact(
+def build_canonical_requirements_artifact(
     artifact: RequirementArtifact,
-) -> CompactRequirementArtifact:
+) -> CanonicalRequirementsArtifact:
+    """Project the audit ledger to the canonical, non-duplicating public contract."""
     superseded_revision_ids = {
         event.revision_id
         for event in artifact.delta_events
         if event.event_type == "superseded" and event.revision_id
     }
-    requirements: dict[str, list[CompactRequirementOccurrence]] = {}
-    for requirement in artifact.requirements:
-        status: _CompactStatus = (
-            "Superseded" if requirement.revision_id in superseded_revision_ids else "Active"
+    requirements = [
+        CanonicalRequirement(
+            requirement_id=requirement.requirement_id,
+            revision_id=requirement.revision_id,
+            source_req_id=requirement.source_req_id,
+            id_generation_type=requirement.id_generation_type,
+            confidence=requirement.confidence,
+            requirement_text=requirement.statement,
+            semantic_signature=requirement.semantic_signature,
+            requirement_type=requirement.requirement_type,
+            actor=requirement.actor,
+            modality=requirement.modality,
+            action=requirement.action,
+            object=requirement.object,
+            condition=requirement.condition,
+            polarity=requirement.polarity,
+            requirement_family=requirement.requirement_family,
+            entity_discriminators=list(requirement.entity_discriminators),
+            mutable_parameters=list(requirement.mutable_parameters),
+            priority=_compact_priority(requirement.priority),
+            status=(
+                "Superseded" if requirement.revision_id in superseded_revision_ids else "Active"
+            ),
+            evidence=[
+                CanonicalRequirementEvidence(
+                    evidence_id=evidence.evidence_id,
+                    document_version_id=artifact.document_version_id,
+                    chunk_id=evidence.source_trace.chunk_id,
+                    fact_ids=evidence.fact_ids,
+                    quote=evidence.source_trace.quote,
+                    start_char=evidence.source_trace.start_char,
+                    end_char=evidence.source_trace.end_char,
+                    page=evidence.source_trace.page,
+                    section=evidence.source_trace.section,
+                    source_path=artifact.source_path,
+                )
+                for evidence in requirement.evidence
+            ],
         )
-        requirements[requirement.requirement_id] = [
-            CompactRequirementOccurrence(
-                chunk_id=requirement.source_trace.chunk_id,
-                fact_id=fact_id,
-                requirement_text=requirement.statement,
-                requirement_type=requirement.requirement_type,
-                priority=_compact_priority(requirement.priority),
-                status=status,
-                doc_version=artifact.version,
-            )
-            for fact_id in requirement.fact_ids
-        ]
-    return CompactRequirementArtifact(
+        for requirement in artifact.requirements
+    ]
+    return CanonicalRequirementsArtifact(
         project=artifact.project,
         document_id=artifact.document_id,
         document_version_id=artifact.document_version_id,
         doc_version=artifact.version,
         generated_at=artifact.generated_at,
         requirements=requirements,
-    )
-
-
-def build_requirements_catalog_artifact(
-    artifact: RequirementArtifact,
-) -> RequirementsCatalogArtifact:
-    superseded_revision_ids = {
-        event.revision_id
-        for event in artifact.delta_events
-        if event.event_type == "superseded" and event.revision_id
-    }
-    entries: list[RequirementCatalogEntry] = []
-    traceability_by_key: dict[tuple[str, str], RequirementCatalogTraceability] = {}
-    for requirement in artifact.requirements:
-        status: _CompactStatus = (
-            "Superseded" if requirement.revision_id in superseded_revision_ids else "Active"
-        )
-        display_id = requirement.display_id or requirement.requirement_id
-        fact_chunks = _fact_chunks_for_requirement(requirement)
-        for fact_id in requirement.fact_ids:
-            chunk_id = fact_chunks.get(fact_id, requirement.source_trace.chunk_id)
-            entries.append(
-                RequirementCatalogEntry(
-                    display_id=display_id,
-                    requirement_uid=requirement.requirement_id,
-                    revision_id=requirement.revision_id,
-                    source_req_id=requirement.source_req_id,
-                    id_generation_type=requirement.id_generation_type,
-                    confidence=requirement.confidence,
-                    chunk_id=chunk_id,
-                    fact_id=fact_id,
-                    requirement_text=requirement.statement,
-                    requirement_type=requirement.requirement_type,
-                    priority=_compact_priority(requirement.priority),
-                    status=status,
-                    doc_version=artifact.version,
-                )
-            )
-            trace_key = (display_id, chunk_id)
-            trace = traceability_by_key.get(trace_key)
-            if trace is None:
-                traceability_by_key[trace_key] = RequirementCatalogTraceability(
-                    req_id=display_id,
-                    requirement_uid=requirement.requirement_id,
-                    revision_id=requirement.revision_id,
-                    chunk_id=chunk_id,
-                    fact_ids=[fact_id],
-                )
-            elif fact_id not in trace.fact_ids:
-                trace.fact_ids.append(fact_id)
-
-    return RequirementsCatalogArtifact(
-        project=artifact.project,
-        document_id=artifact.document_id,
-        document_version_id=artifact.document_version_id,
-        doc_version=artifact.version,
-        generated_at=artifact.generated_at,
-        requirements=entries,
-        traceability=list(traceability_by_key.values()),
-    )
-
-
-def apply_requirement_display_ids(
-    artifact: RequirementArtifact,
-    display_ids: Mapping[str, str],
-) -> RequirementArtifact:
-    return artifact.model_copy(
-        update={
-            "requirements": [
-                requirement.model_copy(
-                    update={"display_id": display_ids.get(requirement.requirement_id, "")}
-                )
-                for requirement in artifact.requirements
-            ]
-        }
     )
 
 
@@ -356,14 +467,23 @@ def _to_verified_requirement(accumulator: _RequirementAccumulator) -> VerifiedRe
     return VerifiedRequirement(
         requirement_id=accumulator.requirement_id,
         revision_id=accumulator.revision_id,
-        display_id=accumulator.display_id,
         requirement_key=accumulator.requirement_key,
         source_req_id=accumulator.source_req_id,
         id_generation_type=accumulator.id_generation_type,
         confidence=accumulator.confidence,
         statement=accumulator.statement,
         normalized_statement=accumulator.normalized_statement,
+        semantic_signature=accumulator.semantic_signature,
         requirement_type=accumulator.requirement_type,
+        actor=accumulator.actor,
+        modality=accumulator.modality,
+        action=accumulator.action,
+        object=accumulator.object_text,
+        condition=accumulator.condition,
+        polarity=accumulator.polarity,
+        requirement_family=accumulator.requirement_family,
+        entity_discriminators=list(accumulator.entity_discriminators),
+        mutable_parameters=list(accumulator.mutable_parameters),
         priority=accumulator.priority,
         fact_ids=fact_ids,
         source_trace=accumulator.source_trace,

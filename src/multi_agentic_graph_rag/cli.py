@@ -32,6 +32,7 @@ from multi_agentic_graph_rag.domain.identifiers import run_id
 from multi_agentic_graph_rag.domain.schemas import (
     IngestionRequest,
     KnowledgeGraphRequest,
+    RequirementArtifact,
     TestScenarioRequest,
     UserStoryRequest,
 )
@@ -51,6 +52,10 @@ from multi_agentic_graph_rag.services.artifacts import (
     verify_test_scenario_artifact,
     verify_user_story_artifact,
 )
+from multi_agentic_graph_rag.services.test_scenario_builder import (
+    project_test_scenario_artifact,
+)
+from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 from multi_agentic_graph_rag.workflows.knowledge_graph import run_knowledge_graph_build
 from multi_agentic_graph_rag.workflows.test_scenario_graph import resolve_test_scenario_identity
 from multi_agentic_graph_rag.workflows.user_story_graph import resolve_user_story_identity
@@ -63,8 +68,10 @@ app = typer.Typer(
 )
 run_app = typer.Typer(help="Run status and recovery commands.")
 artifact_app = typer.Typer(help="Generated artifact commands.")
+requirements_app = typer.Typer(help="Requirement identity maintenance commands.")
 app.add_typer(run_app, name="run")
 app.add_typer(artifact_app, name="artifact")
+app.add_typer(requirements_app, name="requirements")
 console = Console()
 
 
@@ -770,6 +777,194 @@ def run_resume(run_id_value: Annotated[str, typer.Argument()]) -> None:
         )
 
 
+@requirements_app.command("repair-identities")
+def requirements_repair_identities(
+    artifact: Annotated[
+        Path | None,
+        typer.Option("--artifact", help="Path to a legacy requirement artifact to inspect."),
+    ] = None,
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Repair canonical identities for one stored project."),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Commit the repair (default is a dry run)."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Analyze and report without writing (the default)."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json-output")] = False,
+) -> None:
+    """Dry-run or repair canonical identities for a project or legacy artifact.
+
+    Dry-run by default. Splits any lineage whose revisions carry more than one
+    identity signature onto corrected deterministic lineages, preserving all
+    evidence. Project apply is transactional; legacy artifact apply is atomic.
+    """
+    from multi_agentic_graph_rag.services.requirement_repair import (
+        analyze_requirement_artifact,
+        apply_repair,
+        migrate_legacy_catalog_payload,
+    )
+
+    if apply and dry_run:
+        raise typer.BadParameter("--apply and --dry-run are mutually exclusive")
+    if (artifact is None) == (project is None):
+        raise typer.BadParameter("provide exactly one of --project or --artifact")
+    if project is not None:
+        settings = load_config()
+        postgres = PostgresStore(settings)
+        project_report = postgres.repair_project_identities(project=project, apply=apply)
+        if json_output:
+            console.print_json(json.dumps(project_report))
+        else:
+            raw_impact = project_report.get("impact_counts", {})
+            impact = raw_impact if isinstance(raw_impact, dict) else {}
+            console.print(
+                f"Project {project}: artifacts={project_report.get('artifact_count', 0)} "
+                f"revisions={impact.get('requirement_revisions', 0)} "
+                f"evidence={impact.get('evidence_occurrences', 0)}"
+            )
+        raw_ambiguous = project_report.get("ambiguous_cases", [])
+        ambiguous = raw_ambiguous if isinstance(raw_ambiguous, list) else []
+        if ambiguous:
+            for message in ambiguous:
+                console.print(f"[red]AMBIGUOUS[/red] {message}")
+            if apply:
+                raise typer.Exit(code=2)
+        if not apply:
+            console.print("[yellow]DRY RUN[/yellow] re-run with --apply to commit the repair")
+            return
+        _rebuild_identity_projections(postgres, Neo4jStore(settings), project)
+        console.print(f"[green]APPLIED[/green] repaired project {project}")
+        return
+
+    assert artifact is not None
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and payload.get("artifact_schema_version") == "4.0-catalog":
+        migrated = migrate_legacy_catalog_payload(payload)
+        summary = {
+            "source_schema": "4.0-catalog",
+            "target_schema": migrated.artifact_schema_version,
+            "canonical_requirements": len(migrated.requirements),
+            "evidence_occurrences": sum(len(row.evidence) for row in migrated.requirements),
+        }
+        if json_output:
+            console.print_json(json.dumps(summary))
+        else:
+            console.print(
+                f"Legacy catalog -> {migrated.artifact_schema_version}: "
+                f"requirements={summary['canonical_requirements']} "
+                f"evidence={summary['evidence_occurrences']}"
+            )
+        if not apply:
+            console.print("[yellow]DRY RUN[/yellow] re-run with --apply to write the migration")
+            return
+        from multi_agentic_graph_rag.services.generation_checkpoint import atomic_write_json
+
+        atomic_write_json(artifact, migrated.model_dump(mode="json"))
+        console.print(f"[green]APPLIED[/green] migrated legacy catalog -> {artifact}")
+        return
+    parsed = RequirementArtifact.model_validate(payload)
+    with command_session(
+        project=parsed.project,
+        version=__version__,
+        command="requirements-repair-identities",
+        run_id=command_run_id("requirements-repair-identities"),
+    ) as session:
+        report = analyze_requirement_artifact(parsed)
+        session.logger.info(
+            "Analyzed requirement lineages for pollution",
+            step="repair-identities",
+            project=parsed.project,
+            total_lineages=report.total_lineages,
+            polluted_lineages=report.polluted_lineages,
+            status="dry_run" if not apply else "apply",
+        )
+        if json_output:
+            console.print_json(json.dumps(report.to_dict()))
+        else:
+            console.print(
+                f"Requirement lineages: {report.total_lineages} "
+                f"polluted={report.polluted_lineages} "
+                f"({report.total_requirements} requirements)"
+            )
+            for finding in report.findings:
+                console.print(
+                    f"  [yellow]{finding.old_requirement_id}[/yellow] -> "
+                    f"{len(set(finding.revision_remap.values()))} distinct lineages "
+                    f"({len(finding.signatures)} signatures)"
+                )
+        if not report.id_remap and not report.revision_id_remap and not report.evidence_id_remap:
+            console.print("[green]PASS[/green] no polluted lineages detected")
+            return
+        if not apply:
+            console.print("[yellow]DRY RUN[/yellow] re-run with --apply to write the fix")
+            return
+        from multi_agentic_graph_rag.services.generation_checkpoint import atomic_write_json
+
+        repaired = apply_repair(parsed, report)
+        atomic_write_json(artifact, repaired.model_dump(mode="json"))
+        console.print(
+            f"[green]APPLIED[/green] repaired {report.polluted_lineages} lineages -> {artifact}"
+        )
+
+
+def _rebuild_identity_projections(
+    postgres: PostgresStore,
+    neo4j: Neo4jStore,
+    project: str,
+) -> None:
+    """Clean and rebuild derivative Neo4j projections from repaired PostgreSQL rows."""
+    evidence: dict[str, list[str]] = {}
+    for row in postgres.load_artifact_payloads_for_project(project=project):
+        if row.get("artifact_kind") != "requirements":
+            continue
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        from multi_agentic_graph_rag.domain.schemas import CanonicalRequirementsArtifact
+
+        canonical = CanonicalRequirementsArtifact.model_validate(payload)
+        for requirement in canonical.requirements:
+            evidence.setdefault(requirement.requirement_id, []).extend(
+                item.chunk_id for item in requirement.evidence
+            )
+    neo4j.cleanup_identity_projections(project)
+    stories = postgres.load_user_stories_for_generation(project=project)
+    by_version: dict[str, dict[str, Any]] = {}
+    for story in stories:
+        by_version.setdefault(story.document_version_id, {})[story.story_id] = story
+    for records in by_version.values():
+        head = next(iter(records.values()))
+        artifact = project_user_story_artifact(
+            project=project,
+            document_id=head.document_id,
+            document_version_id=head.document_version_id,
+            doc_version=head.doc_version,
+            records=records,
+        )
+        neo4j.project_user_story_coverage(artifact, evidence)
+    scenarios = postgres.load_test_scenarios_for_generation(project=project)
+    scenario_versions: dict[str, dict[str, Any]] = {}
+    for scenario in scenarios:
+        scenario_versions.setdefault(scenario.document_version_id, {})[scenario.scenario_id] = (
+            scenario
+        )
+    for records in scenario_versions.values():
+        head = next(iter(records.values()))
+        scenario_artifact = project_test_scenario_artifact(
+            project=project,
+            document_id=head.document_id,
+            document_version_id=head.document_version_id,
+            doc_version=head.doc_version,
+            records=records,
+        )
+        neo4j.project_test_scenario_coverage(scenario_artifact, evidence)
+
+
 @artifact_app.command("verify")
 def artifact_verify(path: Annotated[Path, typer.Argument()]) -> None:
     with command_session(
@@ -804,7 +999,7 @@ def artifact_verify_user_stories(path: Annotated[Path, typer.Argument()]) -> Non
         run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY_USER_STORIES.value),
     ) as session:
         artifact = verify_user_story_artifact(path)
-        covered_requirements = len({row.req_id for row in artifact.traceability})
+        covered_requirements = len({row.requirement_id for row in artifact.traceability})
         session.logger.info(
             "Verified user-story artifact {path}",
             step="artifact-verify-user-stories",
@@ -829,8 +1024,8 @@ def artifact_verify_test_scenarios(path: Annotated[Path, typer.Argument()]) -> N
         run_id=command_run_id(RuntimeCommand.ARTIFACT_VERIFY_TEST_SCENARIOS.value),
     ) as session:
         artifact = verify_test_scenario_artifact(path)
-        covered_stories = len({row.us_id for row in artifact.traceability})
-        covered_requirements = len({row.req_id for row in artifact.traceability})
+        covered_stories = len({row.story_id for row in artifact.traceability})
+        covered_requirements = len({row.requirement_id for row in artifact.traceability})
         session.logger.info(
             "Verified test-scenario artifact {path}",
             step="artifact-verify-test-scenarios",

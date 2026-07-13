@@ -75,7 +75,7 @@ from multi_agentic_graph_rag.services.knowledge_retrieval import (
 )
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
-    load_requirement_source_from_full_payload,
+    load_requirement_source_from_canonical_payload,
     load_requirement_source_local,
 )
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
@@ -377,7 +377,6 @@ def _finalize(state: TestScenarioState) -> TestScenarioState:
             document_version_id=artifact.document_version_id,
             doc_version=artifact.doc_version,
             records=records,
-            scenario_display_ids={},
         )
         artifact = artifact.model_copy(update={"updated_at": datetime.now(UTC)})
     else:
@@ -1201,22 +1200,12 @@ def _load_requirement_map(
             if loaded_compact is not None:
                 return _requirements_by_id(loaded_compact)
 
-        full_path = request.user_stories_path.parent / "requirements_full.json"
-        if full_path.exists():
-            loaded_full = _try_load_requirement_source_full(
-                full_path,
-                source,
-                warn,
-            )
-            if loaded_full is not None:
-                return _requirements_by_id(loaded_full)
-
     payload = postgres.load_requirement_artifact_payload(
         document_version_id=source.document_version_id
     )
     if payload is not None:
         try:
-            requirement_source = load_requirement_source_from_full_payload(payload)
+            requirement_source = load_requirement_source_from_canonical_payload(payload)
             _raise_on_document_version_mismatch(requirement_source, source)
             if logger is not None:
                 logger.info(
@@ -1248,26 +1237,6 @@ def _try_load_requirement_source_local(
     except (ValidationError, json.JSONDecodeError, OSError, ConfigurationError) as exc:
         warn(
             "sibling requirements.json is unusable; trying next requirement source",
-            path=str(path),
-            error=str(exc),
-            source="local_json",
-        )
-        return None
-    return requirement_source
-
-
-def _try_load_requirement_source_full(
-    path: Path,
-    source: _StorySource,
-    warn: Any,
-) -> RequirementSource | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        requirement_source = load_requirement_source_from_full_payload(payload)
-        _raise_on_document_version_mismatch(requirement_source, source)
-    except (ValidationError, json.JSONDecodeError, OSError, ConfigurationError) as exc:
-        warn(
-            "sibling requirements_full.json is unusable; trying next requirement source",
             path=str(path),
             error=str(exc),
             source="local_json",
@@ -1349,7 +1318,6 @@ def _preserve_existing_scenario_ids(
         document_version_id=artifact.artifact.document_version_id,
         doc_version=artifact.artifact.doc_version,
         records=rewritten,
-        scenario_display_ids={},
     )
     return artifact
 

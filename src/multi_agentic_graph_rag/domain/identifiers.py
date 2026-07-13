@@ -8,9 +8,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from uuid_utils import uuid7
+
 from multi_agentic_graph_rag.common_defs import IdentifierPrefix
 
 _SAFE = re.compile(r"[^A-Za-z0-9]+")
+_UUID7_ID = re.compile(
+    r"^(?:REQ|REQREV|REQEVID)-[0-9A-F]{8}-[0-9A-F]{4}-7[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$",
+    re.I,
+)
 
 
 def stable_token(*parts: object, length: int = 16) -> str:
@@ -94,6 +100,44 @@ def requirement_lineage_id(
         f"{IdentifierPrefix.REQ.value}"
         f"{stable_token(project, document_identifier, requirement_key, length=14)}"
     )
+
+
+def new_requirement_id() -> str:
+    """Allocate a globally unique, immutable canonical requirement identifier."""
+    return f"{IdentifierPrefix.REQ.value}{str(uuid7()).upper()}"
+
+
+def new_requirement_revision_id() -> str:
+    """Allocate a globally unique identifier for a canonical requirement revision."""
+    return f"{IdentifierPrefix.REQREV.value}{str(uuid7()).upper()}"
+
+
+def new_requirement_evidence_id() -> str:
+    """Allocate a globally unique identifier for one evidence occurrence."""
+    return f"{IdentifierPrefix.REQEVID.value}{str(uuid7()).upper()}"
+
+
+def requirement_evidence_occurrence_key(
+    *,
+    document_version_identifier: str,
+    chunk_identifier: str,
+    quote: str,
+    start_char: int,
+    end_char: int,
+) -> str:
+    """Stable lookup key used only to reuse an already-allocated evidence UUID."""
+    return stable_token(
+        document_version_identifier,
+        chunk_identifier,
+        quote,
+        start_char,
+        end_char,
+        length=32,
+    )
+
+
+def is_requirement_uuid7(value: str) -> bool:
+    return bool(_UUID7_ID.fullmatch(value.strip()))
 
 
 def requirement_revision_id(requirement_identifier: str, normalized_statement: str) -> str:

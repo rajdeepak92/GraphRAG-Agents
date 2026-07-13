@@ -93,6 +93,20 @@ class TestScenarioSettings(UserStorySettings):
     """Stage-4 retrieval/generation settings, type-compatible with RetrievalService."""
 
 
+class RequirementIdentitySettings(BaseModel):
+    """Calibration knobs for cross-version requirement dedup / identity recall.
+
+    Thresholds only gate *candidate recall*; a merge is never decided by cosine or
+    reranker score alone (structured signatures + bidirectional entailment decide).
+    """
+
+    candidate_top_k: int = 8
+    recall_cosine_threshold: float = 0.62
+    token_overlap_threshold: float = 0.6
+    use_reranker: bool = True
+    require_entailment_for_merge: bool = True
+
+
 class AzureOpenAISettings(BaseModel):
     endpoint: str = ""
     api_key: str = ""
@@ -141,6 +155,9 @@ class AppSettings(BaseModel):
     user_story: UserStorySettings = Field(default_factory=UserStorySettings)
     test_scenario: TestScenarioSettings = Field(default_factory=TestScenarioSettings)
     knowledge_graph: KnowledgeGraphSettings = Field(default_factory=KnowledgeGraphSettings)
+    requirement_identity: RequirementIdentitySettings = Field(
+        default_factory=RequirementIdentitySettings
+    )
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
     enable_hfil: bool = False

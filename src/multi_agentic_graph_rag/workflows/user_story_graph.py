@@ -61,7 +61,7 @@ from multi_agentic_graph_rag.services.knowledge_retrieval import (
 )
 from multi_agentic_graph_rag.services.requirement_source import (
     RequirementSource,
-    load_requirement_source_from_full_payload,
+    load_requirement_source_from_canonical_payload,
     load_requirement_source_local,
 )
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
@@ -534,8 +534,6 @@ def _preserve_existing_story_ids(
         document_version_id=artifact.artifact.document_version_id,
         doc_version=artifact.artifact.doc_version,
         records=rewritten,
-        requirement_display_ids={},
-        story_display_ids={},
     )
     return artifact
 
@@ -644,7 +642,7 @@ def _load_requirement_source(
             document_version_id=request.document_version_id,
             source="postgres",
         )
-    return load_requirement_source_from_full_payload(payload)
+    return load_requirement_source_from_canonical_payload(payload)
 
 
 def _output_dir(

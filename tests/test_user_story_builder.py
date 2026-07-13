@@ -31,7 +31,7 @@ class UserStoryBuilderTests(unittest.TestCase):
         self.assertEqual(record.document_version_id, "DV-1")
         self.assertEqual(record.doc_version, "1.0")
         self.assertEqual(artifact.coverage, {"REQ-1": [story_id]})
-        self.assertEqual(artifact.artifact.stories[0].display_id, story_id)
+        self.assertEqual(artifact.artifact.stories[0].story_id, story_id)
 
     def test_projects_flat_acceptance_criteria(self) -> None:
         requirement = _requirement("REQ-1", "Users shall configure warning thresholds.")
@@ -93,7 +93,6 @@ class UserStoryBuilderTests(unittest.TestCase):
 def _requirement(requirement_id: str, text: str) -> RequirementInput:
     return RequirementInput(
         requirement_id=requirement_id,
-        display_id="REQ-001",
         requirement_text=text,
         requirement_type="Functional Requirement",
         priority="Medium",

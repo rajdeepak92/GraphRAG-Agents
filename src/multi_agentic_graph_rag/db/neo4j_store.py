@@ -66,7 +66,7 @@ class Neo4jStore:
         _ = artifact
 
     def ensure_search_index(self) -> None:
-        """Create the chunk full-text (BM25/Lucene) index used by hybrid retrieval."""
+        """Create the chunk full-text index and derivative-node uniqueness constraints."""
         if self.settings.neo4j.mode == "local_json":
             return
         with (
@@ -77,6 +77,18 @@ class Neo4jStore:
                 "CREATE FULLTEXT INDEX chunk_fulltext IF NOT EXISTS "
                 "FOR (c:Chunk) ON EACH [c.text, c.normalized_text]"
             )
+            # PostgreSQL is authoritative for generated artifacts, but downstream
+            # coverage projection MERGEs Requirement/UserStory/TestScenario nodes;
+            # uniqueness constraints keep those derivative nodes deduplicated.
+            for label, key in (
+                ("Requirement", "requirement_id"),
+                ("UserStory", "story_id"),
+                ("TestScenario", "scenario_id"),
+            ):
+                session.run(
+                    f"CREATE CONSTRAINT {label.lower()}_pk IF NOT EXISTS "
+                    f"FOR (n:{label}) REQUIRE n.{key} IS UNIQUE"
+                )
 
     def fulltext_search_chunks(
         self,
@@ -186,9 +198,8 @@ class Neo4jStore:
                     {
                         "kind": "user_story_projection",
                         "story_id": story_id,
-                        "display_id": record.display_id,
                         "requirement_id": record.requirement_id,
-                        "requirement_display_id": record.requirement_display_id,
+                        "revision_id": record.requirement_revision_id,
                         "source_req_id": record.source_req_id,
                         "project": record.project,
                         "document_version_id": record.document_version_id,
@@ -227,11 +238,9 @@ class Neo4jStore:
                     {
                         "kind": "test_scenario_projection",
                         "scenario_id": scenario_id,
-                        "display_id": record.display_id,
                         "story_id": record.story_id,
-                        "story_display_id": record.story_display_id,
                         "requirement_id": record.requirement_id,
-                        "requirement_display_id": record.requirement_display_id,
+                        "revision_id": record.requirement_revision_id,
                         "source_req_id": record.source_req_id,
                         "project": record.project,
                         "document_version_id": record.document_version_id,
@@ -259,6 +268,36 @@ class Neo4jStore:
                 },
                 evidence,
             )
+
+    def cleanup_identity_projections(self, project: str) -> None:
+        """Idempotently remove generated derivative projections before rebuilding."""
+        if self.settings.neo4j.mode == "local_json":
+            rows = [
+                row
+                for row in self._read_local_rows()
+                if not (
+                    row.get("project") == project
+                    and row.get("kind") in {"user_story_projection", "test_scenario_projection"}
+                )
+            ]
+            self.settings.neo4j.local_path.parent.mkdir(parents=True, exist_ok=True)
+            self.settings.neo4j.local_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            return
+        with (
+            self._driver() as driver,
+            driver.session(database=self.settings.neo4j.database) as session,
+        ):
+            session.run(
+                """
+                MATCH (n)
+                WHERE n.project = $project
+                  AND (n:Requirement OR n:UserStory OR n:TestScenario)
+                DETACH DELETE n
+                """,
+                project=project,
+            ).consume()
 
     def ensure_knowledge_schema(self) -> None:
         """Create the constraints and search indexes for the source-knowledge graph."""
@@ -1420,9 +1459,8 @@ def _project_user_story_coverage_tx(
                 r.document_version_id = $document_version_id
             MERGE (s:UserStory {story_id: $story_id})
             SET s.title = $title,
-                s.display_id = $display_id,
                 s.requirement_id = $requirement_id,
-                s.requirement_display_id = $requirement_display_id,
+                s.revision_id = $revision_id,
                 s.source_req_id = $source_req_id,
                 s.project = $project,
                 s.persona = $persona,
@@ -1431,9 +1469,8 @@ def _project_user_story_coverage_tx(
             MERGE (s)-[:COVERS_REQUIREMENT]->(r)
             """,
             story_id=story_id,
-            display_id=record.get("display_id", ""),
             requirement_id=requirement_id,
-            requirement_display_id=record.get("requirement_display_id", ""),
+            revision_id=record.get("requirement_revision_id", ""),
             source_req_id=record.get("source_req_id"),
             project=record["project"],
             document_id=record["document_id"],
@@ -1484,28 +1521,26 @@ def _project_test_scenario_coverage_tx(
             """
             MERGE (t:TestScenario {scenario_id: $scenario_id})
             SET t.title = $title,
-                t.display_id = $display_id,
                 t.scenario_type = $scenario_type,
                 t.priority = $priority,
                 t.confidence = $confidence,
                 t.story_id = $story_id,
-                t.story_display_id = $story_display_id,
                 t.requirement_id = $requirement_id,
-                t.requirement_display_id = $requirement_display_id,
+                t.revision_id = $revision_id,
                 t.source_req_id = $source_req_id,
                 t.project = $project,
                 t.document_version_id = $document_version_id
             MERGE (s:UserStory {story_id: $story_id})
             MERGE (t)-[:VALIDATES_STORY]->(s)
             MERGE (r:Requirement {requirement_id: $requirement_id})
+            SET r.project = $project,
+                r.document_version_id = $document_version_id
             MERGE (t)-[:COVERS_REQUIREMENT]->(r)
             """,
             scenario_id=scenario_id,
-            display_id=record.get("display_id", ""),
             story_id=record["story_id"],
-            story_display_id=record.get("story_display_id", ""),
             requirement_id=requirement_id,
-            requirement_display_id=record.get("requirement_display_id", ""),
+            revision_id=record.get("requirement_revision_id", ""),
             source_req_id=record.get("source_req_id"),
             project=record["project"],
             document_version_id=record["document_version_id"],

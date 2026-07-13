@@ -31,6 +31,16 @@ _PLACEHOLDER_USER_STORY_TEXT_RE = re.compile(
     r"epic|feature|tbd|todo|placeholder|n/?a|na|none|null|unknown)$",
     re.I,
 )
+_SEMANTIC_MODAL_RE = re.compile(r"\b(shall|must|should|may|will)\b", re.I)
+_ENTITY_DISCRIMINATOR_RE = re.compile(
+    r"\b(?:[A-Za-z]+[-_]\d+[A-Za-z0-9_-]*|[A-Z]{2,}[A-Z0-9_-]*|"
+    r"(?:register|channel|sensor|api|port)\s*[-_:]?\s*[A-Za-z0-9_-]+)\b"
+)
+_MUTABLE_PARAMETER_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:°\s*[CF]|ms|milliseconds?|seconds?|minutes?|hours?|%|percent|"
+    r"degrees?|bytes?|kb|mb|gb|items?|records?|requests?)\b",
+    re.I,
+)
 
 
 def normalize_priority_label(value: object) -> Literal["High", "Medium", "Low"]:
@@ -143,7 +153,65 @@ class DocumentManifest(StrictModel):
     chunks: list[DocumentChunk]
 
 
-class LLMRequirementCandidate(StrictModel):
+class RequirementSemanticFields(StrictModel):
+    """Validated semantic slots used for identity resolution, never permanent IDs."""
+
+    actor: str = ""
+    modality: str = ""
+    action: str = ""
+    object: str = ""
+    condition: str = ""
+    polarity: Literal["positive", "negative"] = "positive"
+    requirement_family: str = ""
+    entity_discriminators: list[str] = Field(default_factory=list)
+    mutable_parameters: list[str] = Field(default_factory=list)
+
+    def populate_from_statement(self, statement: str, requirement_type: str) -> None:
+        text = " ".join(statement.strip().split())
+        modal_match = _SEMANTIC_MODAL_RE.search(text)
+        if modal_match is not None:
+            actor = text[: modal_match.start()].strip(" ,:;-")
+            remainder = text[modal_match.end() :].strip()
+            negative = remainder.lower().startswith("not ")
+            if negative:
+                remainder = remainder[4:].strip()
+            action, _, object_text = remainder.partition(" ")
+            object.__setattr__(self, "actor", self.actor.strip() or actor or "system")
+            object.__setattr__(
+                self, "modality", self.modality.strip() or modal_match.group(1).lower()
+            )
+            object.__setattr__(self, "action", self.action.strip() or action)
+            object.__setattr__(self, "object", self.object.strip() or object_text)
+            if negative:
+                object.__setattr__(self, "polarity", "negative")
+        else:
+            object.__setattr__(self, "actor", self.actor.strip() or "system")
+            object.__setattr__(self, "action", self.action.strip() or text)
+        condition_match = re.search(
+            r"\b(if|when|unless|while|during|after|before|where)\b.+$", text, re.I
+        )
+        if condition_match is not None and not self.condition.strip():
+            object.__setattr__(self, "condition", condition_match.group(0))
+        object.__setattr__(
+            self,
+            "requirement_family",
+            self.requirement_family.strip() or requirement_type.strip() or "Functional Requirement",
+        )
+        discriminators = list(dict.fromkeys(_ENTITY_DISCRIMINATOR_RE.findall(text)))
+        object.__setattr__(
+            self,
+            "entity_discriminators",
+            list(dict.fromkeys([*self.entity_discriminators, *discriminators])),
+        )
+        mutable = [match.group(0) for match in _MUTABLE_PARAMETER_RE.finditer(text)]
+        object.__setattr__(
+            self,
+            "mutable_parameters",
+            list(dict.fromkeys([*self.mutable_parameters, *mutable])),
+        )
+
+
+class LLMRequirementCandidate(RequirementSemanticFields):
     temp_id: str
     statement: str
     requirement_type: str = "functional"
@@ -161,13 +229,25 @@ class LLMFactCandidate(StrictModel):
     requirements: list[LLMRequirementCandidate] = Field(default_factory=list)
 
 
-class LLMDiscoveredRequirement(StrictModel):
+class LLMDiscoveredRequirement(RequirementSemanticFields):
     req_text: str
     requirement_type: str = "Functional Requirement"
     priority: str = "Medium"
     requirement_key: str | None = None
     source_req_id: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_atomic_semantics(self) -> LLMDiscoveredRequirement:
+        modal_count = len(_SEMANTIC_MODAL_RE.findall(self.req_text))
+        if modal_count > 1:
+            raise ValueError(
+                "req_text contains multiple modal obligations; split into atomic records"
+            )
+        self.populate_from_statement(self.req_text, self.requirement_type)
+        if not self.actor or not self.action or not self.requirement_family:
+            raise ValueError("actor, action, and requirement_family must be non-empty")
+        return self
 
     @field_validator("source_req_id", mode="before")
     @classmethod
@@ -291,16 +371,16 @@ class RequirementEvidence(StrictModel):
     source_trace: SourceTrace
 
 
-class VerifiedRequirement(StrictModel):
+class VerifiedRequirement(RequirementSemanticFields):
     requirement_id: str
     revision_id: str = ""
-    display_id: str = ""
     requirement_key: str = ""
     source_req_id: str | None = None
     id_generation_type: Literal["source", "generated"] = "generated"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     statement: str
     normalized_statement: str = ""
+    semantic_signature: str = ""
     requirement_type: str
     priority: str
     status: Literal["active", "superseded"] = "active"
@@ -334,6 +414,35 @@ class RequirementRevisionSnapshot(StrictModel):
     revision_id: str
     statement: str
     normalized_statement: str
+    requirement_type: str = ""
+    semantic_signature: str = ""
+    evidence_ids: dict[str, str] = Field(default_factory=dict)
+
+
+class RequirementIdentityResolutionRecord(StrictModel):
+    incoming_fingerprint: str
+    document_version_id: str
+    chunk_id: str
+    candidate_ids: list[str] = Field(default_factory=list)
+    candidate_scores: dict[str, float] = Field(default_factory=dict)
+    reranker_order: list[str] = Field(default_factory=list)
+    deterministic_rule: str
+    judge_result: str | None = None
+    decision: Literal["EXACT", "SAME_LINEAGE_REVISION", "DISTINCT", "AMBIGUOUS"]
+    reason: str
+    requirement_id: str
+    revision_id: str
+
+
+class RequirementIdentityResolutionArtifact(StrictModel):
+    artifact_schema_version: Literal["1.0-requirement-identity-resolution"] = (
+        "1.0-requirement-identity-resolution"
+    )
+    project: str
+    document_id: str
+    document_version_id: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    resolutions: list[RequirementIdentityResolutionRecord] = Field(default_factory=list)
 
 
 class RequirementArtifact(StrictModel):
@@ -349,61 +458,50 @@ class RequirementArtifact(StrictModel):
     facts: list[VerifiedFact]
     requirements: list[VerifiedRequirement]
     delta_events: list[RequirementDeltaEvent] = Field(default_factory=list)
+    identity_resolutions: list[RequirementIdentityResolutionRecord] = Field(default_factory=list)
 
 
-class CompactRequirementOccurrence(StrictModel):
-    chunk_id: str
-    fact_id: str
-    requirement_text: str
-    requirement_type: str
-    priority: Literal["High", "Medium", "Low"]
-    status: Literal["Active", "Superseded"]
-    doc_version: str
+class CanonicalRequirementEvidence(StrictModel):
+    """One preserved source occurrence for a canonical requirement revision."""
 
-
-class CompactRequirementArtifact(StrictModel):
-    artifact_schema_version: Literal["3.0-compact"] = "3.0-compact"
-    project: str
-    document_id: str
+    evidence_id: str
     document_version_id: str
-    doc_version: str
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    requirements: dict[str, list[CompactRequirementOccurrence]]
+    chunk_id: str
+    fact_ids: list[str] = Field(default_factory=list)
+    quote: str
+    start_char: int
+    end_char: int
+    page: int | None = None
+    section: str | None = None
+    source_path: str = ""
 
 
-class RequirementCatalogEntry(StrictModel):
-    display_id: str
-    requirement_uid: str
+class CanonicalRequirement(RequirementSemanticFields):
+    """Canonical public requirement row; occurrences are nested, never duplicated."""
+
+    requirement_id: str
     revision_id: str
     source_req_id: str | None = None
     id_generation_type: Literal["source", "generated"] = "generated"
     confidence: float = Field(ge=0.0, le=1.0)
-    chunk_id: str
-    fact_id: str
     requirement_text: str
+    semantic_signature: str
     requirement_type: str
     priority: Literal["High", "Medium", "Low"]
     status: Literal["Active", "Superseded"]
-    doc_version: str
+    evidence: list[CanonicalRequirementEvidence] = Field(default_factory=list)
 
 
-class RequirementCatalogTraceability(StrictModel):
-    req_id: str
-    requirement_uid: str
-    revision_id: str
-    chunk_id: str
-    fact_ids: list[str]
+class CanonicalRequirementsArtifact(StrictModel):
+    """Public schema 5.0: one row per canonical requirement revision."""
 
-
-class RequirementsCatalogArtifact(StrictModel):
-    artifact_schema_version: Literal["4.0-catalog"] = "4.0-catalog"
+    artifact_schema_version: Literal["5.0-requirements"] = "5.0-requirements"
     project: str
     document_id: str
     document_version_id: str
     doc_version: str
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    requirements: list[RequirementCatalogEntry]
-    traceability: list[RequirementCatalogTraceability] = Field(default_factory=list)
+    requirements: list[CanonicalRequirement]
 
 
 class RequirementInput(StrictModel):
@@ -411,7 +509,6 @@ class RequirementInput(StrictModel):
 
     requirement_id: str
     revision_id: str = ""
-    display_id: str = ""
     source_req_id: str | None = None
     id_generation_type: Literal["source", "generated"] = "generated"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -538,9 +635,7 @@ class UserStoryRecord(_UserStoryContent):
     """A persisted user story with permanent id and provenance."""
 
     story_id: str
-    display_id: str = ""
     requirement_id: str
-    requirement_display_id: str = ""
     requirement_revision_id: str = ""
     source_req_id: str | None = None
     project: str
@@ -560,14 +655,16 @@ class UserStoryRecord(_UserStoryContent):
 
 
 class UserStoryProjection(_UserStoryContent):
-    display_id: str
-    req_id: str
+    story_id: str
+    requirement_id: str
+    revision_id: str = ""
     source_req_id: str | None = None
 
 
 class UserStoryTraceability(StrictModel):
-    us_id: str
-    req_id: str
+    story_id: str
+    requirement_id: str
+    revision_id: str = ""
     source_req_id: str | None = None
     evidence_chunk_ids: list[str] = Field(default_factory=list)
     generation_context_run_id: str = ""
@@ -577,7 +674,7 @@ class UserStoryTraceability(StrictModel):
 
 
 class UserStoryArtifact(StrictModel):
-    artifact_schema_version: Literal["2.0-user-stories", "2.1-user-stories"] = "2.1-user-stories"
+    artifact_schema_version: Literal["3.0-user-stories"] = "3.0-user-stories"
     project: str
     document_id: str
     document_version_id: str
@@ -718,11 +815,8 @@ class TestScenarioRecord(_TestScenarioContent):
     """A persisted test scenario with permanent id and full backward provenance."""
 
     scenario_id: str
-    display_id: str = ""
     story_id: str
-    story_display_id: str = ""
     requirement_id: str
-    requirement_display_id: str = ""
     requirement_revision_id: str = ""
     source_req_id: str | None = None
     project: str
@@ -742,16 +836,18 @@ class TestScenarioRecord(_TestScenarioContent):
 
 
 class TestScenarioProjection(_TestScenarioContent):
-    display_id: str
-    us_id: str
-    req_id: str
+    scenario_id: str
+    story_id: str
+    requirement_id: str
+    revision_id: str = ""
     source_req_id: str | None = None
 
 
 class TestScenarioTraceability(StrictModel):
-    ts_id: str
-    us_id: str
-    req_id: str
+    scenario_id: str
+    story_id: str
+    requirement_id: str
+    revision_id: str = ""
     source_req_id: str | None = None
     evidence_chunk_ids: list[str] = Field(default_factory=list)
     generation_context_run_id: str = ""
@@ -761,9 +857,7 @@ class TestScenarioTraceability(StrictModel):
 
 
 class TestScenarioArtifact(StrictModel):
-    artifact_schema_version: Literal["2.0-test-scenarios", "2.1-test-scenarios"] = (
-        "2.1-test-scenarios"
-    )
+    artifact_schema_version: Literal["3.0-test-scenarios"] = "3.0-test-scenarios"
     project: str
     document_id: str
     document_version_id: str
@@ -905,7 +999,6 @@ class IngestionResult(StrictModel):
     checksum: str
     manifest_path: Path
     artifact_path: Path
-    full_artifact_path: Path | None = None
     chunk_ids: list[str]
     fact_ids: list[str]
     requirement_ids: list[str]

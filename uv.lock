@@ -1144,6 +1144,7 @@ dependencies = [
     { name = "structlog" },
     { name = "tenacity" },
     { name = "typer" },
+    { name = "uuid-utils" },
 ]
 
 [package.optional-dependencies]
@@ -1194,6 +1195,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'local-llm'", specifier = ">=2.12.1" },
     { name = "transformers", marker = "extra == 'local-llm'", specifier = ">=5.12.1" },
     { name = "typer", specifier = ">=0.26.8" },
+    { name = "uuid-utils", specifier = ">=0.12.0" },
 ]
 provides-extras = ["azure", "local-llm"]
 

@@ -63,7 +63,6 @@ def build_test_scenario_artifact(
         document_version_id=document_version_id,
         doc_version=doc_version,
         records=scenarios,
-        scenario_display_ids={},
     )
     return TestScenarioBuildResult(
         artifact=artifact,
@@ -80,19 +79,17 @@ def project_test_scenario_artifact(
     document_version_id: str,
     doc_version: str,
     records: dict[str, TestScenarioRecord],
-    scenario_display_ids: dict[str, str],
+    **_legacy_aliases: object,
 ) -> TestScenarioArtifact:
     projections: list[TestScenarioProjection] = []
     traceability: list[TestScenarioTraceability] = []
     for scenario_id, record in records.items():
-        display_id = scenario_display_ids.get(scenario_id, record.display_id or scenario_id)
-        us_id = record.story_display_id or record.story_id
-        req_id = record.requirement_display_id or record.requirement_id
         projections.append(
             TestScenarioProjection(
-                display_id=display_id,
-                us_id=us_id,
-                req_id=req_id,
+                scenario_id=scenario_id,
+                story_id=record.story_id,
+                requirement_id=record.requirement_id,
+                revision_id=record.requirement_revision_id,
                 source_req_id=record.source_req_id,
                 title=record.title,
                 description=record.description,
@@ -105,9 +102,10 @@ def project_test_scenario_artifact(
         )
         traceability.append(
             TestScenarioTraceability(
-                ts_id=display_id,
-                us_id=us_id,
-                req_id=req_id,
+                scenario_id=scenario_id,
+                story_id=record.story_id,
+                requirement_id=record.requirement_id,
+                revision_id=record.requirement_revision_id,
                 source_req_id=record.source_req_id,
                 evidence_chunk_ids=list(record.evidence_chunk_ids),
                 generation_context_run_id=record.generation_context_run_id,
@@ -141,9 +139,7 @@ def _to_record(
     return TestScenarioRecord(
         scenario_id=scenario_id,
         story_id=story.story_id,
-        story_display_id=story.display_id,
         requirement_id=story.requirement_id,
-        requirement_display_id=story.requirement_display_id,
         requirement_revision_id=story.requirement_revision_id,
         source_req_id=story.source_req_id,
         project=project,
