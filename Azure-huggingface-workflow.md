@@ -237,8 +237,13 @@ only when their retention requirements permit it.
 ## 5. Check the Azure Reasoning Deployment
 
 This check loads `.env`, constructs the configured provider through the production factory, sends
-a minimal structured request, and validates the returned JSON with Pydantic. It prints only safe
-status metadata.
+a minimal native strict-JSON-Schema request, and validates the response again with Pydantic. It
+prints only safe status metadata.
+
+`generate_structured` intentionally has no prompt-only compatibility form. Every call must supply
+an operation-specific `system_message` plus safe `operation` and `request_id` diagnostic anchors.
+Calling it with only `prompt` and `schema` fails locally with `TypeError` before Azure is contacted;
+that indicates a stale caller, not an Azure outage.
 
 ```powershell
 @'
@@ -260,17 +265,28 @@ result = model.generate_structured(
     prompt='{"requested_status":"ok"}',
     schema=AzureReasoningProbe,
     system_message=(
-        "Return only the fields required by the supplied response schema. "
-        "Set status to ok."
+        "You are an Azure Structured Outputs readiness probe. "
+        "Return only the fields required by the supplied response schema."
     ),
-    operation="health.reasoning_probe",
-    request_id="azure-structured-output",
-    max_attempts=1,
+    operation="azure_readiness_probe",
+    request_id="manual-probe-001",
+    max_attempts=2,
 )
 assert result.status == "ok"
 print(f"PASS reasoning provider={model.provider_name} structured_output=true")
 '@ | uv run python -
 ```
+
+The probe arguments exercise the same production contract used by the agents:
+
+- `system_message` scopes the higher-priority instruction to this operation, so the request cannot
+  inherit requirement-discovery or another agent's schema instructions.
+- `operation` labels logs and response diagnostics without exposing prompt or source text.
+- `request_id` separates this request from other structured calls and prevents diagnostic filename
+  collisions.
+- `max_attempts=2` bounds Azure SDK transport attempts. Azure schema violations are not repaired by
+  a prompt-only fallback; native strict Structured Outputs plus local Pydantic validation remain
+  mandatory.
 
 If this fails, verify the Azure endpoint, API version, reasoning deployment name and model version
 support Structured Outputs, deployment availability, and API-key authorization. Do not print the
