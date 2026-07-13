@@ -327,11 +327,7 @@ class RequirementDiscoveryAgent:
                     output = _chunk_to_nested(context, chunk_output)
                     _verify_traces(manifest, output)
                 except TraceValidationError as error:
-                    response_path = _persist_last_response(
-                        self.reasoning_model,
-                        batch_index=chunk_index,
-                        attempt=attempt,
-                    )
+                    response_path = _persist_last_response(self.reasoning_model)
                     self._log_validation_failure(
                         chunk_index=chunk_index,
                         chunk_id=chunk.chunk_id,
@@ -1222,18 +1218,17 @@ def _clear_response_context(reasoning_model: ReasoningModel) -> None:
         clearer()
 
 
-def _persist_last_response(
-    reasoning_model: ReasoningModel,
-    *,
-    batch_index: int,
-    attempt: int,
-) -> str | None:
-    """Persist last response through the owning storage boundary.
+def _persist_last_response(reasoning_model: ReasoningModel) -> str | None:
+    """Persist the last raw response under the model's canonical diagnostic filename.
+
+    The adapter derives the name from the call's operation, request id, monotonic call index,
+    and attempt (``llm_response_<operation>_<request_id>_call-<n>_attempt-<n>.txt``), so every
+    capture -- success (LOG_LLM_RESPONSES) or validation failure -- shares one scheme and one
+    file per physical call. Passing a hand-rolled name here previously produced a second,
+    differently-named file on failures only (e.g. ``llm_response_3_1.txt``).
 
     Args:
         reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
-        batch_index (int): Batch index required by the operation's typed contract.
-        attempt (int): Bounded attempt used for deterministic processing.
 
     Returns:
         str | None: The typed result produced by the operation.
@@ -1241,7 +1236,7 @@ def _persist_last_response(
     persister = getattr(reasoning_model, "persist_last_response", None)
     if not callable(persister):
         return _last_response_path(reasoning_model)
-    path = persister(filename=f"llm_response_{batch_index}_{attempt}.txt")
+    path = persister()
     return str(path) if path is not None else None
 
 

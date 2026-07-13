@@ -167,11 +167,7 @@ class KnowledgeExtractionAgent:
                 try:
                     candidates = _validate_chunk_output(context, chunk_output)
                 except TraceValidationError as error:
-                    response_path = _persist_last_response(
-                        self.reasoning_model,
-                        batch_index=chunk_index,
-                        attempt=attempt,
-                    )
+                    response_path = _persist_last_response(self.reasoning_model)
                     self._log_validation_failure(
                         chunk_index=chunk_index,
                         chunk_id=chunk.chunk_id,

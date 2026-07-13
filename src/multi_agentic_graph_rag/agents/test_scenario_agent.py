@@ -110,11 +110,7 @@ class TestScenarioGenerationAgent:
                 try:
                     _verify_test_scenarios(story, output)
                 except TestScenarioValidationError as error:
-                    response_path = _persist_last_response(
-                        self.reasoning_model,
-                        story_index=story_index,
-                        attempt=attempt,
-                    )
+                    response_path = _persist_last_response(self.reasoning_model)
                     self._log_validation_failure(
                         story=story,
                         story_index=story_index,
@@ -429,18 +425,15 @@ def _clear_response_context(reasoning_model: ReasoningModel) -> None:
         clearer()
 
 
-def _persist_last_response(
-    reasoning_model: ReasoningModel,
-    *,
-    story_index: int,
-    attempt: int,
-) -> str | None:
-    """Persist last response through the owning storage boundary.
+def _persist_last_response(reasoning_model: ReasoningModel) -> str | None:
+    """Persist the last raw response under the model's canonical diagnostic filename.
+
+    Uses the adapter's own naming (operation + request id + call index + attempt) so every
+    capture shares one scheme and one file per physical call, rather than a second,
+    differently-named file written only on validation failures.
 
     Args:
         reasoning_model (ReasoningModel): Provider-neutral model adapter used by the operation.
-        story_index (int): Story index required by the operation's typed contract.
-        attempt (int): Bounded attempt used for deterministic processing.
 
     Returns:
         str | None: The typed result produced by the operation.
@@ -448,7 +441,7 @@ def _persist_last_response(
     persister = getattr(reasoning_model, "persist_last_response", None)
     if not callable(persister):
         return _last_response_path(reasoning_model)
-    path = persister(filename=f"llm_response_ts_{story_index}_{attempt}.txt")
+    path = persister()
     return str(path) if path is not None else None
 
 

@@ -13,6 +13,7 @@ from multi_agentic_graph_rag.agents.requirement_discovery_agent import (
     RequirementDiscoveryAgent,
     _collect_semantic_diagnostics,
     _has_multiple_actors,
+    _persist_last_response,
 )
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.domain.errors import ModelOutputError
@@ -40,6 +41,29 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
         self.assertEqual(
             reasoner.system_messages,
             [PromptRequirementDiscovery.SYS_PROMPT_REQUIREMENT_DISCOVERY.value] * 2,
+        )
+
+    def test_persist_last_response_uses_canonical_model_naming(self) -> None:
+        # Regression: the validation-failure path must NOT hand-roll a legacy filename
+        # (e.g. llm_response_3_1.txt). It must let the adapter derive its canonical name
+        # (llm_response_<operation>_<request_id>_call-<n>_attempt-<n>.txt) so every capture --
+        # success (LOG_LLM_RESPONSES) or failure -- uses one scheme and one file per call,
+        # instead of a second, differently-named, failure-only file with confusing gaps.
+        recorded: dict[str, Any] = {}
+
+        class _RecordingModel:
+            last_response_path = "/run/canonical.txt"
+
+            def persist_last_response(self, *, filename: str | None = None) -> str:
+                recorded["filename"] = filename
+                return "/run/canonical.txt"
+
+        path = _persist_last_response(_RecordingModel())
+
+        self.assertEqual(path, "/run/canonical.txt")
+        self.assertIsNone(
+            recorded["filename"],
+            "failure path must defer to the adapter's canonical response filename",
         )
 
     def test_missing_provider_batch_size_still_uses_one_chunk_per_call(self) -> None:
@@ -243,7 +267,7 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
         self.assertIn("_SemanticValidationError: <message redacted", message)
         self.assertNotIn("missing_tokens", message)
         self.assertNotIn("siimcs", message)
-        self.assertIn("llm_response_1_2.txt", message)
+        self.assertIn("llm_response_call-000002_attempt-1.txt", message)
         self.assertEqual(reasoner.prompts, 2)
 
     def test_embedded_controller_quote_cannot_support_longer_statement(self) -> None:
@@ -697,8 +721,8 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
             with self.assertRaises(ModelOutputError):
                 RequirementDiscoveryAgent(reasoner).run(manifest)
 
-            first = Path(temp_dir) / "llm_response_1_1.txt"
-            second = Path(temp_dir) / "llm_response_1_2.txt"
+            first = Path(temp_dir) / "llm_response_call-000001_attempt-1.txt"
+            second = Path(temp_dir) / "llm_response_call-000002_attempt-1.txt"
             self.assertEqual(first.read_text(encoding="utf-8"), "raw response 1")
             self.assertEqual(second.read_text(encoding="utf-8"), "raw response 2")
 
@@ -957,8 +981,9 @@ class _PersistingCollisionReasoner:
             {"facts": _collision_facts(self.quote, ("system_files", "system_files"))}
         )
 
-    def persist_last_response(self, *, filename: str) -> Path:
-        path = self.run_dir / filename
+    def persist_last_response(self, *, filename: str | None = None) -> Path:
+        name = filename or f"llm_response_call-{self.prompts:06d}_attempt-1.txt"
+        path = self.run_dir / name
         path.write_text(f"raw collision response {self.prompts}", encoding="utf-8")
         self.last_response_path = path
         return path
@@ -996,8 +1021,9 @@ class _PersistingReasoner:
         self.prompts += 1
         return schema.model_validate({"facts": self.facts})
 
-    def persist_last_response(self, *, filename: str) -> Path:
-        path = self.run_dir / filename
+    def persist_last_response(self, *, filename: str | None = None) -> Path:
+        name = filename or f"llm_response_call-{self.prompts:06d}_attempt-1.txt"
+        path = self.run_dir / name
         path.write_text(f"raw response {self.prompts}", encoding="utf-8")
         self.last_response_path = path
         return path
@@ -1045,8 +1071,9 @@ class _PersistingWrongQuoteReasoner:
         self._last_response = f"raw response {self.prompts}"
         return schema.model_validate({"facts": [_fact("not present in the source chunk")]})
 
-    def persist_last_response(self, *, filename: str) -> Path:
-        path = self.run_dir / filename
+    def persist_last_response(self, *, filename: str | None = None) -> Path:
+        name = filename or f"llm_response_call-{self.prompts:06d}_attempt-1.txt"
+        path = self.run_dir / name
         path.write_text(self._last_response, encoding="utf-8")
         self.last_response_path = path
         return path

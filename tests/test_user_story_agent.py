@@ -74,8 +74,8 @@ class UserStoryAgentTests(unittest.TestCase):
                     _requirement(), _empty_context(), requirement_index=1
                 )
 
-            first = Path(temp_dir) / "llm_response_us_1_1.txt"
-            second = Path(temp_dir) / "llm_response_us_1_2.txt"
+            first = Path(temp_dir) / "llm_response_call-000001_attempt-1.txt"
+            second = Path(temp_dir) / "llm_response_call-000002_attempt-1.txt"
             self.assertEqual(first.read_text(encoding="utf-8"), "raw response 1")
             self.assertEqual(second.read_text(encoding="utf-8"), "raw response 2")
 
@@ -132,8 +132,9 @@ class _PersistingBadReasoner:
         self._last_response = f"raw response {self.prompts}"
         return schema.model_validate({"user_stories": [self.story]})
 
-    def persist_last_response(self, *, filename: str) -> Path:
-        path = self.run_dir / filename
+    def persist_last_response(self, *, filename: str | None = None) -> Path:
+        name = filename or f"llm_response_call-{self.prompts:06d}_attempt-1.txt"
+        path = self.run_dir / name
         path.write_text(self._last_response, encoding="utf-8")
         self.last_response_path = path
         return path
