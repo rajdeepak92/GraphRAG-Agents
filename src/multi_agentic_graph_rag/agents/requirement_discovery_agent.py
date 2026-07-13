@@ -77,6 +77,31 @@ _PREVIOUS_OUTPUT_JSON_LIMIT = 6000
 _NUMBERED_INSTANCE_RE = re.compile(r"[A-Za-z]+[-_]\d+[A-Za-z0-9_-]*")
 _ACTOR_CONJUNCTION_RE = re.compile(r"\band\b|\bor\b|&|,|;", re.I)
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Requirement-template scaffolding used only by the source-support check: the
+# default actor injected for a bare noun-phrase source, plus empty obligation verbs
+# that turn a copied noun phrase into an obligation. These carry no domain meaning,
+# so they are not required to appear in the exact quote. Meaning-bearing verbs
+# (store, log, display, generate, send, delete, encrypt, synchronize, collect, …)
+# are intentionally excluded so genuine over-reach and inversions still fail.
+_REQUIREMENT_SCAFFOLDING = frozenset(
+    {
+        "system",
+        "provide",
+        "provides",
+        "support",
+        "supports",
+        "include",
+        "includes",
+        "allow",
+        "allows",
+        "enable",
+        "enables",
+        "offer",
+        "offers",
+        "have",
+        "has",
+    }
+)
 
 
 @dataclass
@@ -657,7 +682,16 @@ def _has_multiple_actors(actor: str) -> bool:
 
 
 def _source_support(req_text: str, quote: str) -> tuple[float | None, list[str]]:
-    statement_tokens = _semantic_support_tokens(req_text)
+    # A source bullet is often a bare noun phrase ("Cloud-based storage and
+    # monitoring."). The atomic requirement wraps its copied domain content in a
+    # fixed template — the injected default actor plus an empty obligation verb —
+    # that carries no meaning of its own and need not appear in the quote. Only the
+    # DOMAIN CONTENT (nouns, entities, meaning-bearing verbs) must be supported, so
+    # requiring the scaffolding to be quoted would falsely reject a valid, grounded
+    # requirement. Meaning-bearing verbs are deliberately excluded from this set so a
+    # real inversion ("shall delete data" vs a quote that says "store data") is still
+    # caught.
+    statement_tokens = _semantic_support_tokens(req_text) - _REQUIREMENT_SCAFFOLDING
     if not statement_tokens:
         return None, []
     quote_tokens = _semantic_support_tokens(quote)

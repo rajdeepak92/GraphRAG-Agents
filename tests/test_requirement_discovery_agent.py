@@ -264,6 +264,58 @@ class RequirementDiscoveryAgentTests(unittest.TestCase):
         self.assertIn("industrial", support[0].missing_tokens)
         self.assertIn("interface", support[0].missing_tokens)
 
+    def test_noun_phrase_bullet_with_template_scaffolding_is_supported(self) -> None:
+        # "The system shall provide monitoring." is grounded in the bullet
+        # "Cloud-based storage and monitoring." — only the injected actor "system"
+        # and the empty verb "provide" are absent, and those are template scaffolding.
+        output = RequirementDiscoveryChunkOutput.model_validate(
+            {
+                "facts": [
+                    _fact(
+                        "Cloud-based storage and monitoring.",
+                        requirements=[
+                            _requirement(
+                                "The system shall provide monitoring.",
+                                requirement_key="provide_monitoring",
+                            ),
+                            _requirement(
+                                "The system shall provide cloud-based storage.",
+                                requirement_key="cloud_based_storage",
+                            ),
+                        ],
+                    )
+                ]
+            }
+        )
+
+        diagnostics = _collect_semantic_diagnostics(output, chunk_id="CHUNK-1")
+
+        self.assertEqual([d for d in diagnostics if d.category == "source_support"], [])
+
+    def test_template_scaffolding_does_not_mask_unsupported_content(self) -> None:
+        # An empty obligation verb must not smuggle in an unsupported domain noun.
+        output = RequirementDiscoveryChunkOutput.model_validate(
+            {
+                "facts": [
+                    _fact(
+                        "Cloud-based storage and monitoring.",
+                        requirements=[
+                            _requirement(
+                                "The system shall provide encryption.",
+                                requirement_key="provide_encryption",
+                            )
+                        ],
+                    )
+                ]
+            }
+        )
+
+        diagnostics = _collect_semantic_diagnostics(output, chunk_id="CHUNK-1")
+
+        support = [d for d in diagnostics if d.category == "source_support"]
+        self.assertEqual(len(support), 1)
+        self.assertIn("encryption", support[0].missing_tokens)
+
     def test_source_support_corrective_retry_produces_atomic_statement(self) -> None:
         quote = "Embedded controller that reads sensor data using Modbus."
         unsupported = (
