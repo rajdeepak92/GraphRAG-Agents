@@ -308,7 +308,8 @@ def _build_knowledge_prompt(
             f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
             "Repair the invalid output. Every quote must be copied exactly from the "
             "normalized chunk_text; every subject and object_name must exactly match "
-            "one entities[].name; every entity name must appear in chunk_text.\n"
+            "one entities[].name, including its leading article; do not add or remove "
+            "the, a, or an. Every entity name must appear in chunk_text.\n"
             "If an entry cannot be repaired, remove it from the output.\n"
             f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{validation_error}\n\n"
         )
@@ -414,8 +415,8 @@ def _validate_assertion(
         contract.
     """
     label = f"assertion {assertion_index}"
-    subject_name = normalize_entity_name(assertion.subject)
-    if subject_name not in entity_names:
+    subject_name = _resolve_entity_reference(assertion.subject, entity_names)
+    if subject_name is None:
         raise TraceValidationError(
             f"{label} subject {assertion.subject!r} does not match any entities[].name"
         )
@@ -428,15 +429,15 @@ def _validate_assertion(
     demoted_object_literal: str | None = None
     raw_object = assertion.object_name.strip()
     if raw_object:
-        normalized_object = normalize_entity_name(raw_object)
-        if normalized_object not in entity_names:
+        resolved_object = _resolve_entity_reference(raw_object, entity_names)
+        if resolved_object is None:
             demoted_object_literal = raw_object
-        elif normalized_object == subject_name:
+        elif resolved_object == subject_name:
             raise TraceValidationError(
                 f"{label} subject and object_name must reference different entities"
             )
         else:
-            object_name = normalized_object
+            object_name = resolved_object
 
     predicate = normalize_predicate(assertion.predicate)
     if not predicate:
@@ -458,6 +459,30 @@ def _validate_assertion(
         confidence=assertion.confidence,
         source_trace=trace,
     )
+
+
+def _resolve_entity_reference(reference: str, entity_names: set[str]) -> str | None:
+    """Resolve an assertion reference to one declared entity name.
+
+    Exact normalized matches remain authoritative. Azure occasionally adds the definite article
+    ``the`` to an otherwise exact declared entity reference; accept only that one deterministic
+    variation and return the declared name so entity identity remains unchanged.
+
+    Args:
+        reference (str): Assertion subject or object reference returned by the model.
+        entity_names (set[str]): Normalized entity names declared in the same chunk output.
+
+    Returns:
+        str | None: The matching declared normalized name, or ``None`` when no match exists.
+    """
+    normalized = normalize_entity_name(reference)
+    if normalized in entity_names:
+        return normalized
+    if normalized.startswith("the "):
+        without_article = normalized.removeprefix("the ").strip()
+        if without_article in entity_names:
+            return without_article
+    return None
 
 
 def _source_trace_from_quote(
