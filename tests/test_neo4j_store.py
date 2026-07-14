@@ -6,6 +6,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import multi_agentic_graph_rag.db.neo4j_store as neo4j_store
 from multi_agentic_graph_rag.config.settings import (
@@ -30,6 +31,72 @@ from multi_agentic_graph_rag.services.user_story_builder import project_user_sto
 
 
 class Neo4jStoreTests(unittest.TestCase):
+    def test_fulltext_search_chunks_binds_lucene_query_without_driver_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = _FakeSession([{"chunk_id": "CHUNK-1", "text": "Import files.", "score": 2.5}])
+            driver = _FakeDriver(session)
+            store = Neo4jStore(_live_settings(Path(temp_dir)))
+
+            with patch.object(store, "_driver", return_value=driver):
+                results = store.fulltext_search_chunks("import files", "DOC-v1", 3)
+
+        self.assertEqual(results, [("CHUNK-1", "Import files.", 2.5)])
+        self.assertEqual(driver.database, "neo4j")
+        self.assertEqual(len(session.runs), 1)
+        run = session.runs[0]
+        self.assertIn("$lucene_query", run["query"])
+        self.assertNotIn("$query", run["query"])
+        self.assertEqual(run["params"]["lucene_query"], "import OR files")
+        self.assertEqual(run["params"]["document_version_id"], "DOC-v1")
+        self.assertEqual(run["params"]["limit"], 3)
+        self.assertNotIn("query", run["params"])
+
+    def test_search_assertions_fulltext_binds_lucene_query_and_filters(self) -> None:
+        assertion = {
+            "assertion_id": "ASSERT-1",
+            "document_version_id": "DOC-v1",
+            "subject_entity_id": "ENTITY-1",
+            "predicate": "GOVERNS",
+            "confidence": 0.9,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = _FakeSession(
+                [
+                    {
+                        "assertion": assertion,
+                        "subject": {
+                            "canonical_name": "Import service",
+                            "entity_type": "component",
+                        },
+                        "object": None,
+                        "search_score": 4.0,
+                    }
+                ]
+            )
+            driver = _FakeDriver(session)
+            store = Neo4jStore(_live_settings(Path(temp_dir)))
+
+            with patch.object(store, "_driver", return_value=driver):
+                results = store.search_assertions_fulltext(
+                    "import service",
+                    "DOC-v1",
+                    5,
+                    ["governs", " limits "],
+                )
+
+        self.assertEqual(results[0]["assertion_id"], "ASSERT-1")
+        self.assertEqual(results[0]["search_score"], 4.0)
+        self.assertEqual(driver.database, "neo4j")
+        self.assertEqual(len(session.runs), 1)
+        run = session.runs[0]
+        self.assertIn("$lucene_query", run["query"])
+        self.assertNotIn("$query", run["query"])
+        self.assertEqual(run["params"]["lucene_query"], "import OR service")
+        self.assertEqual(run["params"]["document_version_id"], "DOC-v1")
+        self.assertEqual(run["params"]["predicates"], ["GOVERNS", "LIMITS"])
+        self.assertEqual(run["params"]["limit"], 5)
+        self.assertNotIn("query", run["params"])
+
     def test_project_artifact_is_noop_in_local_json_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -167,6 +234,45 @@ class _FakeTx:
         self.runs.append({"query": query, "params": params})
 
 
+class _FakeSession:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self.records = records
+        self.runs: list[dict[str, Any]] = []
+
+    def __enter__(self) -> _FakeSession:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def run(
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        params = dict(parameters or {})
+        params.update(kwargs)
+        self.runs.append({"query": query, "params": params})
+        return self.records
+
+
+class _FakeDriver:
+    def __init__(self, session: _FakeSession) -> None:
+        self._session = session
+        self.database: str | None = None
+
+    def __enter__(self) -> _FakeDriver:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def session(self, *, database: str) -> _FakeSession:
+        self.database = database
+        return self._session
+
+
 def _settings(root: Path) -> AppSettings:
     return AppSettings(
         paths=PathsSettings(
@@ -187,6 +293,13 @@ def _settings(root: Path) -> AppSettings:
             mode="local_json",
             local_path=root / "runtime" / "neo4j.jsonl",
         ),
+    )
+
+
+def _live_settings(root: Path) -> AppSettings:
+    settings = _settings(root)
+    return settings.model_copy(
+        update={"neo4j": settings.neo4j.model_copy(update={"mode": "neo4j"})}
     )
 
 

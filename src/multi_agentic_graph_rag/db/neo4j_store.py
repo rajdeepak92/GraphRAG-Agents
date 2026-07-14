@@ -144,13 +144,13 @@ class Neo4jStore:
         ):
             records = session.run(
                 """
-                CALL db.index.fulltext.queryNodes('chunk_fulltext', $query)
+                CALL db.index.fulltext.queryNodes('chunk_fulltext', $lucene_query)
                 YIELD node, score
                 WHERE node.document_version_id = $document_version_id
                 RETURN node.chunk_id AS chunk_id, node.text AS text, score AS score
                 LIMIT $limit
                 """,
-                query=lucene_query,
+                lucene_query=lucene_query,
                 document_version_id=document_version_id,
                 limit=limit,
             )
@@ -598,7 +598,7 @@ class Neo4jStore:
         ):
             records = session.run(
                 """
-                CALL db.index.fulltext.queryNodes('assertion_text_fulltext', $query)
+                CALL db.index.fulltext.queryNodes('assertion_text_fulltext', $lucene_query)
                 YIELD node, score
                 WHERE node.document_version_id = $document_version_id
                   AND ($predicates IS NULL OR node.predicate IN $predicates)
@@ -609,7 +609,7 @@ class Neo4jStore:
                 ORDER BY search_score DESC, node.assertion_id
                 LIMIT $limit
                 """,
-                query=lucene_query,
+                lucene_query=lucene_query,
                 document_version_id=document_version_id,
                 predicates=predicates,
                 limit=limit,
