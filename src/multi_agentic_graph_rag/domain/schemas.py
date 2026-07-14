@@ -1481,8 +1481,16 @@ class LLMExtractedAssertion(StrictModel):
     """One assertion exactly as returned by the extraction model for a single chunk.
 
     ``subject`` and ``object_name`` reference entities by name from the same chunk
-    output. Exactly one of ``object_name`` / ``object_literal`` must be non-empty;
-    the repo-wide LLM convention is an empty string for absent optional fields.
+    output. The object is optional: an assertion may carry an entity object
+    (``object_name``), a literal value (``object_literal``), or neither (an
+    objectless/intransitive claim such as "the system shall restart"). The
+    repo-wide LLM convention is an empty string for absent optional fields, and
+    ``KnowledgeExtractionAgent._validate_assertion`` is the single authority that
+    reconciles the object shape (prefers a declared entity, demotes an undeclared
+    object to a literal, and permits no object). This schema deliberately does not
+    enforce a cross-field "exactly one object" rule: Azure strict Structured
+    Outputs cannot express it, so re-validation here would fail closed on a
+    legitimate objectless assertion instead of letting the agent reconcile it.
     """
 
     subject: str
@@ -1559,25 +1567,6 @@ class LLMExtractedAssertion(StrictModel):
         if text in {"inferred", "implicit", "implied", "derived"}:
             return "inferred"
         return "explicit"
-
-    @model_validator(mode="after")
-    def exactly_one_object(self) -> LLMExtractedAssertion:
-        """Execute the exactly one object operation within its declared architectural boundary.
-
-        Returns:
-            LLMExtractedAssertion: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        has_entity = bool(self.object_name.strip())
-        has_literal = bool(self.object_literal.strip())
-        if has_entity == has_literal:
-            raise ValueError(
-                "exactly one of object_name or object_literal must be non-empty "
-                f"(subject={self.subject!r}, predicate={self.predicate!r})"
-            )
-        return self
 
 
 class KnowledgeExtractionChunkOutput(StrictModel):

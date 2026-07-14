@@ -10,6 +10,7 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
+from multi_agentic_graph_rag.common_prompt_defs import PromptSharedFragments
 from multi_agentic_graph_rag.config.settings import AzureOpenAISettings
 from multi_agentic_graph_rag.domain.errors import ConfigurationError, ModelOutputError
 from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
@@ -20,6 +21,12 @@ _SAFE_SCHEMA_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 _EMBEDDING_MAX_INPUTS = 2_048
 _EMBEDDING_MAX_INPUT_TOKENS = 8_192
 _EMBEDDING_MAX_REQUEST_TOKENS = 300_000
+# Transient-transport retries are orthogonal to schema-repair attempts and must
+# not be derived from ``max_attempts``; deriving one from the other multiplies the
+# worst-case call count (transport attempts x schema attempts). The SDK retries
+# only transient HTTP failures (timeouts, 429, 5xx), never a well-formed response
+# that violates the Python schema — that is the schema-repair loop's job.
+_TRANSPORT_MAX_RETRIES = 2
 _AZURE_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
     {
         "default",
@@ -175,45 +182,75 @@ class AzureOpenAIReasoningModel:
         self.warmup()
         self._structured_call_count += 1
         call_index = self._structured_call_count
-        parsed, completion = self._generate_completion(
-            prompt,
-            schema=schema,
-            system_message=system_message,
-            max_attempts=max_attempts,
-        )
-        self._record_response(
-            prompt=prompt,
-            completion=completion,
-            attempt=1,
-            parse_failed=False,
-            error=None,
-            operation=operation,
-            request_id=request_id,
-            call_index=call_index,
-        )
-        return parsed
+        attempt_limit = max(1, min(max_attempts, 2))
+        # Symmetric with the Hugging Face adapter: Azure strict Structured Outputs
+        # cannot enforce every Pydantic constraint (numeric bounds, non-empty
+        # strings, and cross-field rules are stripped or inexpressible), so a
+        # well-formed response can still violate the Python schema. Feed the
+        # validation error back and regenerate up to ``attempt_limit`` before
+        # failing, persisting the raw response on every failed attempt.
+        current_prompt = prompt
+        for attempt in range(1, attempt_limit + 1):
+            completion = self._request_completion(
+                current_prompt,
+                schema=schema,
+                system_message=system_message,
+            )
+            try:
+                parsed = schema.model_validate_json(completion)
+            except (ValueError, ValidationError) as error:
+                self._record_response(
+                    prompt=current_prompt,
+                    completion=completion,
+                    attempt=attempt,
+                    parse_failed=True,
+                    error=error,
+                    operation=operation,
+                    request_id=request_id,
+                    max_attempts=attempt_limit,
+                    call_index=call_index,
+                )
+                if attempt >= attempt_limit:
+                    raise ModelOutputError(
+                        "Azure OpenAI structured output violated the Python schema: "
+                        f"{sanitized_exception_summary(error)}"
+                    ) from error
+                current_prompt = _build_repair_prompt(prompt, error)
+                continue
+            self._record_response(
+                prompt=current_prompt,
+                completion=completion,
+                attempt=attempt,
+                parse_failed=False,
+                error=None,
+                operation=operation,
+                request_id=request_id,
+                max_attempts=attempt_limit,
+                call_index=call_index,
+            )
+            return parsed
+        raise ModelOutputError("Azure OpenAI structured output could not be produced")
 
-    def _generate_completion(
+    def _request_completion(
         self,
         prompt: str,
         *,
-        schema: type[T],
+        schema: type[BaseModel],
         system_message: str,
-        max_attempts: int,
-    ) -> tuple[T, str]:
-        """Generate one natively schema-constrained completion.
+    ) -> str:
+        """Request one natively schema-constrained completion string from Azure.
 
         Args:
             prompt (str): Prompt text passed only to the selected model provider and never logged.
-            schema (type[T]): Strict Pydantic response contract supplied to Azure.
+            schema (type[BaseModel]): Strict Pydantic response contract supplied to Azure.
             system_message (str): Operation-scoped system instruction for this request.
-            max_attempts (int): Hard ceiling for provider transport attempts.
 
         Returns:
-            tuple[T, str]: Validated value and raw JSON retained for diagnostics.
+            str: Raw JSON content retained for validation and diagnostics.
 
         Raises:
-            ModelOutputError: If Azure refuses or omits the parsed structured response.
+            ModelOutputError: If Azure refuses or omits the structured response.
+            ConfigurationError: If the deployment/API cannot enforce strict outputs.
             RuntimeError: If the Azure provider is not configured.
         """
         if not all(
@@ -232,7 +269,7 @@ class AzureOpenAIReasoningModel:
             azure_endpoint=self.settings.endpoint,
             api_key=self.settings.api_key,
             api_version=self.settings.api_version,
-            max_retries=max(0, min(max_attempts, 2) - 1),
+            max_retries=_TRANSPORT_MAX_RETRIES,
         )
         try:
             response = client.chat.completions.create(
@@ -267,15 +304,7 @@ class AzureOpenAIReasoningModel:
         content = getattr(message, "content", None)
         if not isinstance(content, str) or not content.strip():
             raise ModelOutputError("Azure OpenAI returned no parsed structured response content")
-        completion = content
-        try:
-            parsed = schema.model_validate_json(completion)
-        except (ValueError, ValidationError) as error:
-            raise ModelOutputError(
-                "Azure OpenAI structured output violated the Python schema: "
-                f"{sanitized_exception_summary(error)}"
-            ) from error
-        return parsed, completion
+        return content
 
     def _record_response(
         self,
@@ -287,6 +316,7 @@ class AzureOpenAIReasoningModel:
         error: Exception | None,
         operation: str,
         request_id: str,
+        max_attempts: int,
         call_index: int,
     ) -> None:
         """Record response through the owning storage boundary.
@@ -300,6 +330,7 @@ class AzureOpenAIReasoningModel:
                                       message.
             operation (str): Safe operation label used for diagnostics.
             request_id (str): Safe request anchor used for diagnostics.
+            max_attempts (int): Schema-repair attempt ceiling used to classify retry status.
             call_index (int): Unique adapter invocation number for diagnostic file isolation.
 
         Side Effects:
@@ -330,13 +361,13 @@ class AzureOpenAIReasoningModel:
                 operation=f"{operation}.parse_structured",
                 request_id=request_id,
                 attempt=attempt,
-                max_attempts=2,
+                max_attempts=max_attempts,
                 retry_delay_seconds=0.0,
                 response_path=str(response_path) if response_path else None,
                 exception_type=error.__class__.__name__ if error else None,
                 error_summary=sanitized_exception_summary(error) if error else None,
                 raw_response=completion,
-                status="retrying" if attempt < 2 else "failed",
+                status="retrying" if attempt < max_attempts else "failed",
             )
         else:
             self.logger.info(
@@ -503,6 +534,28 @@ def _validated_embedding_response(
     if dimension is None or any(vector is None for vector in ordered):
         raise ModelOutputError("Azure OpenAI embedding response omitted one or more indices")
     return [vector for vector in ordered if vector is not None], dimension
+
+
+def _build_repair_prompt(prompt: str, error: Exception) -> str:
+    """Rebuild the request prompt with the Python-schema validation error fed back.
+
+    The full validation error is passed to the model (never logged) so it can
+    return a corrected object. The wording matches the shared repair fragments
+    used by the agents and the Hugging Face adapter, keeping both providers'
+    schema-repair behavior symmetric.
+
+    Args:
+        prompt (str): Original prompt text sent to the provider and never logged.
+        error (Exception): Pydantic validation failure to feed back verbatim to the model.
+
+    Returns:
+        str: The corrected-output prompt for the next attempt.
+    """
+    return (
+        f"{prompt}\n\n"
+        f"{PromptSharedFragments.CORRECTED_JSON_ONLY.value}\n"
+        f"{PromptSharedFragments.VALIDATION_ERROR_PREFIX.value}{error}"
+    )
 
 
 def _strict_response_format(schema: type[BaseModel]) -> dict[str, Any]:

@@ -20,6 +20,7 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 from multi_agentic_graph_rag.llm_models.azure_openai import (
     _AZURE_UNSUPPORTED_SCHEMA_KEYWORDS,
+    _TRANSPORT_MAX_RETRIES,
     AzureOpenAIEmbeddingModel,
     AzureOpenAIReasoningModel,
     _strict_response_format,
@@ -93,9 +94,9 @@ class AzureOpenAIModelTests(unittest.TestCase):
         self.assertFalse(_contains_key(strict_schema, "default"))
         self.assertEqual(request["messages"][0]["content"], "discovery system")
         self.assertNotIn("temperature", request)
-        self.assertEqual(client_kwargs[0]["max_retries"], 1)
+        self.assertEqual(client_kwargs[0]["max_retries"], _TRANSPORT_MAX_RETRIES)
 
-    def test_attempt_limit_bounds_transport_retries(self) -> None:
+    def test_transport_retries_are_decoupled_from_schema_attempts(self) -> None:
         result = _response(content='{"facts":[]}')
         model, _, client_kwargs, openai = _model_with_completions([result])
 
@@ -112,7 +113,9 @@ class AzureOpenAIModelTests(unittest.TestCase):
                 max_attempts=1,
             )
 
-        self.assertEqual(client_kwargs[0]["max_retries"], 0)
+        # ``max_attempts`` bounds the schema-repair loop, never the transient
+        # transport retries, so the two ceilings must not multiply.
+        self.assertEqual(client_kwargs[0]["max_retries"], _TRANSPORT_MAX_RETRIES)
 
     def test_refusal_is_not_retried(self) -> None:
         result = _response(content="", refusal="refused")
@@ -199,9 +202,36 @@ class AzureOpenAIModelTests(unittest.TestCase):
 
         self.assertEqual(len(completions.calls), 1)
 
-    def test_invalid_structured_output_is_not_schema_retried(self) -> None:
-        result = _response(content='{"facts":"invalid"}')
-        model, completions, _, openai = _model_with_completions([result])
+    def test_invalid_structured_output_is_schema_repaired(self) -> None:
+        results = [_response(content='{"facts":"invalid"}'), _response(content='{"facts":[]}')]
+        model, completions, _, openai = _model_with_completions(results)
+
+        with patch(
+            "multi_agentic_graph_rag.llm_models.azure_openai.import_module",
+            return_value=openai,
+        ):
+            parsed = model.generate_structured(
+                prompt="prompt",
+                schema=RequirementDiscoveryChunkOutput,
+                system_message="system",
+                operation="requirement_discovery.chunk",
+                request_id="CHUNK-1",
+            )
+
+        self.assertEqual(parsed.facts, [])
+        self.assertEqual(len(completions.calls), 2)
+        # The repair attempt feeds the validation error back to the model.
+        repair_prompt = completions.calls[1]["messages"][1]["content"]
+        self.assertIn("Validation error:", repair_prompt)
+        # The system message is unchanged across the repair attempt.
+        self.assertEqual(completions.calls[1]["messages"][0]["content"], "system")
+
+    def test_invalid_structured_output_fails_after_repair_retry(self) -> None:
+        results = [
+            _response(content='{"facts":"invalid"}'),
+            _response(content='{"facts":"still-invalid"}'),
+        ]
+        model, completions, _, openai = _model_with_completions(results)
 
         with (
             patch(
@@ -218,11 +248,14 @@ class AzureOpenAIModelTests(unittest.TestCase):
                 request_id="CHUNK-1",
             )
 
-        self.assertEqual(len(completions.calls), 1)
+        self.assertEqual(len(completions.calls), 2)
 
     def test_python_validation_rejects_invalid_parsed_payload(self) -> None:
-        result = _response(content='{"facts":[],"unexpected":true}')
-        model, completions, _, openai = _model_with_completions([result])
+        results = [
+            _response(content='{"facts":[],"unexpected":true}'),
+            _response(content='{"facts":[],"unexpected":true}'),
+        ]
+        model, completions, _, openai = _model_with_completions(results)
 
         with (
             patch(
@@ -239,7 +272,38 @@ class AzureOpenAIModelTests(unittest.TestCase):
                 request_id="CHUNK-1",
             )
 
-        self.assertEqual(len(completions.calls), 1)
+        self.assertEqual(len(completions.calls), 2)
+
+    def test_schema_failure_persists_raw_response_without_log_flag(self) -> None:
+        results = [
+            _response(content='{"facts":"invalid"}'),
+            _response(content='{"facts":"invalid"}'),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model, _, _, openai = _model_with_completions(results, run_dir=Path(temp_dir))
+
+            with (
+                patch(
+                    "multi_agentic_graph_rag.llm_models.azure_openai.import_module",
+                    return_value=openai,
+                ),
+                self.assertRaisesRegex(ModelOutputError, "Python schema"),
+            ):
+                model.generate_structured(
+                    prompt="prompt",
+                    schema=RequirementDiscoveryChunkOutput,
+                    system_message="system",
+                    operation="knowledge_extraction.chunk",
+                    request_id="CHUNK-5",
+                )
+
+            # The raw response must be persisted on schema failure so the actual
+            # validation error is recoverable, even when LOG_LLM_RESPONSES is off.
+            persisted = list(Path(temp_dir).glob("llm_response_*CHUNK-5*"))
+            self.assertTrue(persisted)
+            self.assertTrue(
+                all(path.read_text(encoding="utf-8") == '{"facts":"invalid"}' for path in persisted)
+            )
 
     def test_diagnostic_files_are_unique_for_repeated_request_identifiers(self) -> None:
         results = [_response(content='{"facts":[]}'), _response(content='{"facts":[]}')]
