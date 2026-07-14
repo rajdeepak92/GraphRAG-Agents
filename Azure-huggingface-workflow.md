@@ -421,6 +421,50 @@ Counts alone do not prove semantic correctness. Review a bounded sample of `Enti
 and `AssertionEvidence` nodes in Neo4j Browser against the source document before treating a new
 document class or prompt configuration as production-ready.
 
+### 8.1 Troubleshoot knowledge-extraction grounding failures
+
+Azure must return the native structured root fields `entities` and `assertions`. Python then
+enforces the source-grounding contract before anything is projected into Neo4j:
+
+- every declared entity name must occur in the normalized chunk text;
+- every assertion subject must resolve to an entity declared in that same response;
+- a declared `object_name` resolves to that same entity set;
+- every assertion quote must map back to an exact contiguous source span.
+
+Exact normalized entity-name matches always win. As a narrow compatibility rule, an assertion
+reference with one extra leading `the` may resolve to the otherwise exact declared entity name.
+For example, `The Smart Industrial IoT Monitoring & Control System` may reference a declared
+`Smart Industrial IoT Monitoring & Control System`; the declared name remains canonical. This
+does not alter global entity normalization, entity IDs, aliases, mention spans, or source quotes.
+The matcher does not remove `a` or `an`, ignore punctuation, accept paraphrases, or retain an
+unknown subject.
+
+A `TraceValidationError` causes one corrected structured call with the validation feedback. If
+the second response still fails, the command exits without activating a partial knowledge graph.
+When restricted raw-response capture is enabled for an authorized diagnostic run, the two files
+use safe operation/request anchors similar to:
+
+```text
+llm_response_knowledge_extraction.chunk_CHUNK-..._call-000001_attempt-1.txt
+llm_response_knowledge_extraction.chunk_CHUNK-..._call-000002_attempt-1.txt
+```
+
+Keep these files private because they contain source-derived model output. Confirm that their root
+fields are `entities` and `assertions`, then compare the failing assertion's subject,
+`object_name`, and quote with both `entities[].name` and the matching chunk. Do not weaken quote
+grounding to make a paraphrase pass.
+
+After correcting configuration or updating the application, rerun the same rebuild command. The
+Neo4j projection uses idempotent merges, and the guarded build replaces the failed readiness state;
+no `--replace-version` flag or manual deletion is required:
+
+```powershell
+uv run python -m multi_agentic_graph_rag build-knowledge-graph `
+  --project $Project `
+  --document-version-id $DocumentVersionId `
+  --reasoning-provider azure_openai
+```
+
 ## 9. Generate User Stories with Graph-Primary Retrieval
 
 With `GRAPH_PRIMARY_STORY=true`, the command fails closed if the selected document version has no
