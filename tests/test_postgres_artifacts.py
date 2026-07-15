@@ -13,16 +13,13 @@ from multi_agentic_graph_rag.config.settings import (
     PathsSettings,
     PostgresSettings,
 )
-from multi_agentic_graph_rag.db.postgres import _MANAGED_TABLES, PostgresStore
+from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.errors import IngestionError
 from multi_agentic_graph_rag.domain.schemas import (
     RequirementArtifact,
     RequirementDeltaEvent,
     RequirementEvidence,
     SourceTrace,
-    UserStoryBuildResult,
-    UserStoryRecord,
-    UserStoryStatement,
     VerifiedFact,
     VerifiedRequirement,
 )
@@ -35,7 +32,6 @@ from multi_agentic_graph_rag.services.requirement_builder import (
     build_canonical_requirements_artifact,
 )
 from multi_agentic_graph_rag.services.requirement_source import load_requirement_source_local
-from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 
 
 class PostgresArtifactTests(unittest.TestCase):
@@ -97,45 +93,6 @@ class PostgresArtifactTests(unittest.TestCase):
         self.assertEqual(payload["artifact_schema_version"], "5.0-requirements")
         self.assertIn("requirement_id", payload["requirements"][0])
         self.assertEqual(payload["requirements"][0]["requirement_id"], "REQ-1")
-
-    def test_user_story_artifact_round_trips_and_indexes_stories(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            artifact = _user_story_artifact()
-            artifact_path = str(root / "run" / "user_stories.json")
-
-            store = PostgresStore(_settings(root))
-            store.persist_user_story_artifact(artifact, artifact_path, "RUN-1")
-
-            by_path = store.load_user_story_artifact_payload(artifact_path=artifact_path)
-            by_version = store.load_user_story_artifact_payload(
-                document_version_id=artifact.artifact.document_version_id
-            )
-            rows = [
-                json.loads(line)
-                for line in (root / "runtime" / "postgres.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
-            ]
-
-        self.assertEqual(by_path, artifact.artifact.model_dump(mode="json"))
-        self.assertEqual(by_version, artifact.artifact.model_dump(mode="json"))
-        self.assertEqual(by_path["artifact_schema_version"], "3.0-user-stories")
-        self.assertTrue(by_path["stories"][0]["story_id"].startswith("US-"))
-        self.assertTrue(by_path["stories"][0]["requirement_id"].startswith("REQ-"))
-        self.assertEqual(by_path["stories"][0]["revision_id"], "REQREV-1")
-        self.assertEqual(by_path["stories"][0]["source_req_id"], "SYS_REQ_001")
-        self.assertEqual(by_path["traceability"][0]["source_req_id"], "SYS_REQ_001")
-        story_rows = [row for row in rows if row.get("kind") == "user_story"]
-        self.assertEqual(len(story_rows), 1)
-        self.assertEqual(story_rows[0]["story_id"], "US-STORY-1")
-        self.assertTrue(str(story_rows[0]["story_id"]).startswith("US-"))
-        self.assertEqual(story_rows[0]["requirement_id"], "REQ-1")
-        self.assertEqual(story_rows[0]["status"], "active")
-
-    def test_user_story_tables_are_managed(self) -> None:
-        self.assertIn("user_stories", _MANAGED_TABLES)
-        self.assertIn("user_story_artifacts", _MANAGED_TABLES)
 
     def test_missing_artifact_payload_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -378,41 +335,6 @@ def _lifecycle_artifact(
             "delta_events": [event],
         },
         deep=True,
-    )
-
-
-def _user_story_artifact() -> UserStoryBuildResult:
-    record = UserStoryRecord(
-        story_id="US-STORY-1",
-        requirement_id="REQ-1",
-        requirement_revision_id="REQREV-1",
-        source_req_id="SYS_REQ_001",
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="1.0",
-        title="Import files reliably",
-        priority="Medium",
-        persona="Data Engineer",
-        user_story=UserStoryStatement(
-            as_a="data engineer",
-            i_want="to import files",
-            so_that="downstream reporting stays current",
-        ),
-        acceptance_criteria=["valid file imports: records are available after the import runs"],
-        confidence=0.85,
-    )
-    artifact = project_user_story_artifact(
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="1.0",
-        records={record.story_id: record},
-    )
-    return UserStoryBuildResult(
-        artifact=artifact,
-        records={record.story_id: record},
-        coverage={"REQ-1": [record.story_id]},
     )
 
 

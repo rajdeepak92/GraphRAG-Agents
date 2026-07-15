@@ -20,11 +20,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentChunk,
     DocumentManifest,
     RequirementArtifact,
-    UserStoryBuildResult,
-    UserStoryRecord,
-    UserStoryStatement,
 )
-from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 
 
 class Neo4jStoreTests(unittest.TestCase):
@@ -125,39 +121,11 @@ class Neo4jStoreTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
 
-    def test_user_story_coverage_projection_local_json(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = Neo4jStore(_settings(root))
-            store.project_manifest(_manifest())
-            store.project_artifact(_artifact())
-            store.project_user_story_coverage(
-                _user_story_artifact(),
-                {"REQ-1": ["CHUNK-1"]},
-            )
-
-            rows = [
-                json.loads(line)
-                for line in (root / "runtime" / "neo4j.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
-            ]
-
-        kinds = [row["kind"] for row in rows]
-        self.assertEqual(kinds, ["manifest_projection", "user_story_projection"])
-        projection = rows[1]
-        self.assertEqual(projection["story_id"], "US-STORY-1")
-        self.assertEqual(projection["requirement_id"], "REQ-1")
-        self.assertEqual(projection["revision_id"], "REQREV-1")
-        self.assertTrue(projection["covered"])
-        self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
-
     def test_cleanup_identity_projections_preserves_source_graph_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             store = Neo4jStore(_settings(root))
             store.project_manifest(_manifest())
-            store.project_user_story_coverage(_user_story_artifact(), {"REQ-1": ["CHUNK-1"]})
             store.cleanup_identity_projections("PROJECT")
             kinds = [row["kind"] for row in store._read_local_rows()]
         self.assertEqual(kinds, ["manifest_projection"])
@@ -312,42 +280,6 @@ def _artifact() -> RequirementArtifact:
         generated_at=datetime(2026, 1, 1, tzinfo=UTC),
         facts=[],
         requirements=[],
-    )
-
-
-def _user_story_artifact() -> UserStoryBuildResult:
-    record = UserStoryRecord(
-        story_id="US-STORY-1",
-        requirement_id="REQ-1",
-        requirement_revision_id="REQREV-1",
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="1.0",
-        title="Import files reliably",
-        priority="Medium",
-        persona="Data Engineer",
-        user_story=UserStoryStatement(
-            as_a="data engineer",
-            i_want="to import files",
-            so_that="downstream reporting stays current",
-        ),
-        acceptance_criteria=[
-            "Given a valid source file, when the import runs, then records are available."
-        ],
-        confidence=0.85,
-    )
-    artifact = project_user_story_artifact(
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="1.0",
-        records={record.story_id: record},
-    )
-    return UserStoryBuildResult(
-        artifact=artifact,
-        records={record.story_id: record},
-        coverage={"REQ-1": [record.story_id]},
     )
 
 
