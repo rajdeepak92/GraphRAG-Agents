@@ -148,9 +148,6 @@ def config_check(
             ("discovery.ledger_enabled", str(settings.discovery.ledger_enabled)),
             ("discovery.ledger_max_entries", str(settings.discovery.ledger_max_entries)),
             ("discovery.ledger_top_k", str(settings.discovery.ledger_top_k)),
-            ("enable_hfil", str(settings.enable_hfil)),
-            ("hfil.match_threshold_pct", str(settings.hfil_match_threshold_pct)),
-            ("hfil.out_of_context_pct", str(settings.hfil_out_of_context_pct)),
         ]
         _render_kv("Configuration", rows)
 
@@ -745,21 +742,6 @@ def generate_test_scenarios(
     embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
     reranker_provider: Annotated[str | None, typer.Option("--reranker-provider")] = None,
     top_k: Annotated[int | None, typer.Option("--top-k")] = None,
-    hfil: Annotated[
-        bool | None,
-        typer.Option(
-            "--hfil/--no-hfil",
-            help="Enable or disable the test-scenario human feedback loop.",
-        ),
-    ] = None,
-    emit_md: Annotated[
-        bool,
-        typer.Option("--emit-md", help="Also emit a human-readable Markdown report."),
-    ] = False,
-    thread_id: Annotated[
-        str | None,
-        typer.Option("--thread-id", help="Stable LangGraph thread id for HFIL resume."),
-    ] = None,
     json_output: Annotated[bool, typer.Option("--json-output")] = False,
 ) -> None:
     """Generate version-grounded test scenarios from canonical user stories.
@@ -776,9 +758,6 @@ def generate_test_scenarios(
         reranker_provider (str | None): Optional provider override validated against the
                                         existing provider contract.
         top_k (int | None): Optional bounded retrieval or display limit.
-        hfil (bool | None): Optional test-scenario review or presentation behavior.
-        emit_md (bool): Optional test-scenario review or presentation behavior.
-        thread_id (str | None): Stable LangGraph thread identifier used only for HFIL resume.
         json_output (bool): Whether stdout must contain only the machine-readable JSON result.
 
     Raises:
@@ -796,9 +775,6 @@ def generate_test_scenarios(
         embedding_provider=embedding_provider,
         reranker_provider=reranker_provider,
         top_k=top_k,
-        hfil_enabled=hfil,
-        emit_md=emit_md,
-        thread_id=thread_id,
     )
     try:
         resolved_project, resolved_version = resolve_test_scenario_identity(request)
@@ -819,9 +795,6 @@ def generate_test_scenarios(
             requirements=str(requirements) if requirements else None,
             project=resolved_project,
             document_version_id=document_version_id,
-            hfil_enabled=hfil,
-            emit_md=emit_md,
-            thread_id=thread_id,
             status="started",
         )
         try:

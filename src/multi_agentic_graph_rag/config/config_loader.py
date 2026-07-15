@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from multi_agentic_graph_rag.common_defs import EnvVar, ModeName, PathDef, ProviderName
 from multi_agentic_graph_rag.config.huggingface_env import (
@@ -141,19 +141,6 @@ def _float(value: Any, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _hfil_checkpointer(value: Any) -> Literal["postgres", "memory"]:
-    """Execute the hfil checkpointer operation within its declared architectural boundary.
-
-    Args:
-        value (Any): Value required by the operation's typed contract.
-
-    Returns:
-        Literal['postgres', 'memory']: The typed result produced by the operation.
-    """
-    text = str(value or "postgres").strip().lower()
-    return "memory" if text == "memory" else "postgres"
 
 
 def load_config(
@@ -324,7 +311,6 @@ def load_config(
         ),
         max_new_tokens=test_scenario_max_new_tokens,
     )
-    hfil_cfg = config_data.get("hfil", {})
 
     knowledge_graph_cfg = config_data.get("knowledge_graph", {})
     knowledge_graph = KnowledgeGraphSettings(
@@ -524,46 +510,6 @@ def load_config(
             ),
             discovery_batch_size=discovery_batch_size,
             log_llm_responses=log_llm_responses,
-        ),
-        enable_hfil=env_bool(
-            env.get(EnvVar.ENABLE_HFIL.value),
-            default=bool(hfil_cfg.get("enable", hfil_cfg.get("enable_hfil", False))),
-        ),
-        hfil_match_threshold_pct=_float(
-            env.get(
-                EnvVar.HFIL_MATCH_THRESHOLD_PCT.value,
-                hfil_cfg.get("match_threshold_pct"),
-            ),
-            default=60.0,
-        ),
-        hfil_out_of_context_pct=_float(
-            env.get(
-                EnvVar.HFIL_OUT_OF_CONTEXT_PCT.value,
-                hfil_cfg.get("out_of_context_pct"),
-            ),
-            default=5.0,
-        ),
-        hfil_cos_floor=_float(
-            env.get(EnvVar.HFIL_COS_FLOOR.value, hfil_cfg.get("cos_floor")),
-            default=0.30,
-        ),
-        hfil_cos_ceil=_float(
-            env.get(EnvVar.HFIL_COS_CEIL.value, hfil_cfg.get("cos_ceil")),
-            default=0.80,
-        ),
-        dedup_recall_cosine=_float(
-            env.get(EnvVar.DEDUP_RECALL_COSINE.value, hfil_cfg.get("dedup_recall_cosine")),
-            default=0.55,
-        ),
-        hfil_emit_md=env_bool(
-            env.get(EnvVar.HFIL_EMIT_MD.value),
-            default=bool(hfil_cfg.get("emit_md", False)),
-        ),
-        hfil_checkpointer=_hfil_checkpointer(
-            env.get(
-                EnvVar.HFIL_CHECKPOINTER.value,
-                hfil_cfg.get("checkpointer", "postgres"),
-            )
         ),
         raw_config=config_data,
     )

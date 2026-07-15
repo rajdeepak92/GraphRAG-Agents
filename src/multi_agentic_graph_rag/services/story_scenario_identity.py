@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel
-from multi_agentic_graph_rag.services.semantic_matcher import _cosine
+from multi_agentic_graph_rag.services.similarity import cosine
 
 
 class EntailmentJudge(Protocol):
@@ -82,11 +82,11 @@ class StoryScenarioIdentityResolver:
         query = vectors[0]
         ranked = sorted(
             zip(candidate_pool, vectors[1:], strict=True),
-            key=lambda item: _cosine(query, item[1]),
+            key=lambda item: cosine(query, item[1]),
             reverse=True,
         )
         for (candidate_id, candidate_text), vector in ranked[: self.recall_top_k]:
-            if _cosine(query, vector) < self.recall_floor:
+            if cosine(query, vector) < self.recall_floor:
                 break
             if self.judge.equivalent(new_text, candidate_text):
                 return candidate_id

@@ -337,85 +337,6 @@ class PromptTestScenarioGeneration(StrEnum):
     )
 
 
-FEEDBACK_STRICT_SCENARIO_PROMPT = (
-    "You are a senior QA engineer adding exactly one missing test scenario for one matched "
-    "approved user story.\n"
-    f"{PromptSharedFragments.JSON_ONLY.value}\n\n"
-    "Output schema:\n"
-    "{\n"
-    '  "test_scenarios": [\n'
-    "    {\n"
-    '      "title": "...",\n'
-    '      "description": "...",\n'
-    '      "scenario_type": "Positive | Negative | Boundary | Alternative | Exception | '
-    'Performance | Security | Usability",\n'
-    '      "preconditions": ["..."],\n'
-    '      "expected_result": "...",\n'
-    '      "priority": "High | Medium | Low",\n'
-    '      "confidence": 0.85\n'
-    "    }\n"
-    "  ]\n"
-    "}\n\n"
-    "Rules:\n"
-    "Generate exactly one missing scenario. Use only the matched user-story context and the "
-    "human feedback comment. Do not invent unrelated coverage, integrations, thresholds, "
-    "actors, or domain facts. Preserve story ID and requirement traceability by deriving the "
-    "scenario strictly from the supplied user_story, requirement_id, and story_id values. "
-    "Return strict schema only."
-)
-
-
-SCENARIO_CANONICALIZATION_PROMPT = (
-    "Normalize one test scenario into a semantic form for duplicate detection.\n"
-    f"{PromptSharedFragments.JSON_ONLY.value}\n\n"
-    "Output schema:\n"
-    "{\n"
-    '  "entity": "...",\n'
-    '  "action": "...",\n'
-    '  "condition": "...",\n'
-    '  "expected_behavior": "...",\n'
-    '  "given": "...",\n'
-    '  "when": "...",\n'
-    '  "then": "...",\n'
-    '  "canonical_text": "..."\n'
-    "}\n\n"
-    "Rules: preserve the scenario meaning, reduce surface-text variance, and do not add new "
-    "domain facts."
-)
-
-
-DUPLICATE_JUDGE_PROMPT = (
-    "Compare two canonicalized test scenarios for semantic duplication.\n"
-    f"{PromptSharedFragments.JSON_ONLY.value}\n\n"
-    "Evaluate bidirectional entailment:\n"
-    "A entails B means every behavior required by B is covered by A.\n"
-    "B entails A means every behavior required by A is covered by B.\n"
-    "Only use DUPLICATE when both directions are true; otherwise use DISTINCT.\n\n"
-    "Output schema:\n"
-    "{\n"
-    '  "a_entails_b": true,\n'
-    '  "b_entails_a": true,\n'
-    '  "verdict": "DUPLICATE",\n'
-    '  "reason": "..."\n'
-    "}\n"
-    "Allowed verdicts: DUPLICATE, DISTINCT."
-)
-
-
-class PromptScenarioDedup(StrEnum):
-    """Define operation-scoped system prompts for scenario duplicate detection."""
-
-    SYS_PROMPT_SCENARIO_CANONICALIZATION = (
-        "You are a strict test-scenario canonicalization classifier. Preserve the complete "
-        "scenario meaning without adding facts. Return only one JSON object matching the "
-        "requested canonical scenario schema."
-    )
-    SYS_PROMPT_DUPLICATE_JUDGE = (
-        "You are a strict bidirectional duplicate classifier for test scenarios. Return only "
-        "one JSON object matching the requested duplicate verdict schema."
-    )
-
-
 class PromptRequirementDelta(StrEnum):
     """Define the operation-scoped requirement-delta classifier system prompt."""
 
@@ -511,9 +432,6 @@ class PromptKnowledgeExtraction(StrEnum):
 
 
 __all__ = [
-    "DUPLICATE_JUDGE_PROMPT",
-    "FEEDBACK_STRICT_SCENARIO_PROMPT",
-    "SCENARIO_CANONICALIZATION_PROMPT",
     "PromptKnowledgeExtraction",
     "PromptRequirementDiscovery",
     "PromptSharedFragments",

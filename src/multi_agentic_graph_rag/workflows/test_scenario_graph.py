@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
-from langgraph.types import Command
 from pydantic import ValidationError
 
 from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGenerationAgent
@@ -37,7 +34,6 @@ from multi_agentic_graph_rag.domain.schemas import (
     UserStoryArtifact,
     UserStoryRecord,
 )
-from multi_agentic_graph_rag.io.feedback_io import CLIFeedbackIO, FeedbackIO
 from multi_agentic_graph_rag.llm_models.factory import (
     create_embedding_model,
     create_reasoning_model,
@@ -79,8 +75,6 @@ from multi_agentic_graph_rag.services.requirement_source import (
     load_requirement_source_local,
 )
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
-from multi_agentic_graph_rag.services.scenario_dedup import DedupConfig, DedupEngine
-from multi_agentic_graph_rag.services.semantic_matcher import SemanticMatcher
 from multi_agentic_graph_rag.services.story_scenario_identity import (
     StoryScenarioIdentityResolver,
 )
@@ -88,13 +82,6 @@ from multi_agentic_graph_rag.services.test_scenario_builder import (
     build_test_scenario_artifact,
     normalize_scenario_title,
     project_test_scenario_artifact,
-)
-from multi_agentic_graph_rag.workflows.hfil_node import (
-    HFILRuntime,
-    hfil_review_node,
-    hfil_scenarios_from_state,
-    initialize_hfil_state,
-    route_hfil,
 )
 
 
@@ -118,14 +105,6 @@ class TestScenarioState(TypedDict, total=False):
     artifact_payload: dict[str, Any]
     scenario_record_payloads: dict[str, Any]
     evidence_by_requirement: dict[str, list[str]]
-    hfil_enabled: bool
-    hfil_done: bool
-    hfil_phase: str
-    hfil_pending_prompt: str
-    hfil_scenarios: list[dict[str, Any]]
-    hfil_user_stories: list[dict[str, Any]]
-    hfil_last_duplicate_groups: list[dict[str, Any]]
-    hfil_messages: list[str]
 
 
 @dataclass(frozen=True)
@@ -143,8 +122,6 @@ def build_test_scenario_graph(
     session: RunSession | None = None,
     *,
     settings: AppSettings | None = None,
-    hfil_enabled: bool | None = None,
-    hfil_runtime: HFILRuntime | None = None,
     checkpointer: Any | None = None,
 ) -> Any:
     """Build test scenario graph.
@@ -153,50 +130,22 @@ def build_test_scenario_graph(
         session (RunSession | None): Optional command session that owns run artifacts and
                                      diagnostics.
         settings (AppSettings | None): Validated settings that control this operation.
-        hfil_enabled (bool | None): Hfil enabled required by the operation's typed contract.
-        hfil_runtime (HFILRuntime | None): Hfil runtime required by the operation's typed contract.
         checkpointer (Any | None): Checkpointer required by the operation's typed contract.
 
     Returns:
         Any: The typed result produced by the operation.
-
-    Raises:
-        ConfigurationError: If validated inputs or required dependencies cannot satisfy the
-        contract.
     """
     settings = settings or load_config()
-    enabled = settings.enable_hfil if hfil_enabled is None else hfil_enabled
     graph = StateGraph(TestScenarioState)
     graph.add_node("validate_request", lambda state: _validate_request(state, session=session))
     graph.add_node("generate", lambda state: _generate(state, session=session, settings=settings))
     graph.add_node("validate_and_assign_ids", _validate_and_assign_ids)
-    if enabled:
-        if hfil_runtime is None:
-            raise ConfigurationError("HFIL runtime is required when HFIL is enabled")
-        graph.add_node(
-            "hfil_review",
-            lambda state: hfil_review_node(dict(state), runtime=hfil_runtime),
-        )
     graph.add_node("finalize", _finalize)
     graph.add_node("persist", lambda state: _persist(state, session=session, settings=settings))
     graph.set_entry_point("validate_request")
     graph.add_edge("validate_request", "generate")
     graph.add_edge("generate", "validate_and_assign_ids")
-    # --- HFIL WIRING (optional).
-    # Comment out this block OR set settings.enable_hfil=False to disable.
-    if enabled:
-        graph.add_edge("validate_and_assign_ids", "hfil_review")
-        graph.add_conditional_edges(
-            "hfil_review",
-            route_hfil,
-            {
-                "loop": "hfil_review",
-                "done": "finalize",
-            },
-        )
-    else:
-        graph.add_edge("validate_and_assign_ids", "finalize")
-    # --- END HFIL WIRING ---
+    graph.add_edge("validate_and_assign_ids", "finalize")
     graph.add_edge("finalize", "persist")
     graph.add_edge("persist", END)
     return graph.compile(checkpointer=checkpointer)
@@ -287,7 +236,6 @@ def _generate(
             "Beginning test-scenario generation pipeline",
             step="generate",
             run_id=state["run_id"],
-            hfil_enabled=settings.enable_hfil,
             status="started",
         )
     _check_store(logger, "check_postgres", postgres.check)
@@ -414,13 +362,7 @@ def _generate(
         "warnings": warnings,
         "errors": [],
     }
-    initialized = initialize_hfil_state(
-        state=next_state,
-        scenarios=list(build_result.records.values()),
-        user_stories=source.stories,
-        enabled=settings.enable_hfil,
-    )
-    return cast(TestScenarioState, initialized)
+    return cast(TestScenarioState, next_state)
 
 
 def _validate_and_assign_ids(state: TestScenarioState) -> TestScenarioState:
@@ -447,19 +389,7 @@ def _finalize(state: TestScenarioState) -> TestScenarioState:
         TestScenarioState: The typed result produced by the operation.
     """
     artifact = TestScenarioArtifact.model_validate(state["artifact_payload"])
-    if state.get("hfil_enabled"):
-        scenarios = hfil_scenarios_from_state(dict(state))
-        records = {scenario.scenario_id: scenario for scenario in scenarios}
-        artifact = project_test_scenario_artifact(
-            project=artifact.project,
-            document_id=artifact.document_id,
-            document_version_id=artifact.document_version_id,
-            doc_version=artifact.doc_version,
-            records=records,
-        )
-        artifact = artifact.model_copy(update={"updated_at": datetime.now(UTC)})
-    else:
-        records = _scenario_records_from_state(state)
+    records = _scenario_records_from_state(state)
     payload = artifact.model_dump(mode="json")
     return {
         **state,
@@ -513,8 +443,6 @@ def _persist(
         artifact_path=artifact_path,
         run_id=state["run_id"],
     )
-    if settings.hfil_emit_md:
-        _write_test_scenario_markdown(build_result, artifact_path.with_suffix(".md"))
     if session is not None:
         session.artifact_payload = build_result.artifact.model_dump(mode="json")
     if logger is not None:
@@ -1072,21 +1000,8 @@ def run_test_scenario_generation(
     session.set_log_level(settings.log_level)
     _apply_overrides(settings, request)
     initial_state = {"request": request.model_dump(mode="json"), "run_id": session.run_id}
-    if settings.enable_hfil:
-        final_state = _invoke_hfil_graph(
-            request=request,
-            session=session,
-            settings=settings,
-            initial_state=initial_state,
-            feedback_io=CLIFeedbackIO(),
-        )
-    else:
-        graph = build_test_scenario_graph(
-            session,
-            settings=settings,
-            hfil_enabled=False,
-        )
-        final_state = graph.invoke(initial_state)
+    graph = build_test_scenario_graph(session, settings=settings)
+    final_state = graph.invoke(initial_state)
     return _result_from_state(final_state)
 
 
@@ -1114,160 +1029,6 @@ def _result_from_state(final_state: dict[str, Any]) -> TestScenarioResult:
         warnings=final_state.get("warnings", []),
         errors=final_state.get("errors", []),
     )
-
-
-def _invoke_hfil_graph(
-    *,
-    request: TestScenarioRequest,
-    session: RunSession,
-    settings: AppSettings,
-    initial_state: dict[str, Any],
-    feedback_io: FeedbackIO,
-) -> dict[str, Any]:
-    """Execute the invoke hfil graph operation within its declared architectural boundary.
-
-    Args:
-        request (TestScenarioRequest): Request required by the operation's typed contract.
-        session (RunSession): Optional command session that owns run artifacts and diagnostics.
-        settings (AppSettings): Validated settings that control this operation.
-        initial_state (dict[str, Any]): Initial state required by the operation's typed contract.
-        feedback_io (FeedbackIO): Feedback io required by the operation's typed contract.
-
-    Returns:
-        dict[str, Any]: The typed result produced by the operation.
-    """
-    runtime = _build_hfil_runtime(settings, session)
-    thread_id = request.thread_id or f"{session.run_id}:hfil"
-    config = {"configurable": {"thread_id": thread_id}}
-    if (
-        settings.hfil_checkpointer == "postgres"
-        and settings.postgres.mode == ModeName.POSTGRES.value
-    ):
-        from langgraph.checkpoint.postgres import PostgresSaver
-
-        with PostgresSaver.from_conn_string(_checkpoint_dsn(settings)) as checkpointer:
-            checkpointer.setup()
-            graph = build_test_scenario_graph(
-                session,
-                settings=settings,
-                hfil_enabled=True,
-                hfil_runtime=runtime,
-                checkpointer=checkpointer,
-            )
-            return _drive_hfil_interrupts(graph, initial_state, config, feedback_io)
-
-    memory_checkpointer = InMemorySaver()
-    graph = build_test_scenario_graph(
-        session,
-        settings=settings,
-        hfil_enabled=True,
-        hfil_runtime=runtime,
-        checkpointer=memory_checkpointer,
-    )
-    return _drive_hfil_interrupts(graph, initial_state, config, feedback_io)
-
-
-def _build_hfil_runtime(settings: AppSettings, session: RunSession) -> HFILRuntime:
-    """Build hfil runtime.
-
-    Args:
-        settings (AppSettings): Validated settings that control this operation.
-        session (RunSession): Optional command session that owns run artifacts and diagnostics.
-
-    Returns:
-        HFILRuntime: The typed result produced by the operation.
-    """
-    reasoning_model = create_reasoning_model(
-        settings,
-        logger=session.logger,
-        run_dir=session.run_dir,
-    )
-    embedding_model = create_embedding_model(settings, logger=session.logger)
-    reranker_model = create_reranker_model(settings)
-    _warmup_reasoning_model(reasoning_model)
-    matcher = SemanticMatcher(
-        embedding_model,
-        cos_floor=settings.hfil_cos_floor,
-        cos_ceil=settings.hfil_cos_ceil,
-    )
-    dedup = DedupEngine(
-        embedding_model,
-        reranker_model,
-        reasoning_model,
-        DedupConfig(recall_cosine=settings.dedup_recall_cosine),
-    )
-    return HFILRuntime(
-        settings=settings,
-        matcher=matcher,
-        dedup=dedup,
-        reasoner=reasoning_model,
-    )
-
-
-def _drive_hfil_interrupts(
-    graph: Any,
-    initial_state: dict[str, Any],
-    config: dict[str, Any],
-    feedback_io: FeedbackIO,
-) -> dict[str, Any]:
-    """Execute the drive hfil interrupts operation within its declared architectural boundary.
-
-    Args:
-        graph (Any): Graph required by the operation's typed contract.
-        initial_state (dict[str, Any]): Initial state required by the operation's typed contract.
-        config (dict[str, Any]): Validated settings that control this operation.
-        feedback_io (FeedbackIO): Feedback io required by the operation's typed contract.
-
-    Returns:
-        dict[str, Any]: The typed result produced by the operation.
-
-    Side Effects:
-        May invoke configured model or workflow providers.
-    """
-    state = graph.invoke(initial_state, config=config)
-    while "__interrupt__" in state:
-        payload = state["__interrupt__"][0].value
-        _render_hfil_payload(payload, feedback_io)
-        user_line = feedback_io.prompt("> ")
-        state = graph.invoke(Command(resume=user_line), config=config)
-    return cast(dict[str, Any], state)
-
-
-def _render_hfil_payload(payload: object, feedback_io: FeedbackIO) -> None:
-    """Render hfil payload.
-
-    Args:
-        payload (object): Validated structured data for the operation.
-        feedback_io (FeedbackIO): Feedback io required by the operation's typed contract.
-    """
-    if not isinstance(payload, dict):
-        feedback_io.show(str(payload))
-        return
-    for message in payload.get("messages", []):
-        feedback_io.show(str(message))
-    scenarios = payload.get("scenarios", [])
-    if isinstance(scenarios, list):
-        feedback_io.show_scenarios([item for item in scenarios if isinstance(item, dict)])
-    duplicate_groups = payload.get("duplicate_groups", [])
-    if duplicate_groups:
-        feedback_io.show(json.dumps(duplicate_groups, indent=2))
-    feedback_io.show(str(payload.get("prompt", "")))
-
-
-def _checkpoint_dsn(settings: AppSettings) -> str:
-    """Execute the checkpoint dsn operation within its declared architectural boundary.
-
-    Args:
-        settings (AppSettings): Validated settings that control this operation.
-
-    Returns:
-        str: The typed result produced by the operation.
-    """
-    dsn = settings.postgres.dsn
-    scheme, separator, remainder = dsn.partition("://")
-    if separator and "+" in scheme:
-        return f"{scheme.split('+', 1)[0]}://{remainder}"
-    return dsn
 
 
 def resolve_test_scenario_identity(request: TestScenarioRequest) -> tuple[str, str]:
@@ -1303,10 +1064,6 @@ def _apply_overrides(settings: AppSettings, request: TestScenarioRequest) -> Non
         settings.test_scenario.top_k = request.top_k
     if settings.test_scenario.max_new_tokens:
         settings.huggingface.max_new_tokens = settings.test_scenario.max_new_tokens
-    if request.hfil_enabled is not None:
-        settings.enable_hfil = request.hfil_enabled
-    if request.emit_md:
-        settings.hfil_emit_md = True
 
 
 def _load_story_source(
@@ -1742,42 +1499,6 @@ def _coverage_by_requirement(scenarios: list[TestScenarioRecord]) -> dict[str, l
     for scenario in scenarios:
         coverage.setdefault(scenario.requirement_id, []).append(scenario.scenario_id)
     return coverage
-
-
-def _write_test_scenario_markdown(artifact: TestScenarioBuildResult, path: Path) -> None:
-    """Write test scenario markdown through the owning storage boundary.
-
-    Args:
-        artifact (TestScenarioBuildResult): Artifact required by the operation's typed contract.
-        path (Path): Filesystem location authorized for this operation.
-
-    Side Effects:
-        May create or atomically replace files in the configured artifact boundary.
-    """
-    lines = [
-        f"# Test Scenarios - {artifact.artifact.project}",
-        "",
-        f"- document_version_id: `{artifact.artifact.document_version_id}`",
-        f"- scenario_count: {len(artifact.records)}",
-        "",
-    ]
-    for scenario in artifact.records.values():
-        lines.extend(
-            [
-                f"## {scenario.scenario_id}",
-                "",
-                f"- story_id: `{scenario.story_id}`",
-                f"- requirement_id: `{scenario.requirement_id}`",
-                f"- type: {scenario.scenario_type}",
-                f"- priority: {scenario.priority}",
-                "",
-                scenario.description,
-                "",
-                f"Expected result: {scenario.expected_result}",
-                "",
-            ]
-        )
-    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _output_dir(
