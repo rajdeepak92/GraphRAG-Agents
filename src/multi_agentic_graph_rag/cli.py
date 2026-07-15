@@ -16,7 +16,6 @@ from rich.table import Table
 
 from multi_agentic_graph_rag import __version__
 from multi_agentic_graph_rag.agents.ingestion_document_agent import IngestionDocumentAgent
-from multi_agentic_graph_rag.agents.test_scenario_agent import TestScenarioGeneratorAgent
 from multi_agentic_graph_rag.agents.user_story_agent import UserStoryGeneratorAgent
 from multi_agentic_graph_rag.common_defs import EnvVar, RuntimeCommand
 from multi_agentic_graph_rag.config.config_loader import load_config
@@ -33,7 +32,6 @@ from multi_agentic_graph_rag.domain.schemas import (
     IngestionRequest,
     KnowledgeGraphRequest,
     RequirementArtifact,
-    TestScenarioRequest,
     UserStoryRequest,
 )
 from multi_agentic_graph_rag.llm_models.huggingface import (
@@ -52,12 +50,8 @@ from multi_agentic_graph_rag.services.artifacts import (
     verify_test_scenario_artifact,
     verify_user_story_artifact,
 )
-from multi_agentic_graph_rag.services.test_scenario_builder import (
-    project_test_scenario_artifact,
-)
 from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 from multi_agentic_graph_rag.workflows.knowledge_graph import run_knowledge_graph_build
-from multi_agentic_graph_rag.workflows.test_scenario_graph import resolve_test_scenario_identity
 from multi_agentic_graph_rag.workflows.user_story_graph import resolve_user_story_identity
 
 app = typer.Typer(
@@ -732,94 +726,6 @@ def build_knowledge_graph(
         console.print(f"artifact={result.artifact_path}")
 
 
-@app.command("generate-test-scenarios")
-def generate_test_scenarios(
-    user_stories: Annotated[Path | None, typer.Option("--user-stories")] = None,
-    requirements: Annotated[Path | None, typer.Option("--requirements")] = None,
-    project: Annotated[str | None, typer.Option("--project")] = None,
-    document_version_id: Annotated[str | None, typer.Option("--document-version-id")] = None,
-    reasoning_provider: Annotated[str | None, typer.Option("--reasoning-provider")] = None,
-    embedding_provider: Annotated[str | None, typer.Option("--embedding-provider")] = None,
-    reranker_provider: Annotated[str | None, typer.Option("--reranker-provider")] = None,
-    top_k: Annotated[int | None, typer.Option("--top-k")] = None,
-    json_output: Annotated[bool, typer.Option("--json-output")] = False,
-) -> None:
-    """Generate version-grounded test scenarios from canonical user stories.
-
-    Args:
-        user_stories (Path | None): Authorized input path for the command.
-        requirements (Path | None): Authorized input path for the command.
-        project (str | None): Project scope for isolated persistence and retrieval.
-        document_version_id (str | None): Authorized document-version boundary or label.
-        reasoning_provider (str | None): Optional provider override validated against the
-                                         existing provider contract.
-        embedding_provider (str | None): Optional provider override validated against the
-                                         existing provider contract.
-        reranker_provider (str | None): Optional provider override validated against the
-                                        existing provider contract.
-        top_k (int | None): Optional bounded retrieval or display limit.
-        json_output (bool): Whether stdout must contain only the machine-readable JSON result.
-
-    Raises:
-        typer.Exit: If validation or the requested command fails.
-
-    Side Effects:
-        Writes command diagnostics to stderr/run logs and results to stdout.
-    """
-    request = TestScenarioRequest(
-        user_stories_path=user_stories,
-        requirements_path=requirements,
-        project=project,
-        document_version_id=document_version_id,
-        reasoning_provider=reasoning_provider,
-        embedding_provider=embedding_provider,
-        reranker_provider=reranker_provider,
-        top_k=top_k,
-    )
-    try:
-        resolved_project, resolved_version = resolve_test_scenario_identity(request)
-    except MaragError as exc:
-        console.print(f"[red]FAIL[/red] {exc}")
-        raise typer.Exit(code=1) from None
-    with command_session(
-        project=resolved_project,
-        version=resolved_version,
-        command=RuntimeCommand.GENERATE_TEST_SCENARIOS.value,
-        run_id=command_run_id(RuntimeCommand.GENERATE_TEST_SCENARIOS.value),
-    ) as session:
-        session.request_payload = request.model_dump(mode="json")
-        session.logger.info(
-            "Starting generate-test-scenarios command",
-            step="test-scenarios",
-            user_stories=str(user_stories) if user_stories else None,
-            requirements=str(requirements) if requirements else None,
-            project=resolved_project,
-            document_version_id=document_version_id,
-            status="started",
-        )
-        try:
-            result = TestScenarioGeneratorAgent().run(request, session=session)
-        except SchemaMismatchError:
-            console.print(
-                "[red]FAIL[/red] PostgreSQL schema mismatch. "
-                "Reset disposable local app tables with: "
-                "python -m multi_agentic_graph_rag postgres-reset --yes"
-            )
-            raise typer.Exit(code=1) from None
-        except MaragError as exc:
-            console.print(f"[red]FAIL[/red] {exc}")
-            raise typer.Exit(code=1) from None
-        if json_output:
-            console.print_json(json.dumps(result.model_dump(mode="json"), indent=2))
-            return
-        console.print(
-            "[green]PASS[/green] test-scenario generation completed "
-            f"run_id={result.run_id} stories={result.story_count} "
-            f"scenarios={len(result.scenario_ids)}"
-        )
-        console.print(f"artifact={result.artifact_path}")
-
-
 @run_app.command("status")
 def run_status(run_id_value: Annotated[str, typer.Argument()]) -> None:
     """Render persisted status records for a command run.
@@ -1084,22 +990,6 @@ def _rebuild_identity_projections(
             records=records,
         )
         neo4j.project_user_story_coverage(artifact, evidence)
-    scenarios = postgres.load_test_scenarios_for_generation(project=project)
-    scenario_versions: dict[str, dict[str, Any]] = {}
-    for scenario in scenarios:
-        scenario_versions.setdefault(scenario.document_version_id, {})[scenario.scenario_id] = (
-            scenario
-        )
-    for records in scenario_versions.values():
-        head = next(iter(records.values()))
-        scenario_artifact = project_test_scenario_artifact(
-            project=project,
-            document_id=head.document_id,
-            document_version_id=head.document_version_id,
-            doc_version=head.doc_version,
-            records=records,
-        )
-        neo4j.project_test_scenario_coverage(scenario_artifact, evidence)
 
 
 @artifact_app.command("verify")

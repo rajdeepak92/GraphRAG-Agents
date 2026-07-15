@@ -20,13 +20,10 @@ from multi_agentic_graph_rag.domain.schemas import (
     DocumentChunk,
     DocumentManifest,
     RequirementArtifact,
-    TestScenarioBuildResult,
-    TestScenarioRecord,
     UserStoryBuildResult,
     UserStoryRecord,
     UserStoryStatement,
 )
-from multi_agentic_graph_rag.services.test_scenario_builder import project_test_scenario_artifact
 from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 
 
@@ -155,40 +152,12 @@ class Neo4jStoreTests(unittest.TestCase):
         self.assertTrue(projection["covered"])
         self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
 
-    def test_test_scenario_coverage_projection_local_json(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = Neo4jStore(_settings(root))
-            store.project_manifest(_manifest())
-            store.project_test_scenario_coverage(
-                _test_scenario_artifact(),
-                {"REQ-1": ["CHUNK-1"]},
-            )
-
-            rows = [
-                json.loads(line)
-                for line in (root / "runtime" / "neo4j.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
-            ]
-
-        kinds = [row["kind"] for row in rows]
-        self.assertEqual(kinds, ["manifest_projection", "test_scenario_projection"])
-        projection = rows[1]
-        self.assertEqual(projection["scenario_id"], "SC-SCENARIO-1")
-        self.assertEqual(projection["story_id"], "US-STORY-1")
-        self.assertEqual(projection["requirement_id"], "REQ-1")
-        self.assertEqual(projection["revision_id"], "REQREV-1")
-        self.assertEqual(projection["scenario_type"], "Positive")
-        self.assertEqual(projection["evidence_chunk_ids"], ["CHUNK-1"])
-
     def test_cleanup_identity_projections_preserves_source_graph_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             store = Neo4jStore(_settings(root))
             store.project_manifest(_manifest())
             store.project_user_story_coverage(_user_story_artifact(), {"REQ-1": ["CHUNK-1"]})
-            store.project_test_scenario_coverage(_test_scenario_artifact(), {"REQ-1": ["CHUNK-1"]})
             store.cleanup_identity_projections("PROJECT")
             kinds = [row["kind"] for row in store._read_local_rows()]
         self.assertEqual(kinds, ["manifest_projection"])
@@ -379,39 +348,6 @@ def _user_story_artifact() -> UserStoryBuildResult:
         artifact=artifact,
         records={record.story_id: record},
         coverage={"REQ-1": [record.story_id]},
-    )
-
-
-def _test_scenario_artifact() -> TestScenarioBuildResult:
-    record = TestScenarioRecord(
-        scenario_id="SC-SCENARIO-1",
-        story_id="US-STORY-1",
-        requirement_id="REQ-1",
-        requirement_revision_id="REQREV-1",
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="1.0",
-        title="Import valid file succeeds",
-        description="Verify a valid source file is imported into the system",
-        scenario_type="Positive",
-        preconditions=["a valid source file is available"],
-        expected_result="The file records are available for downstream reporting",
-        priority="Medium",
-        confidence=0.9,
-    )
-    artifact = project_test_scenario_artifact(
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="1.0",
-        records={record.scenario_id: record},
-    )
-    return TestScenarioBuildResult(
-        artifact=artifact,
-        records={record.scenario_id: record},
-        coverage={"US-STORY-1": [record.scenario_id]},
-        requirement_coverage={"REQ-1": [record.scenario_id]},
     )
 
 

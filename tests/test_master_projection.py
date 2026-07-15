@@ -15,8 +15,6 @@ from multi_agentic_graph_rag.config.settings import (
 )
 from multi_agentic_graph_rag.db.postgres import PostgresStore
 from multi_agentic_graph_rag.domain.schemas import (
-    TestScenarioBuildResult,
-    TestScenarioRecord,
     UserStoryBuildResult,
     UserStoryRecord,
     UserStoryStatement,
@@ -26,7 +24,6 @@ from multi_agentic_graph_rag.services.master_projection import (
     materialize_master,
     recompute_checksum,
 )
-from multi_agentic_graph_rag.services.test_scenario_builder import project_test_scenario_artifact
 from multi_agentic_graph_rag.services.user_story_builder import project_user_story_artifact
 
 
@@ -49,22 +46,6 @@ class MasterProjectionDeterminismTests(unittest.TestCase):
         self.assertEqual(first.record_count, 2)
         self.assertEqual([r["story_id"] for r in first.records], ["US-1", "US-2"])
         self.assertEqual(recompute_checksum(first), first.checksum)
-
-    # 2. Checksum excludes run/time metadata (reproducible content only).
-    def test_checksum_ignores_run_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = PostgresStore(_settings(Path(temp_dir)))
-            store.persist_test_scenario_artifact(_scenarios("SC-1"), "path", "RUN-1")
-            master = materialize_master(
-                store,
-                project="PROJECT",
-                stage="test_scenarios",
-                run_id="RUN-9",
-                current_document_version_id="DV-9",
-            )
-            recomputed = recompute_checksum(master)
-        self.assertEqual(master.checksum, recomputed)
-        self.assertEqual(master.record_count, 1)
 
 
 class MasterProjectionSyncTests(unittest.TestCase):
@@ -360,39 +341,6 @@ def _stories(story_ids: tuple[str, ...]) -> UserStoryBuildResult:
     )
     return UserStoryBuildResult(
         artifact=artifact, records=records, coverage={"REQ-1": list(story_ids)}
-    )
-
-
-def _scenarios(scenario_id: str) -> TestScenarioBuildResult:
-    record = TestScenarioRecord(
-        scenario_id=scenario_id,
-        story_id="US-1",
-        requirement_id="REQ-1",
-        requirement_revision_id="REQREV-1",
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="V1",
-        title="Scenario",
-        description="Verify something happens",
-        scenario_type="Positive",
-        preconditions=["a precondition"],
-        expected_result="the expected result occurs",
-        priority="Medium",
-        confidence=0.9,
-    )
-    artifact = project_test_scenario_artifact(
-        project="PROJECT",
-        document_id="DOC",
-        document_version_id="DOC-v1",
-        doc_version="V1",
-        records={record.scenario_id: record},
-    )
-    return TestScenarioBuildResult(
-        artifact=artifact,
-        records={record.scenario_id: record},
-        coverage={"US-1": [record.scenario_id]},
-        requirement_coverage={"REQ-1": [record.scenario_id]},
     )
 
 
