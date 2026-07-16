@@ -79,16 +79,16 @@ runtime/logs/*
 *.md
 !/README.md
 
-# Local test workspace
-tests/*
-# Reviewable acceptance tests: tracked despite the local test workspace being
-# ignored, so the proof of correctness never lives only in an ignored file.
-!tests/test_canonicalization.py
-!tests/test_cli_and_removal.py
-!tests/test_checkpoint_recovery.py
-!tests/test_contracts.py
-!tests/test_discovery_contract.py
-!tests/test_end_to_end_workflow.py
-!tests/test_ingestion_graph.py
-!tests/test_retrieval_isolation.py
-!tests/test_storage_schema.py
+# # Local test workspace
+# tests/*
+# # Reviewable acceptance tests: tracked despite the local test workspace being
+# # ignored, so the proof of correctness never lives only in an ignored file.
+# !tests/test_canonicalization.py
+# !tests/test_cli_and_removal.py
+# !tests/test_checkpoint_recovery.py
+# !tests/test_contracts.py
+# !tests/test_discovery_contract.py
+# !tests/test_end_to_end_workflow.py
+# !tests/test_ingestion_graph.py
+# !tests/test_retrieval_isolation.py
+# !tests/test_storage_schema.py
