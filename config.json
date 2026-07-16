@@ -4,13 +4,10 @@
     "log_level": "DEBUG"
   },
   "paths": {
-    "global_cache_dir": ".global_cache",
-    "documents_inbox_dir": "documents/inbox",
     "generated_requirements_dir": "generated",
     "chroma_persist_dir": "runtime/databases/chroma",
     "runtime_staging_dir": "runtime/staging",
-    "runtime_logs_dir": "runtime/logs",
-    "runtime_locks_dir": "runtime/locks"
+    "runtime_logs_dir": "runtime/logs"
   },
   "reasoning_model": {
     "provider": "huggingface",
@@ -38,29 +35,39 @@
     "local_path": "runtime/staging/neo4j_projection.jsonl"
   },
   "chroma": {
-    "collection_name": "marag_chunks"
+    "collection_prefix": "marag"
   },
   "chunking": {
     "chunk_size": 1200,
     "chunk_overlap": 150,
-    "minimum_chunk_size": 80,
     "maximum_chunk_size": 2000
   },
-  "knowledge_graph": {
-    "enabled": true,
-    "shadow_mode": true,
-    "graph_primary_story": true,
-    "graph_primary_scenario": true,
-    "expansion_k": 6,
-    "graph_min_assertions": 3
+  "runtime": {
+    "concurrency": 1,
+    "timeout_seconds": 120,
+    "transient_max_attempts": 2
   },
-  "requirement_identity": {
-    "candidate_top_k": 2,
-    "max_entailment_calls": 200,
-    "max_structured_attempts": 2,
-    "recall_cosine_threshold": 0.62,
-    "token_overlap_threshold": 0.6,
-    "use_reranker": true,
-    "require_entailment_for_merge": true
+  "retrieval": {
+    "top_k": 6,
+    "vector_k": 12,
+    "graph_k": 12,
+    "max_hops": 2,
+    "token_budget": 6000
+  },
+  "azure_openai": {
+    "endpoint": "",
+    "api_key": "",
+    "api_version": "2024-10-21",
+    "reasoning_deployment": "",
+    "embedding_deployment": ""
+  },
+  "huggingface": {
+    "token": "",
+    "reasoning_model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "embedding_model": "BAAI/bge-m3",
+    "reranker_model": "BAAI/bge-reranker-base",
+    "offline": false,
+    "max_new_tokens": 4096,
+    "log_llm_responses": false
   }
 }

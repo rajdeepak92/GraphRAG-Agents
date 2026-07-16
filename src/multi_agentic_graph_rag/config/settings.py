@@ -1,59 +1,69 @@
-"""Application settings."""
+"""Validated operational settings with stage capability boundaries."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from multi_agentic_graph_rag.common_defs import ModeName, ProviderName
-
 
 class ModelSection(BaseModel):
-    """Define the validated model section data contract."""
+    """Provider and deployment/model selection."""
 
-    model_config = ConfigDict(extra="allow")
-
+    model_config = ConfigDict(extra="forbid")
     provider: str
     model: str | None = None
     deployment: str | None = None
 
 
 class PathsSettings(BaseModel):
-    """Define the validated paths settings data contract."""
+    """Runtime filesystem locations."""
 
     project_root: Path
-    global_cache_dir: Path
-    documents_inbox_dir: Path
-    generated_requirements_dir: Path
+    generated_dir: Path
     chroma_persist_dir: Path
     runtime_staging_dir: Path
     runtime_logs_dir: Path
-    runtime_locks_dir: Path
 
 
 class ChunkingSettings(BaseModel):
-    """Define the validated chunking settings data contract."""
+    """Deterministic chunking limits."""
 
-    chunk_size: int = 1200
-    chunk_overlap: int = 150
-    minimum_chunk_size: int = 80
-    maximum_chunk_size: int = 2000
+    chunk_size: int = Field(default=1200, gt=0)
+    chunk_overlap: int = Field(default=150, ge=0)
+    maximum_chunk_size: int = Field(default=2000, gt=0)
+
+
+class RuntimeSettings(BaseModel):
+    """Bounded execution controls."""
+
+    concurrency: int = Field(default=1, ge=1, le=32)
+    timeout_seconds: int = Field(default=120, ge=1)
+    transient_max_attempts: int = Field(default=2, ge=1, le=2)
+
+
+class RetrievalSettings(BaseModel):
+    """Hybrid retrieval and context limits."""
+
+    top_k: int = Field(default=6, ge=1)
+    vector_k: int = Field(default=12, ge=1)
+    graph_k: int = Field(default=12, ge=1)
+    max_hops: int = Field(default=2, ge=1, le=4)
+    token_budget: int = Field(default=6000, ge=512)
 
 
 class PostgresSettings(BaseModel):
-    """Define the validated postgres settings data contract."""
+    """PostgreSQL application/checkpoint store."""
 
-    mode: str = ModeName.POSTGRES.value
+    mode: str = "postgres"
     dsn: str = "postgresql://marag:marag@127.0.0.1:5432/marag"
     local_path: Path
 
 
 class Neo4jSettings(BaseModel):
-    """Define the validated neo4j settings data contract."""
+    """Neo4j project-scoped graph store."""
 
-    mode: str = ModeName.NEO4J.value
+    mode: str = "neo4j"
     uri: str = "bolt://127.0.0.1:7687"
     username: str = "neo4j"
     password: str = ""
@@ -62,86 +72,23 @@ class Neo4jSettings(BaseModel):
 
 
 class ChromaSettings(BaseModel):
-    """Define the validated chroma settings data contract."""
+    """Chroma project-collection configuration."""
 
-    collection_name: str = "marag_chunks"
-
-
-class DiscoverySettings(BaseModel):
-    """Define the validated discovery settings data contract."""
-
-    batch_size: int = 1
-    log_llm_responses: bool = False
-    ledger_enabled: bool = True
-    ledger_max_entries: int = 500
-    ledger_top_k: int = 40
-
-
-class UserStorySettings(BaseModel):
-    """Define the validated user story settings data contract."""
-
-    top_k: int = 4
-    dense_k: int = 8
-    sparse_k: int = 8
-    neighbor_window: int = 1
-    max_new_tokens: int | None = None
-
-
-class KnowledgeGraphSettings(BaseModel):
-    """Feature flags for the source-knowledge graph and its retrieval rollout.
-
-    GraphRAG is the product default: ``enabled`` and both ``graph_primary_*`` flags
-    are on, so ingestion builds the semantic knowledge graph and generation grounds
-    user stories / test scenarios in it. ``shadow_mode`` stays independently
-    configurable for comparison runs. Setting ``enabled=False`` is the explicit
-    opt-out that restores the legacy chunk-only retrieval path.
-    """
-
-    enabled: bool = True
-    shadow_mode: bool = True
-    graph_primary_story: bool = True
-    graph_primary_scenario: bool = True
-    expansion_k: int = 6
-    graph_min_assertions: int = 3
-    # Bounded retry for transient build failures (provider timeout, rate limit,
-    # temporary Neo4j connectivity). Deterministic failures (validation / schema)
-    # are never retried. ``1`` disables retry.
-    build_max_attempts: int = 2
-
-
-class TestScenarioSettings(UserStorySettings):
-    """Stage-4 retrieval/generation settings, type-compatible with RetrievalService."""
-
-
-class RequirementIdentitySettings(BaseModel):
-    """Calibration knobs for cross-version requirement dedup / identity recall.
-
-    Thresholds only gate *candidate recall*; a merge is never decided by cosine or
-    reranker score alone (structured signatures + bidirectional entailment decide).
-    """
-
-    candidate_top_k: int = 2
-    max_entailment_calls: int = 200
-    max_structured_attempts: int = 2
-    recall_cosine_threshold: float = 0.62
-    token_overlap_threshold: float = 0.6
-    use_reranker: bool = True
-    require_entailment_for_merge: bool = True
+    collection_prefix: str = "marag"
 
 
 class AzureOpenAISettings(BaseModel):
-    """Define the validated azure open aisettings data contract."""
+    """Azure OpenAI credentials and deployments."""
 
     endpoint: str = ""
     api_key: str = ""
     api_version: str = "2024-10-21"
     reasoning_deployment: str = ""
-    reasoning_temperature: float | None = 0.0
     embedding_deployment: str = ""
 
 
 class HuggingFaceSettings(BaseModel):
-    """Define the validated hugging face settings data contract."""
+    """Private Hugging Face model configuration."""
 
     token: str = ""
     reasoning_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
@@ -154,39 +101,20 @@ class HuggingFaceSettings(BaseModel):
 
 
 class AppSettings(BaseModel):
-    """Define the validated app settings data contract."""
+    """Complete operational configuration."""
 
     model_config = ConfigDict(extra="forbid")
-
     app_env: str = "development"
     log_level: str = "INFO"
     paths: PathsSettings
-    reasoning_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(
-            provider=ProviderName.HUGGINGFACE.value, model="Qwen/Qwen2.5-Coder-7B-Instruct"
-        )
-    )
-    embedding_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(
-            provider=ProviderName.HUGGINGFACE.value, model="BAAI/bge-m3"
-        )
-    )
-    reranker_model: ModelSection = Field(
-        default_factory=lambda: ModelSection(
-            provider=ProviderName.HUGGINGFACE.value, model="BAAI/bge-reranker-base"
-        )
-    )
+    reasoning_model: ModelSection
+    embedding_model: ModelSection
+    reranker_model: ModelSection
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     postgres: PostgresSettings
     neo4j: Neo4jSettings
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
-    discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
-    user_story: UserStorySettings = Field(default_factory=UserStorySettings)
-    test_scenario: TestScenarioSettings = Field(default_factory=TestScenarioSettings)
-    knowledge_graph: KnowledgeGraphSettings = Field(default_factory=KnowledgeGraphSettings)
-    requirement_identity: RequirementIdentitySettings = Field(
-        default_factory=RequirementIdentitySettings
-    )
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
-    raw_config: dict[str, Any] = Field(default_factory=dict)

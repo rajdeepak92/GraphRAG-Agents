@@ -1,4345 +1,945 @@
-"""PostgreSQL generated-content store with a local JSON trace mode."""
+"""Simplified PostgreSQL artifact, traceability, readiness, and run store."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any
 
 from multi_agentic_graph_rag.config.settings import AppSettings
-from multi_agentic_graph_rag.domain.errors import (
-    SchemaMismatchError,
-    StoreUnavailableError,
-    VersionConflictError,
-)
-from multi_agentic_graph_rag.domain.identifiers import (
-    requirement_evidence_occurrence_key,
-    stable_token,
-    test_scenario_evidence_id,
-    user_story_evidence_id,
-)
 from multi_agentic_graph_rag.domain.schemas import (
-    CoverageReport,
-    CoverageRequirementRow,
     CoverageSummary,
-    DocumentManifest,
-    GenerationContextItem,
-    GenerationContextRun,
-    KnowledgeGraphStateRecord,
-    RequirementArtifact,
-    RequirementInput,
-    RequirementRevisionSnapshot,
-    StageMasterArtifact,
-    TestScenarioArtifact,
-    TestScenarioBuildResult,
-    TestScenarioRecord,
-    UserStoryArtifact,
-    UserStoryBuildResult,
-    UserStoryRecord,
-    VerifiedRequirement,
-    normalize_priority_label,
-)
-from multi_agentic_graph_rag.services.local_lock import LocalFileLock
-from multi_agentic_graph_rag.services.master_projection import materialize_master
-from multi_agentic_graph_rag.services.requirement_builder import (
-    build_canonical_requirements_artifact,
-    validate_requirement_revision_lifecycle,
+    KnowledgeGraphReadiness,
+    RequirementsArtifact,
+    TestScenariosArtifact,
+    UserStoriesArtifact,
+    canonical_checksum,
 )
 
-_MANAGED_TABLES = (
-    "schema_migrations",
-    "requirement_identity_resolutions",
-    "test_scenario_evidence",
-    "test_scenarios",
-    "test_scenario_artifacts",
-    "user_story_evidence",
-    "user_stories",
-    "user_story_artifacts",
-    "requirement_fact_links",
-    "requirement_evidence",
-    "requirement_delta_events",
-    "requirement_revisions",
-    "requirements",
-    "fact_occurrences",
-    "canonical_facts",
-    "requirement_artifacts",
-    "document_versions",
-    "ingestion_runs",
-    "knowledge_graph_state",
-    "requirements_master",
-    "user_stories_master",
-    "test_scenarios_master",
-    "generation_context_runs",
-    "generation_context_items",
-)
-
-_MASTER_MANAGED_TABLES = (
-    "requirements_master",
-    "user_stories_master",
-    "test_scenarios_master",
-)
-
-_MASTER_TABLE_BY_STAGE = {
-    "requirements": "requirements_master",
-    "user_stories": "user_stories_master",
-    "test_scenarios": "test_scenarios_master",
-}
-
-_TEXT_TYPES = {"text", "character varying"}
-_MASTER_COLUMNS = {
-    "project": _TEXT_TYPES,
-    "artifact_schema_version": _TEXT_TYPES,
-    "current_document_version_id": _TEXT_TYPES,
-    "run_id": _TEXT_TYPES,
-    "payload": {"jsonb"},
-    "checksum": _TEXT_TYPES,
-    "payload_revision": {"integer"},
-    "updated_at": {"timestamp with time zone"},
-}
-_EXPECTED_COLUMNS = {
-    "requirement_identity_resolutions": {
-        "resolution_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "chunk_id": _TEXT_TYPES,
-        "incoming_fingerprint": _TEXT_TYPES,
-        "decision": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "revision_id": _TEXT_TYPES,
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-    },
-    "document_versions": {
-        "document_version_id": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "version": _TEXT_TYPES,
-        "checksum": _TEXT_TYPES,
-        "manifest": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-    },
-    "ingestion_runs": {
-        "run_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "status": _TEXT_TYPES,
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-    },
-    "knowledge_graph_state": {
-        "document_version_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "doc_version": _TEXT_TYPES,
-        "status": _TEXT_TYPES,
-        "run_id": _TEXT_TYPES,
-        "attempt": {"integer"},
-        "failure_reason": _TEXT_TYPES,
-        "chunk_count": {"integer"},
-        "assertion_count": {"integer"},
-        "evidence_count": {"integer"},
-        "extractor_fingerprint": _TEXT_TYPES,
-        "graph_schema_version": _TEXT_TYPES,
-        "started_at": {"timestamp with time zone"},
-        "completed_at": {"timestamp with time zone"},
-        "updated_at": {"timestamp with time zone"},
-    },
-    "requirements_master": _MASTER_COLUMNS,
-    "user_stories_master": _MASTER_COLUMNS,
-    "test_scenarios_master": _MASTER_COLUMNS,
-    "generation_context_runs": {
-        "context_run_id": _TEXT_TYPES,
-        "stage": _TEXT_TYPES,
-        "anchor_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "source": _TEXT_TYPES,
-        "metrics": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-    },
-    "generation_context_items": {
-        "context_run_id": _TEXT_TYPES,
-        "rank": {"integer"},
-        "item_type": _TEXT_TYPES,
-        "item_id": _TEXT_TYPES,
-        "source": _TEXT_TYPES,
-        "score": {"double precision"},
-        "selected": {"boolean"},
-        "assertion_id": _TEXT_TYPES,
-        "text_unit_id": _TEXT_TYPES,
-        "entity_id": _TEXT_TYPES,
-        "predicate": _TEXT_TYPES,
-        "hop_count": {"integer"},
-        "normalized_score": {"double precision"},
-        "reranker_score": {"double precision"},
-        "mandatory": {"boolean"},
-        "metadata_json": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-    },
-    "requirement_artifacts": {
-        "artifact_path": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-    },
-    "user_story_artifacts": {
-        "artifact_path": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
+_BASELINE_REQUIRED_COLUMNS = {
+    "requirements": {
+        "requirement_id",
+        "project",
+        "run_id",
+        "source_req_id",
+        "source_req_id_type",
+        "requirement_text",
+        "requirement_type",
+        "priority",
+        "status",
+        "confidence",
+        "constraints_json",
     },
     "user_stories": {
-        "story_id": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "requirement_revision_id": _TEXT_TYPES,
-        "source_req_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "doc_version": _TEXT_TYPES,
-        "origin_version": _TEXT_TYPES,
-        "title": _TEXT_TYPES,
-        "priority": _TEXT_TYPES,
-        "confidence": {"double precision"},
-        "status": _TEXT_TYPES,
-        "origin": _TEXT_TYPES,
-        "generation_context_run_id": _TEXT_TYPES,
-        "run_id": _TEXT_TYPES,
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-        "updated_at": {"timestamp with time zone"},
-    },
-    "user_story_evidence": {
-        "evidence_id": _TEXT_TYPES,
-        "story_id": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "chunk_id": _TEXT_TYPES,
-        "run_id": _TEXT_TYPES,
-        "created_at": {"timestamp with time zone"},
-    },
-    "test_scenario_artifacts": {
-        "artifact_path": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
+        "story_id",
+        "project",
+        "run_id",
+        "source_req_id",
+        "source_req_id_type",
+        "title",
+        "priority",
+        "persona",
+        "user_story_json",
+        "business_rules_json",
+        "status",
+        "confidence",
     },
     "test_scenarios": {
-        "scenario_id": _TEXT_TYPES,
-        "story_id": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "requirement_revision_id": _TEXT_TYPES,
-        "source_req_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "doc_version": _TEXT_TYPES,
-        "origin_version": _TEXT_TYPES,
-        "title": _TEXT_TYPES,
-        "scenario_type": _TEXT_TYPES,
-        "priority": _TEXT_TYPES,
-        "confidence": {"double precision"},
-        "status": _TEXT_TYPES,
-        "origin": _TEXT_TYPES,
-        "generation_context_run_id": _TEXT_TYPES,
-        "run_id": _TEXT_TYPES,
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-        "updated_at": {"timestamp with time zone"},
-    },
-    "test_scenario_evidence": {
-        "evidence_id": _TEXT_TYPES,
-        "scenario_id": _TEXT_TYPES,
-        "story_id": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "chunk_id": _TEXT_TYPES,
-        "run_id": _TEXT_TYPES,
-        "created_at": {"timestamp with time zone"},
-    },
-    "canonical_facts": {
-        "canonical_fact_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "normalized_text": _TEXT_TYPES,
-        "representative_text": _TEXT_TYPES,
-        "created_at": {"timestamp with time zone"},
-    },
-    "fact_occurrences": {
-        "fact_id": _TEXT_TYPES,
-        "canonical_fact_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "chunk_id": _TEXT_TYPES,
-        "page": {"integer"},
-        "section": _TEXT_TYPES,
-        "quote": _TEXT_TYPES,
-        "start_char": {"integer"},
-        "end_char": {"integer"},
-        "source_path": _TEXT_TYPES,
-        "text": _TEXT_TYPES,
-        "created_at": {"timestamp with time zone"},
-    },
-    "requirements": {
-        "requirement_id": _TEXT_TYPES,
-        "project": _TEXT_TYPES,
-        "document_id": _TEXT_TYPES,
-        "requirement_key": _TEXT_TYPES,
-        "source_req_id": _TEXT_TYPES,
-        "id_generation_type": _TEXT_TYPES,
-        "confidence": {"double precision"},
-        "status": _TEXT_TYPES,
-        "first_seen_document_version_id": _TEXT_TYPES,
-        "active_revision_id": _TEXT_TYPES,
-        "superseded_by_version": _TEXT_TYPES,
-        "superseded_at": {"timestamp with time zone"},
-        "created_at": {"timestamp with time zone"},
-        "updated_at": {"timestamp with time zone"},
-    },
-    "requirement_revisions": {
-        "revision_id": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "statement": _TEXT_TYPES,
-        "normalized_statement": _TEXT_TYPES,
-        "normalized_statement_hash": _TEXT_TYPES,
-        "semantic_signature": _TEXT_TYPES,
-        "requirement_type": _TEXT_TYPES,
-        "requirement_family": _TEXT_TYPES,
-        "priority": _TEXT_TYPES,
-        "source_req_id": _TEXT_TYPES,
-        "id_generation_type": _TEXT_TYPES,
-        "confidence": {"double precision"},
-        "status": _TEXT_TYPES,
-        "first_seen_document_version_id": _TEXT_TYPES,
-        "superseded_by_version": _TEXT_TYPES,
-        "superseded_at": {"timestamp with time zone"},
-        "created_at": {"timestamp with time zone"},
-        "updated_at": {"timestamp with time zone"},
-    },
-    "requirement_evidence": {
-        "evidence_id": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "revision_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "chunk_id": _TEXT_TYPES,
-        "page": {"integer"},
-        "section": _TEXT_TYPES,
-        "quote": _TEXT_TYPES,
-        "start_char": {"integer"},
-        "end_char": {"integer"},
-        "source_path": _TEXT_TYPES,
-        "created_at": {"timestamp with time zone"},
-    },
-    "requirement_fact_links": {
-        "evidence_id": _TEXT_TYPES,
-        "fact_id": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "revision_id": _TEXT_TYPES,
-        "created_at": {"timestamp with time zone"},
-    },
-    "requirement_delta_events": {
-        "event_id": _TEXT_TYPES,
-        "event_type": _TEXT_TYPES,
-        "requirement_id": _TEXT_TYPES,
-        "revision_id": _TEXT_TYPES,
-        "previous_revision_id": _TEXT_TYPES,
-        "superseded_by_revision_id": _TEXT_TYPES,
-        "document_version_id": _TEXT_TYPES,
-        "evidence_ids": {"jsonb"},
-        "impacted_artifact_types": {"jsonb"},
-        "payload": {"jsonb"},
-        "created_at": {"timestamp with time zone"},
-    },
-    "schema_migrations": {
-        "version": _TEXT_TYPES,
-        "applied_at": {"timestamp with time zone"},
+        "scenario_id",
+        "project",
+        "run_id",
+        "source_req_id",
+        "source_req_id_type",
+        "title",
+        "description",
+        "scenario_type",
+        "priority",
+        "preconditions_json",
+        "action",
+        "expected_result",
+        "status",
+        "confidence",
     },
 }
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    run_id TEXT NOT NULL,
+    project TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('started','completed','failed')),
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, stage)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_graph_readiness (
+    project TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('building','ready','failed')),
+    build_run_id TEXT NOT NULL,
+    failure_reason TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS master_artifacts (
+    project TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (stage IN ('requirements','user_stories','test_scenarios')),
+    artifact_schema_version TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project, run_id, stage)
+);
+
+CREATE TABLE IF NOT EXISTS generation_context (
+    project TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    anchor_id TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project, run_id, stage, anchor_id)
+);
+
+CREATE TABLE IF NOT EXISTS requirements (
+    requirement_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    source_req_id TEXT,
+    source_req_id_type TEXT NOT NULL CHECK (source_req_id_type IN ('source','generated')),
+    requirement_text TEXT NOT NULL,
+    requirement_type TEXT NOT NULL,
+    priority TEXT NOT NULL CHECK (priority IN ('High','Medium','Low')),
+    status TEXT NOT NULL CHECK (status = 'active'),
+    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    constraints_json JSONB NOT NULL,
+    CHECK (
+      (source_req_id_type = 'source' AND source_req_id IS NOT NULL AND btrim(source_req_id) <> '')
+      OR (source_req_id_type = 'generated' AND source_req_id IS NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS requirements_project_source_id
+ON requirements(project, source_req_id)
+WHERE source_req_id_type = 'source';
+
+CREATE TABLE IF NOT EXISTS requirement_evidence (
+    evidence_id TEXT PRIMARY KEY,
+    requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
+    chunk_id TEXT NOT NULL,
+    quote TEXT NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS requirement_chunks (
+    requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
+    chunk_id TEXT NOT NULL,
+    PRIMARY KEY (requirement_id, chunk_id)
+);
+CREATE TABLE IF NOT EXISTS requirement_entities (
+    requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (requirement_id, entity_id)
+);
+CREATE TABLE IF NOT EXISTS requirement_relationships (
+    requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
+    relationship_id TEXT NOT NULL,
+    PRIMARY KEY (requirement_id, relationship_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_stories (
+    story_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    source_req_id TEXT,
+    source_req_id_type TEXT NOT NULL CHECK (source_req_id_type IN ('source','generated')),
+    title TEXT NOT NULL,
+    priority TEXT NOT NULL CHECK (priority IN ('High','Medium','Low')),
+    persona TEXT NOT NULL,
+    user_story_json JSONB NOT NULL,
+    business_rules_json JSONB NOT NULL,
+    status TEXT NOT NULL CHECK (status = 'active'),
+    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    CHECK (
+      (source_req_id_type = 'source' AND source_req_id IS NOT NULL AND btrim(source_req_id) <> '')
+      OR (source_req_id_type = 'generated' AND source_req_id IS NULL)
+    )
+);
+CREATE TABLE IF NOT EXISTS requirement_stories (
+    requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
+    story_id TEXT NOT NULL REFERENCES user_stories(story_id),
+    PRIMARY KEY (requirement_id, story_id)
+);
+CREATE TABLE IF NOT EXISTS acceptance_criteria (
+    criterion_id TEXT PRIMARY KEY,
+    story_id TEXT NOT NULL REFERENCES user_stories(story_id),
+    title TEXT NOT NULL,
+    given_text TEXT NOT NULL,
+    when_text TEXT NOT NULL,
+    then_text TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS story_evidence (
+    story_id TEXT NOT NULL REFERENCES user_stories(story_id),
+    chunk_id TEXT NOT NULL,
+    PRIMARY KEY (story_id, chunk_id)
+);
+CREATE TABLE IF NOT EXISTS story_entities (
+    story_id TEXT NOT NULL REFERENCES user_stories(story_id),
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (story_id, entity_id)
+);
+CREATE TABLE IF NOT EXISTS story_relationships (
+    story_id TEXT NOT NULL REFERENCES user_stories(story_id),
+    relationship_id TEXT NOT NULL,
+    PRIMARY KEY (story_id, relationship_id)
+);
+
+CREATE TABLE IF NOT EXISTS test_scenarios (
+    scenario_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    source_req_id TEXT,
+    source_req_id_type TEXT NOT NULL CHECK (source_req_id_type IN ('source','generated')),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    scenario_type TEXT NOT NULL,
+    priority TEXT NOT NULL CHECK (priority IN ('High','Medium','Low')),
+    preconditions_json JSONB NOT NULL,
+    action TEXT NOT NULL,
+    expected_result TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status = 'active'),
+    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    CHECK (
+      (source_req_id_type = 'source' AND source_req_id IS NOT NULL AND btrim(source_req_id) <> '')
+      OR (source_req_id_type = 'generated' AND source_req_id IS NULL)
+    )
+);
+CREATE TABLE IF NOT EXISTS story_scenarios (
+    story_id TEXT NOT NULL REFERENCES user_stories(story_id),
+    scenario_id TEXT NOT NULL REFERENCES test_scenarios(scenario_id),
+    PRIMARY KEY (story_id, scenario_id)
+);
+CREATE TABLE IF NOT EXISTS requirement_scenarios (
+    requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
+    scenario_id TEXT NOT NULL REFERENCES test_scenarios(scenario_id),
+    PRIMARY KEY (requirement_id, scenario_id)
+);
+CREATE TABLE IF NOT EXISTS scenario_criteria (
+    scenario_id TEXT NOT NULL REFERENCES test_scenarios(scenario_id),
+    criterion_id TEXT NOT NULL REFERENCES acceptance_criteria(criterion_id),
+    PRIMARY KEY (scenario_id, criterion_id)
+);
+CREATE TABLE IF NOT EXISTS scenario_evidence (
+    scenario_id TEXT NOT NULL REFERENCES test_scenarios(scenario_id),
+    chunk_id TEXT NOT NULL,
+    PRIMARY KEY (scenario_id, chunk_id)
+);
+CREATE TABLE IF NOT EXISTS scenario_entities (
+    scenario_id TEXT NOT NULL REFERENCES test_scenarios(scenario_id),
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (scenario_id, entity_id)
+);
+CREATE TABLE IF NOT EXISTS scenario_relationships (
+    scenario_id TEXT NOT NULL REFERENCES test_scenarios(scenario_id),
+    relationship_id TEXT NOT NULL,
+    PRIMARY KEY (scenario_id, relationship_id)
+);
+"""
 
 
 class PostgresStore:
-    """Coordinate postgres store behavior within the db boundary."""
+    """Persist canonical artifacts and their relational traceability."""
 
     def __init__(self, settings: AppSettings) -> None:
-        """Execute the init operation within its declared architectural boundary.
-
-        Args:
-            settings (AppSettings): Validated settings that control this operation.
-        """
         self.settings = settings
 
+    @property
+    def checkpoint_dsn(self) -> str:
+        """Return the DSN used by langgraph-checkpoint-postgres."""
+        return self.settings.postgres.dsn
+
     def check(self) -> str:
-        """Check check.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Side Effects:
-            May create or atomically replace files in the configured artifact boundary.
-            May write transactional or derivative state through the configured store.
-        """
+        """Validate PostgreSQL or local development storage."""
         if self.settings.postgres.mode == "local_json":
             self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)
             return f"PASS postgres local_json path={self.settings.postgres.local_path}"
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute("select 1")
+            cursor.execute("SELECT 1")
             cursor.fetchone()
-        self.ensure_schema()
-        return "PASS postgres connectivity and schema"
-
-    @contextmanager
-    def document_identity_lock(self, project: str, document_id: str) -> Iterator[None]:
-        """Serialize semantic resolution and UUID allocation for one document lineage."""
-        lock_key = f"{project.strip()}:{document_id.strip()}"
-        if self.settings.postgres.mode == "local_json":
-            lock_name = stable_token(lock_key, length=24).lower() + ".lock"
-            lock_path = self.settings.postgres.local_path.parent / "locks" / lock_name
-            with LocalFileLock(lock_path):
-                yield
-            return
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "select pg_try_advisory_lock(hashtextextended(%s, 0))",
-                (lock_key,),
-            )
-            lock_result = cursor.fetchone()
-            if lock_result is None or not bool(lock_result[0]):
-                raise StoreUnavailableError(
-                    "document ingest already running for this project and document"
-                )
-            try:
-                yield
-            finally:
-                cursor.execute(
-                    "select pg_advisory_unlock(hashtextextended(%s, 0))",
-                    (lock_key,),
-                )
+        return "PASS postgres connectivity"
 
     def ensure_schema(self) -> None:
-        """Ensure schema.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
+        """Create the disposable-development baseline schema."""
         if self.settings.postgres.mode == "local_json":
             return
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    create table if not exists document_versions (
-                      document_version_id text primary key,
-                      document_id text not null,
-                      project text not null,
-                      version text not null,
-                      checksum text not null,
-                      manifest jsonb not null,
-                      created_at timestamptz not null default now(),
-                      unique(document_id, version)
-                    );
-                    create table if not exists schema_migrations (
-                      version text primary key,
-                      applied_at timestamptz not null default now()
-                    );
-                    create table if not exists ingestion_runs (
-                      run_id text primary key,
-                      document_version_id text not null,
-                      status text not null,
-                      payload jsonb not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists knowledge_graph_state (
-                      document_version_id text primary key,
-                      project text not null,
-                      document_id text not null,
-                      doc_version text not null,
-                      status text not null,
-                      run_id text not null default '',
-                      attempt integer not null default 0,
-                      failure_reason text,
-                      chunk_count integer not null default 0,
-                      assertion_count integer not null default 0,
-                      evidence_count integer not null default 0,
-                      extractor_fingerprint text not null default '',
-                      graph_schema_version text not null default '',
-                      started_at timestamptz,
-                      completed_at timestamptz,
-                      updated_at timestamptz not null default now()
-                    );
-                    create index if not exists knowledge_graph_state_project_idx
-                      on knowledge_graph_state(project, document_id);
-                    create table if not exists requirements_master (
-                      project text primary key,
-                      artifact_schema_version text not null,
-                      current_document_version_id text not null default '',
-                      run_id text not null default '',
-                      payload jsonb not null,
-                      checksum text not null,
-                      payload_revision integer not null default 1,
-                      updated_at timestamptz not null default now()
-                    );
-                    create table if not exists user_stories_master (
-                      project text primary key,
-                      artifact_schema_version text not null,
-                      current_document_version_id text not null default '',
-                      run_id text not null default '',
-                      payload jsonb not null,
-                      checksum text not null,
-                      payload_revision integer not null default 1,
-                      updated_at timestamptz not null default now()
-                    );
-                    create table if not exists test_scenarios_master (
-                      project text primary key,
-                      artifact_schema_version text not null,
-                      current_document_version_id text not null default '',
-                      run_id text not null default '',
-                      payload jsonb not null,
-                      checksum text not null,
-                      payload_revision integer not null default 1,
-                      updated_at timestamptz not null default now()
-                    );
-                    create table if not exists requirement_artifacts (
-                      artifact_path text primary key,
-                      document_version_id text not null,
-                      payload jsonb not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists user_story_artifacts (
-                      artifact_path text primary key,
-                      document_version_id text not null,
-                      payload jsonb not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists test_scenario_artifacts (
-                      artifact_path text primary key,
-                      document_version_id text not null,
-                      payload jsonb not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists user_stories (
-                      story_id text primary key,
-                      requirement_id text not null,
-                      requirement_revision_id text not null default '',
-                      source_req_id text,
-                      project text not null,
-                      document_id text not null,
-                      document_version_id text not null,
-                      doc_version text not null,
-                      origin_version text not null default '',
-                      title text not null,
-                      priority text not null,
-                      confidence double precision not null default 0,
-                      status text not null,
-                      origin text not null default 'generation',
-                      generation_context_run_id text not null default '',
-                      run_id text not null default '',
-                      payload jsonb not null,
-                      created_at timestamptz not null default now(),
-                      updated_at timestamptz not null default now()
-                    );
-                    create table if not exists user_story_evidence (
-                      evidence_id text primary key,
-                      story_id text not null,
-                      requirement_id text not null,
-                      document_version_id text not null,
-                      chunk_id text not null,
-                      run_id text not null default '',
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists test_scenarios (
-                      scenario_id text primary key,
-                      story_id text not null,
-                      requirement_id text not null,
-                      requirement_revision_id text not null default '',
-                      source_req_id text,
-                      project text not null,
-                      document_id text not null,
-                      document_version_id text not null,
-                      doc_version text not null,
-                      origin_version text not null default '',
-                      title text not null,
-                      scenario_type text not null,
-                      priority text not null,
-                      confidence double precision not null default 0,
-                      status text not null,
-                      origin text not null default 'generation',
-                      generation_context_run_id text not null default '',
-                      run_id text not null default '',
-                      payload jsonb not null,
-                      created_at timestamptz not null default now(),
-                      updated_at timestamptz not null default now()
-                    );
-                    create table if not exists test_scenario_evidence (
-                      evidence_id text primary key,
-                      scenario_id text not null,
-                      story_id text not null,
-                      requirement_id text not null,
-                      document_version_id text not null,
-                      chunk_id text not null,
-                      run_id text not null default '',
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists canonical_facts (
-                      canonical_fact_id text primary key,
-                      project text not null,
-                      document_id text not null,
-                      normalized_text text not null,
-                      representative_text text not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists fact_occurrences (
-                      fact_id text primary key,
-                      canonical_fact_id text not null,
-                      project text not null,
-                      document_id text not null,
-                      document_version_id text not null,
-                      chunk_id text not null,
-                      page integer,
-                      section text,
-                      quote text not null,
-                      start_char integer not null,
-                      end_char integer not null,
-                      source_path text not null,
-                      text text not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists requirements (
-                      requirement_id text primary key,
-                      project text not null,
-                      document_id text not null,
-                      requirement_key text not null,
-                      source_req_id text,
-                      id_generation_type text not null default 'generated',
-                      confidence double precision not null default 0,
-                      status text not null,
-                      first_seen_document_version_id text not null,
-                      active_revision_id text,
-                      superseded_by_version text,
-                      superseded_at timestamptz,
-                      created_at timestamptz not null default now(),
-                      updated_at timestamptz not null default now(),
-                      check (requirement_id <> '')
-                    );
-                    create table if not exists requirement_revisions (
-                      revision_id text primary key,
-                      requirement_id text not null,
-                      statement text not null,
-                      normalized_statement text not null,
-                      normalized_statement_hash text not null,
-                      semantic_signature text not null,
-                      requirement_type text not null,
-                      requirement_family text not null,
-                      priority text not null,
-                      source_req_id text,
-                      id_generation_type text not null default 'generated',
-                      confidence double precision not null default 0,
-                      status text not null,
-                      first_seen_document_version_id text not null,
-                      superseded_by_version text,
-                      superseded_at timestamptz,
-                      created_at timestamptz not null default now(),
-                      updated_at timestamptz not null default now(),
-                      check (revision_id <> ''),
-                      foreign key (requirement_id) references requirements(requirement_id)
-                    );
-                    create table if not exists requirement_identity_resolutions (
-                      resolution_id text primary key,
-                      project text not null,
-                      document_id text not null,
-                      document_version_id text not null,
-                      chunk_id text not null,
-                      incoming_fingerprint text not null,
-                      decision text not null,
-                      requirement_id text not null,
-                      revision_id text not null,
-                      payload jsonb not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create index if not exists requirement_identity_resolution_document_idx
-                      on requirement_identity_resolutions(
-                        project, document_id, document_version_id
-                      );
-                    create table if not exists requirement_evidence (
-                      evidence_id text primary key,
-                      requirement_id text not null,
-                      revision_id text not null,
-                      document_version_id text not null,
-                      chunk_id text not null,
-                      page integer,
-                      section text,
-                      quote text not null,
-                      start_char integer not null,
-                      end_char integer not null,
-                      source_path text not null,
-                      created_at timestamptz not null default now(),
-                      check (evidence_id <> ''),
-                      foreign key (requirement_id) references requirements(requirement_id),
-                      foreign key (revision_id) references requirement_revisions(revision_id),
-                      unique(revision_id, document_version_id, chunk_id,
-                             start_char, end_char, quote)
-                    );
-                    create table if not exists requirement_fact_links (
-                      evidence_id text not null,
-                      fact_id text not null,
-                      requirement_id text not null,
-                      revision_id text not null,
-                      created_at timestamptz not null default now(),
-                      primary key(evidence_id, fact_id)
-                    );
-                    create table if not exists requirement_delta_events (
-                      event_id text primary key,
-                      event_type text not null,
-                      requirement_id text not null,
-                      revision_id text,
-                      previous_revision_id text,
-                      superseded_by_revision_id text,
-                      document_version_id text not null,
-                      evidence_ids jsonb not null,
-                      impacted_artifact_types jsonb not null,
-                      payload jsonb not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists generation_context_runs (
-                      context_run_id text primary key,
-                      stage text not null,
-                      anchor_id text not null default '',
-                      project text not null default '',
-                      document_version_id text not null,
-                      source text not null default '',
-                      metrics jsonb not null,
-                      created_at timestamptz not null default now()
-                    );
-                    create table if not exists generation_context_items (
-                      context_run_id text not null,
-                      rank integer not null,
-                      item_type text not null default 'chunk',
-                      item_id text not null,
-                      source text not null,
-                      score double precision,
-                      selected boolean not null default true,
-                      created_at timestamptz not null default now(),
-                      primary key(context_run_id, rank)
-                    );
-                    create index if not exists generation_context_runs_anchor_idx
-                      on generation_context_runs(stage, anchor_id);
-                    create index if not exists generation_context_items_item_idx
-                      on generation_context_items(item_id);
-                    create index if not exists requirement_revisions_requirement_idx
-                      on requirement_revisions(requirement_id);
-                    create index if not exists requirement_evidence_revision_idx
-                      on requirement_evidence(revision_id);
-                    create index if not exists fact_occurrences_chunk_idx
-                      on fact_occurrences(chunk_id);
-                    create index if not exists user_stories_requirement_idx
-                      on user_stories(requirement_id);
-                    create index if not exists user_stories_document_version_idx
-                      on user_stories(document_version_id);
-                    create index if not exists test_scenarios_story_idx
-                      on test_scenarios(story_id);
-                    create index if not exists test_scenarios_requirement_idx
-                      on test_scenarios(requirement_id);
-                    create index if not exists test_scenarios_document_version_idx
-                      on test_scenarios(document_version_id);
-                    create index if not exists user_story_evidence_story_idx
-                      on user_story_evidence(story_id);
-                    create index if not exists user_story_evidence_chunk_idx
-                      on user_story_evidence(chunk_id);
-                    create index if not exists user_story_evidence_document_version_idx
-                      on user_story_evidence(document_version_id);
-                    create index if not exists test_scenario_evidence_scenario_idx
-                      on test_scenario_evidence(scenario_id);
-                    create index if not exists test_scenario_evidence_chunk_idx
-                      on test_scenario_evidence(chunk_id);
-                    create index if not exists test_scenario_evidence_document_version_idx
-                      on test_scenario_evidence(document_version_id);
-                    alter table user_stories
-                      add column if not exists requirement_revision_id text not null default '',
-                      add column if not exists source_req_id text,
-                      add column if not exists origin_version text not null default '',
-                      add column if not exists confidence double precision not null default 0,
-                      add column if not exists updated_at timestamptz not null default now();
-                    alter table test_scenarios
-                      add column if not exists requirement_revision_id text not null default '',
-                      add column if not exists source_req_id text,
-                      add column if not exists origin_version text not null default '',
-                      add column if not exists confidence double precision not null default 0,
-                      add column if not exists updated_at timestamptz not null default now();
-                    alter table requirements
-                      add column if not exists source_req_id text,
-                      add column if not exists id_generation_type text not null default 'generated',
-                      add column if not exists confidence double precision not null default 0,
-                      add column if not exists superseded_by_version text,
-                      add column if not exists superseded_at timestamptz;
-                    alter table requirement_revisions
-                      add column if not exists normalized_statement_hash text not null default '',
-                      add column if not exists semantic_signature text not null default '',
-                      add column if not exists requirement_family text not null default '',
-                      add column if not exists source_req_id text,
-                      add column if not exists id_generation_type text not null default 'generated',
-                      add column if not exists confidence double precision not null default 0,
-                      add column if not exists superseded_by_version text,
-                      add column if not exists superseded_at timestamptz;
-                    update requirement_revisions
-                    set normalized_statement_hash = md5(normalized_statement)
-                    where normalized_statement_hash = '';
-                    update requirement_revisions
-                    set requirement_family = lower(requirement_type)
-                    where requirement_family = '';
-                    create unique index if not exists requirement_exact_revision_idx
-                      on requirement_revisions(
-                        requirement_id, normalized_statement_hash, requirement_family
-                      );
-                    alter table generation_context_items
-                      add column if not exists assertion_id text,
-                      add column if not exists text_unit_id text,
-                      add column if not exists entity_id text,
-                      add column if not exists predicate text,
-                      add column if not exists hop_count integer,
-                      add column if not exists normalized_score double precision,
-                      add column if not exists reranker_score double precision,
-                      add column if not exists mandatory boolean not null default false,
-                      add column if not exists metadata_json jsonb not null default '{}'::jsonb;
-                    create index if not exists generation_context_items_assertion_idx
-                      on generation_context_items(assertion_id);
-                    alter table user_stories
-                      add column if not exists generation_context_run_id text not null default '';
-                    alter table test_scenarios
-                      add column if not exists generation_context_run_id text not null default '';
-                    create index if not exists user_stories_generation_context_idx
-                      on user_stories(generation_context_run_id);
-                    create index if not exists test_scenarios_generation_context_idx
-                      on test_scenarios(generation_context_run_id);
-                    do $$
-                    begin
-                      if not exists (
-                        select 1 from requirement_revisions
-                        where status = 'active'
-                        group by requirement_id having count(*) > 1
-                      ) then
-                        create unique index if not exists requirement_one_active_revision_idx
-                          on requirement_revisions(requirement_id)
-                          where status = 'active';
-                      end if;
-                    end $$;
-                    do $$
-                    begin
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'requirements_active_revision_fk'
-                      ) then
-                        alter table requirements add constraint requirements_active_revision_fk
-                          foreign key (active_revision_id)
-                          references requirement_revisions(revision_id)
-                          deferrable initially deferred not valid;
-                      end if;
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'user_stories_requirement_fk'
-                      ) then
-                        alter table user_stories add constraint user_stories_requirement_fk
-                          foreign key (requirement_id) references requirements(requirement_id)
-                          not valid;
-                      end if;
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'user_stories_revision_fk'
-                      ) then
-                        alter table user_stories add constraint user_stories_revision_fk
-                          foreign key (requirement_revision_id)
-                          references requirement_revisions(revision_id) not valid;
-                      end if;
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'test_scenarios_story_fk'
-                      ) then
-                        alter table test_scenarios add constraint test_scenarios_story_fk
-                          foreign key (story_id) references user_stories(story_id) not valid;
-                      end if;
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'test_scenarios_requirement_fk'
-                      ) then
-                        alter table test_scenarios add constraint test_scenarios_requirement_fk
-                          foreign key (requirement_id) references requirements(requirement_id)
-                          not valid;
-                      end if;
-                    end $$;
-                    -- Final contract migration: these legacy presentation aliases are
-                    -- intentionally dropped only after all application readers use
-                    -- canonical ids. This block is idempotent and transactional.
-                    alter table user_stories
-                      drop column if exists display_id,
-                      drop column if exists requirement_display_id;
-                    alter table user_story_evidence
-                      drop column if exists story_display_id,
-                      drop column if exists requirement_display_id;
-                    alter table test_scenarios
-                      drop column if exists display_id,
-                      drop column if exists story_display_id,
-                      drop column if exists requirement_display_id;
-                    alter table test_scenario_evidence
-                      drop column if exists scenario_display_id,
-                      drop column if exists story_display_id,
-                      drop column if exists requirement_display_id;
-                    alter table requirements drop column if exists display_id;
-                    alter table requirement_revisions drop column if exists display_id;
-                    alter table requirement_evidence
-                      drop column if exists requirement_display_id;
-                    alter table requirement_fact_links
-                      drop column if exists requirement_display_id;
-                    drop table if exists artifact_display_ids;
-                    drop table if exists display_id_counters;
-                    do $$
-                    begin
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'requirements_uuid7_format_check'
-                      ) then
-                        alter table requirements add constraint requirements_uuid7_format_check
-                          check (requirement_id ~
-                            '^REQ-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-                          not valid;
-                      end if;
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'requirement_revisions_uuid7_format_check'
-                      ) then
-                        alter table requirement_revisions add constraint
-                          requirement_revisions_uuid7_format_check
-                          check (revision_id ~
-                            '^REQREV-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-                          not valid;
-                      end if;
-                      if not exists (
-                        select 1 from pg_constraint
-                        where conname = 'requirement_evidence_uuid7_format_check'
-                      ) then
-                        alter table requirement_evidence add constraint
-                          requirement_evidence_uuid7_format_check
-                          check (evidence_id ~
-                            '^REQEVID-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-                          not valid;
-                      end if;
-                    end $$;
-                    -- Migration 0009 repairs migration 0006's lowercase-only regular
-                    -- expressions. Canonical UUIDv7 allocators emit uppercase UUID text,
-                    -- while application validation intentionally accepts either case.
-                    do $$
-                    begin
-                      if not exists (
-                        select 1 from schema_migrations
-                        where version = '0009_uuid7_case_insensitive_constraints'
-                      ) then
-                        alter table requirements
-                          drop constraint if exists requirements_uuid7_format_check;
-                        alter table requirements
-                          add constraint requirements_uuid7_format_check
-                          check (requirement_id ~*
-                            '^REQ-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-                          not valid;
-                        alter table requirement_revisions
-                          drop constraint if exists requirement_revisions_uuid7_format_check;
-                        alter table requirement_revisions
-                          add constraint requirement_revisions_uuid7_format_check
-                          check (revision_id ~*
-                            '^REQREV-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-                          not valid;
-                        alter table requirement_evidence
-                          drop constraint if exists requirement_evidence_uuid7_format_check;
-                        alter table requirement_evidence
-                          add constraint requirement_evidence_uuid7_format_check
-                          check (evidence_id ~*
-                            '^REQEVID-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-                          not valid;
-                      end if;
-                    end $$;
-                    insert into schema_migrations(version)
-                    values ('0001_version_lineage_inline'),
-                           ('0002_context_item_assertion_columns'),
-                           ('0003_generation_context_run_id'),
-                           ('0004_one_active_revision_per_requirement'),
-                           ('0005_contract_canonical_ids'),
-                           ('0006_uuid7_format_constraints'),
-                           ('0007_knowledge_graph_state'),
-                           ('0008_stage_master_projections'),
-                           ('0009_uuid7_case_insensitive_constraints')
-                    on conflict (version) do nothing;
-                    """
-                )
-                self._validate_schema(cursor)
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._assert_baseline_compatible(cursor)
+            cursor.execute(_SCHEMA_SQL)
             connection.commit()
 
     def reset_schema(self) -> str:
-        """Execute the reset schema operation within its declared architectural boundary.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
+        """Explicitly drop and recreate managed development tables."""
         if self.settings.postgres.mode == "local_json":
-            if self.settings.postgres.local_path.exists():
-                self.settings.postgres.local_path.unlink()
-            return f"RESET postgres local_json path={self.settings.postgres.local_path}"
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("drop table if exists " + ", ".join(_MANAGED_TABLES) + " cascade")
-            connection.commit()
-        self.ensure_schema()
-        return f"RESET postgres schema tables={len(_MANAGED_TABLES)}"
-
-    def assert_version_allowed(self, manifest: DocumentManifest, replace_version: bool) -> None:
-        """Assert version allowed against the enforced runtime contract.
-
-        Args:
-            manifest (DocumentManifest): Manifest required by the operation's typed contract.
-            replace_version (bool): Replace version required by the operation's typed contract.
-
-        Raises:
-            VersionConflictError: If validated inputs or required dependencies cannot satisfy the
-            contract.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            existing = self._local_document_versions()
-            key = (manifest.document_id, manifest.version)
-            checksum = existing.get(key)
-            if checksum and checksum != manifest.source_checksum and not replace_version:
-                raise VersionConflictError(
-                    "same document/version already exists with a different checksum; "
-                    "use --replace-version to overwrite"
-                )
-            return
+            self.settings.postgres.local_path.unlink(missing_ok=True)
+            return "PASS postgres local_json reset"
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "select checksum from document_versions where document_id=%s and version=%s",
-                (manifest.document_id, manifest.version),
-            )
-            row = cursor.fetchone()
-        if row and row[0] != manifest.source_checksum and not replace_version:
-            raise VersionConflictError(
-                "same document/version already exists with a different checksum; "
-                "use --replace-version to overwrite"
-            )
+            constraint_count, table_count = self._drop_disposable_schema(cursor)
+            cursor.execute(_SCHEMA_SQL)
+            connection.commit()
+        from langgraph.checkpoint.postgres import PostgresSaver
 
-    def load_requirement_revision_snapshot(
+        with PostgresSaver.from_conn_string(self.settings.postgres.dsn) as saver:
+            saver.setup()
+        return (
+            "PASS postgres simplified schema reset "
+            f"constraints_dropped={constraint_count} tables_dropped={table_count}"
+        )
+
+    @contextmanager
+    def discovery_lease(self, project: str) -> Iterator[None]:
+        """Serialize requirement discovery for a project."""
+        if self.settings.postgres.mode == "local_json":
+            yield
+            return
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_lock(hashtext(%s))", (f"discovery:{project}",))
+            yield
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(hashtext(%s))", (f"discovery:{project}",))
+            connection.close()
+
+    def record_run(
         self,
         *,
-        project: str,
-        document_id: str,
-    ) -> dict[str, RequirementRevisionSnapshot]:
-        """Load requirement revision snapshot within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_id (str): Canonical document id used as a safe operational anchor.
-
-        Returns:
-            dict[str, RequirementRevisionSnapshot]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            return self._local_requirement_revision_snapshot(project, document_id)
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                select r.requirement_id,
-                       rr.revision_id,
-                       rr.statement,
-                       rr.normalized_statement,
-                       rr.requirement_type,
-                       rr.semantic_signature
-                from requirements r
-                join requirement_revisions rr on rr.revision_id = r.active_revision_id
-                where r.project = %s
-                  and r.document_id = %s
-                  and r.status = 'active'
-                  and rr.status = 'active'
-                """,
-                (project, document_id),
-            )
-            rows = cursor.fetchall()
-        snapshot = {
-            str(row[0]): RequirementRevisionSnapshot(
-                requirement_id=str(row[0]),
-                revision_id=str(row[1]),
-                statement=str(row[2]),
-                normalized_statement=str(row[3]),
-                requirement_type=str(row[4]),
-                semantic_signature=str(row[5]),
-            )
-            for row in rows
-        }
-        if not snapshot:
-            return snapshot
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                select re.requirement_id, re.evidence_id, re.document_version_id,
-                       re.chunk_id, re.quote, re.start_char, re.end_char
-                from requirement_evidence re
-                join requirements r on r.requirement_id = re.requirement_id
-                where r.project = %s and r.document_id = %s
-                  and r.active_revision_id = re.revision_id
-                """,
-                (project, document_id),
-            )
-            evidence_rows = cursor.fetchall()
-        for row in evidence_rows:
-            requirement = snapshot.get(str(row[0]))
-            if requirement is None:
-                continue
-            requirement.evidence_ids[
-                requirement_evidence_occurrence_key(
-                    document_version_identifier=str(row[2]),
-                    chunk_identifier=str(row[3]),
-                    quote=str(row[4]),
-                    start_char=int(row[5]),
-                    end_char=int(row[6]),
-                )
-            ] = str(row[1])
-        return snapshot
-
-    def persist_manifest(self, manifest: DocumentManifest) -> None:
-        """Persist manifest through the owning storage boundary.
-
-        Args:
-            manifest (DocumentManifest): Manifest required by the operation's typed contract.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        manifest_payload = _manifest_reference_payload(manifest)
-        if self.settings.postgres.mode == "local_json":
-            self._upsert_local(
-                "document_version",
-                manifest.document_version_id,
-                {"kind": "document_version", "manifest": manifest_payload},
-            )
-            return
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    insert into document_versions
-                      (document_version_id, document_id, project, version, checksum, manifest)
-                    values (%s, %s, %s, %s, %s, %s)
-                    on conflict (document_version_id) do update set manifest=excluded.manifest
-                    """,
-                    (
-                        manifest.document_version_id,
-                        manifest.document_id,
-                        manifest.project,
-                        manifest.version,
-                        manifest.source_checksum,
-                        json.dumps(manifest_payload),
-                    ),
-                )
-            connection.commit()
-
-    def persist_artifact(
-        self, artifact: RequirementArtifact, artifact_path: str, run_id: str
-    ) -> RequirementArtifact:
-        """Persist artifact through the owning storage boundary.
-
-        Args:
-            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
-            artifact_path (str): Filesystem location authorized for this operation.
-            run_id (str): Canonical run id used as a safe operational anchor.
-
-        Returns:
-            RequirementArtifact: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-
-        Invariant:
-            Callers MUST hold ``document_identity_lock(project, document_id)`` for this document
-            lineage. That session-level advisory lock is the sole serializer for a document's
-            requirement persistence and rejects a second concurrent ingest of the same document,
-            so no additional per-write advisory lock is taken here. Acquiring one on this method's
-            separate connection would self-deadlock against the caller's already-held session lock
-            (same key, shared advisory-lock space).
-        """
-        active_by_requirement = validate_requirement_revision_lifecycle(artifact.requirements)
-        public_payload = build_canonical_requirements_artifact(artifact).model_dump(mode="json")
-        if self.settings.postgres.mode == "local_json":
-            self._upsert_local(
-                "requirement_artifact",
-                artifact.document_version_id,
-                {
-                    "kind": "requirement_artifact",
-                    "run_id": run_id,
-                    "artifact_path": artifact_path,
-                    "artifact": public_payload,
-                },
-            )
-            self._persist_requirement_ledger_local(artifact, active_by_requirement)
-            self.refresh_stage_master(
-                project=artifact.project,
-                stage="requirements",
-                document_id=artifact.document_id,
-                current_document_version_id=artifact.document_version_id,
-                run_id=run_id,
-            )
-            return artifact
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                # No advisory lock here: the caller holds document_identity_lock for this
-                # lineage (see Invariant above). Re-locking the same key on this separate
-                # connection would self-deadlock against the caller's held session lock.
-                cursor.execute(
-                    """
-                    insert into requirement_artifacts
-                      (artifact_path, document_version_id, payload)
-                    values (%s, %s, %s)
-                    on conflict (artifact_path) do update set payload=excluded.payload
-                    """,
-                    (
-                        artifact_path,
-                        artifact.document_version_id,
-                        json.dumps(public_payload),
-                    ),
-                )
-                self._persist_requirement_ledger_postgres(
-                    cursor,
-                    artifact,
-                    active_by_requirement,
-                )
-                self.refresh_stage_master(
-                    project=artifact.project,
-                    stage="requirements",
-                    document_id=artifact.document_id,
-                    current_document_version_id=artifact.document_version_id,
-                    run_id=run_id,
-                    cursor=cursor,
-                )
-            connection.commit()
-        return artifact
-
-    def load_requirement_artifact_payload(
-        self,
-        artifact_path: str | None = None,
-        document_version_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Load requirement artifact payload within the authorized project and version scope.
-
-        Args:
-            artifact_path (str | None): Filesystem location authorized for this operation.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            dict[str, Any] | None: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if artifact_path is None and document_version_id is None:
-            raise ValueError("artifact_path or document_version_id is required")
-        if self.settings.postgres.mode == "local_json":
-            return self._local_requirement_artifact_payload(
-                artifact_path=artifact_path,
-                document_version_id=document_version_id,
-            )
-
-        with self._connect() as connection, connection.cursor() as cursor:
-            if artifact_path is not None:
-                cursor.execute(
-                    """
-                    select payload from requirement_artifacts
-                    where artifact_path = %s
-                    """,
-                    (artifact_path,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return _artifact_payload_from_row(row[0])
-            if document_version_id is not None:
-                cursor.execute(
-                    """
-                    select payload from requirement_artifacts
-                    where document_version_id = %s
-                    order by created_at desc
-                    limit 1
-                    """,
-                    (document_version_id,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return _artifact_payload_from_row(row[0])
-        return None
-
-    def persist_user_story_artifact(
-        self,
-        artifact: UserStoryArtifact | UserStoryBuildResult,
-        artifact_path: str,
         run_id: str,
-    ) -> UserStoryBuildResult:
-        """Persist user story artifact through the owning storage boundary.
-
-        Args:
-            artifact (UserStoryArtifact | UserStoryBuildResult): Artifact required by the
-                                                                 operation's
-                                                                 typed contract.
-            artifact_path (str): Filesystem location authorized for this operation.
-            run_id (str): Canonical run id used as a safe operational anchor.
-
-        Returns:
-            UserStoryBuildResult: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        result = _coerce_user_story_build_result(artifact)
-        if self.settings.postgres.mode == "local_json":
-            payload = result.artifact.model_dump(mode="json")
-            self._upsert_local(
-                "user_story_artifact",
-                result.artifact.document_version_id,
-                {
-                    "kind": "user_story_artifact",
-                    "run_id": run_id,
-                    "artifact_path": artifact_path,
-                    "artifact": payload,
-                },
-            )
-            self._persist_user_stories_local(result, run_id)
-            self.refresh_stage_master(
-                project=result.artifact.project,
-                stage="user_stories",
-                current_document_version_id=result.artifact.document_version_id,
-                run_id=run_id,
-            )
-            return result
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                payload = result.artifact.model_dump(mode="json")
-                cursor.execute(
-                    """
-                    insert into user_story_artifacts
-                      (artifact_path, document_version_id, payload)
-                    values (%s, %s, %s)
-                    on conflict (artifact_path) do update set payload=excluded.payload
-                    """,
-                    (artifact_path, result.artifact.document_version_id, json.dumps(payload)),
-                )
-                self._persist_user_stories_postgres(cursor, result, run_id)
-                self.refresh_stage_master(
-                    project=result.artifact.project,
-                    stage="user_stories",
-                    current_document_version_id=result.artifact.document_version_id,
-                    run_id=run_id,
-                    cursor=cursor,
-                )
-            connection.commit()
-        return result
-
-    def load_user_story_artifact_payload(
-        self,
-        artifact_path: str | None = None,
-        document_version_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Load user story artifact payload within the authorized project and version scope.
-
-        Args:
-            artifact_path (str | None): Filesystem location authorized for this operation.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            dict[str, Any] | None: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if artifact_path is None and document_version_id is None:
-            raise ValueError("artifact_path or document_version_id is required")
-        if self.settings.postgres.mode == "local_json":
-            return self._local_user_story_artifact_payload(
-                artifact_path=artifact_path,
-                document_version_id=document_version_id,
-            )
-        with self._connect() as connection, connection.cursor() as cursor:
-            if artifact_path is not None:
-                cursor.execute(
-                    "select payload from user_story_artifacts where artifact_path = %s",
-                    (artifact_path,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return _artifact_payload_from_row(row[0])
-            if document_version_id is not None:
-                cursor.execute(
-                    """
-                    select payload from user_story_artifacts
-                    where document_version_id = %s
-                    order by created_at desc
-                    limit 1
-                    """,
-                    (document_version_id,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return _artifact_payload_from_row(row[0])
-        return None
-
-    def _persist_user_stories_postgres(
-        self, cursor: Any, artifact: UserStoryBuildResult, run_id: str
-    ) -> None:
-        """Persist user stories postgres through the owning storage boundary.
-
-        Args:
-            cursor (Any): Cursor required by the operation's typed contract.
-            artifact (UserStoryBuildResult): Artifact required by the operation's typed contract.
-            run_id (str): Canonical run id used as a safe operational anchor.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        for story_id, record in artifact.records.items():
-            cursor.execute(
-                """
-                insert into user_stories
-                  (story_id, requirement_id, requirement_revision_id, source_req_id,
-                   project, document_id,
-                   document_version_id, doc_version, origin_version, title, priority,
-                   confidence, status, origin, generation_context_run_id, run_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (story_id) do update
-                set requirement_revision_id = excluded.requirement_revision_id,
-                    source_req_id = excluded.source_req_id,
-                    document_version_id = excluded.document_version_id,
-                    doc_version = excluded.doc_version,
-                    origin_version = excluded.origin_version,
-                    title = excluded.title,
-                    priority = excluded.priority,
-                    confidence = excluded.confidence,
-                    status = excluded.status,
-                    origin = excluded.origin,
-                    generation_context_run_id = excluded.generation_context_run_id,
-                    run_id = excluded.run_id,
-                    payload = excluded.payload,
-                    updated_at = now()
-                """,
-                (
-                    story_id,
-                    record.requirement_id,
-                    record.requirement_revision_id,
-                    record.source_req_id,
-                    record.project,
-                    record.document_id,
-                    record.document_version_id,
-                    record.doc_version,
-                    record.origin_version,
-                    record.title,
-                    record.priority,
-                    record.confidence,
-                    record.status,
-                    record.origin,
-                    record.generation_context_run_id,
-                    run_id,
-                    json.dumps(record.model_dump(mode="json")),
-                ),
-            )
-            for chunk_id in record.evidence_chunk_ids:
-                cursor.execute(
-                    """
-                    insert into user_story_evidence
-                      (evidence_id, story_id, requirement_id,
-                       document_version_id, chunk_id, run_id)
-                    values (%s, %s, %s, %s, %s, %s)
-                    on conflict (evidence_id) do nothing
-                    """,
-                    (
-                        user_story_evidence_id(
-                            story_identifier=story_id,
-                            document_version_identifier=record.document_version_id,
-                            chunk_identifier=chunk_id,
-                        ),
-                        story_id,
-                        record.requirement_id,
-                        record.document_version_id,
-                        chunk_id,
-                        run_id,
-                    ),
-                )
-
-    def _persist_user_stories_local(self, artifact: UserStoryBuildResult, run_id: str) -> None:
-        """Persist user stories local through the owning storage boundary.
-
-        Args:
-            artifact (UserStoryBuildResult): Artifact required by the operation's typed contract.
-            run_id (str): Canonical run id used as a safe operational anchor.
-        """
-        for story_id, record in artifact.records.items():
-            self._upsert_local(
-                "user_story",
-                story_id,
-                {
-                    "kind": "user_story",
-                    "story_id": story_id,
-                    "requirement_id": record.requirement_id,
-                    "requirement_revision_id": record.requirement_revision_id,
-                    "source_req_id": record.source_req_id,
-                    "project": record.project,
-                    "document_id": record.document_id,
-                    "document_version_id": record.document_version_id,
-                    "doc_version": record.doc_version,
-                    "origin_version": record.origin_version,
-                    "title": record.title,
-                    "priority": record.priority,
-                    "confidence": record.confidence,
-                    "status": record.status,
-                    "origin": record.origin,
-                    "generation_context_run_id": record.generation_context_run_id,
-                    "run_id": run_id,
-                    "user_story": record.model_dump(mode="json"),
-                },
-            )
-            for chunk_id in record.evidence_chunk_ids:
-                self._upsert_local(
-                    "user_story_evidence",
-                    user_story_evidence_id(
-                        story_identifier=story_id,
-                        document_version_identifier=record.document_version_id,
-                        chunk_identifier=chunk_id,
-                    ),
-                    {
-                        "kind": "user_story_evidence",
-                        "story_id": story_id,
-                        "requirement_id": record.requirement_id,
-                        "document_version_id": record.document_version_id,
-                        "chunk_id": chunk_id,
-                        "run_id": run_id,
-                    },
-                )
-
-    def _local_user_story_artifact_payload(
-        self,
-        *,
-        artifact_path: str | None,
-        document_version_id: str | None,
-    ) -> dict[str, Any] | None:
-        """Execute the local user story artifact payload operation within its declared architectural
-        boundary.
-
-        Args:
-            artifact_path (str | None): Filesystem location authorized for this operation.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            dict[str, Any] | None: The typed result produced by the operation.
-        """
-        rows = [row for row in self._read_local_rows() if row.get("kind") == "user_story_artifact"]
-        if artifact_path is not None:
-            for row in reversed(rows):
-                if row.get("artifact_path") == artifact_path:
-                    artifact = row.get("artifact")
-                    return dict(artifact) if isinstance(artifact, dict) else None
-        if document_version_id is not None:
-            for row in reversed(rows):
-                if row.get("_local_key") == document_version_id:
-                    artifact = row.get("artifact")
-                    return dict(artifact) if isinstance(artifact, dict) else None
-        return None
-
-    def persist_test_scenario_artifact(
-        self,
-        artifact: TestScenarioArtifact | TestScenarioBuildResult,
-        artifact_path: str,
-        run_id: str,
-    ) -> TestScenarioBuildResult:
-        """Persist test scenario artifact through the owning storage boundary.
-
-        Args:
-            artifact (TestScenarioArtifact | TestScenarioBuildResult): Artifact required by the
-                                                                       operation's typed contract.
-            artifact_path (str): Filesystem location authorized for this operation.
-            run_id (str): Canonical run id used as a safe operational anchor.
-
-        Returns:
-            TestScenarioBuildResult: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        result = _coerce_test_scenario_build_result(artifact)
-        if self.settings.postgres.mode == "local_json":
-            payload = result.artifact.model_dump(mode="json")
-            self._upsert_local(
-                "test_scenario_artifact",
-                result.artifact.document_version_id,
-                {
-                    "kind": "test_scenario_artifact",
-                    "run_id": run_id,
-                    "artifact_path": artifact_path,
-                    "artifact": payload,
-                },
-            )
-            self._persist_test_scenarios_local(result, run_id)
-            self.refresh_stage_master(
-                project=result.artifact.project,
-                stage="test_scenarios",
-                current_document_version_id=result.artifact.document_version_id,
-                run_id=run_id,
-            )
-            return result
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                payload = result.artifact.model_dump(mode="json")
-                cursor.execute(
-                    """
-                    insert into test_scenario_artifacts
-                      (artifact_path, document_version_id, payload)
-                    values (%s, %s, %s)
-                    on conflict (artifact_path) do update set payload=excluded.payload
-                    """,
-                    (artifact_path, result.artifact.document_version_id, json.dumps(payload)),
-                )
-                self._persist_test_scenarios_postgres(cursor, result, run_id)
-                self.refresh_stage_master(
-                    project=result.artifact.project,
-                    stage="test_scenarios",
-                    current_document_version_id=result.artifact.document_version_id,
-                    run_id=run_id,
-                    cursor=cursor,
-                )
-            connection.commit()
-        return result
-
-    def load_test_scenario_artifact_payload(
-        self,
-        artifact_path: str | None = None,
-        document_version_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Load test scenario artifact payload within the authorized project and version scope.
-
-        Args:
-            artifact_path (str | None): Filesystem location authorized for this operation.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            dict[str, Any] | None: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if artifact_path is None and document_version_id is None:
-            raise ValueError("artifact_path or document_version_id is required")
-        if self.settings.postgres.mode == "local_json":
-            return self._local_test_scenario_artifact_payload(
-                artifact_path=artifact_path,
-                document_version_id=document_version_id,
-            )
-        with self._connect() as connection, connection.cursor() as cursor:
-            if artifact_path is not None:
-                cursor.execute(
-                    "select payload from test_scenario_artifacts where artifact_path = %s",
-                    (artifact_path,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return _artifact_payload_from_row(row[0])
-            if document_version_id is not None:
-                cursor.execute(
-                    """
-                    select payload from test_scenario_artifacts
-                    where document_version_id = %s
-                    order by created_at desc
-                    limit 1
-                    """,
-                    (document_version_id,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return _artifact_payload_from_row(row[0])
-        return None
-
-    def _persist_test_scenarios_postgres(
-        self,
-        cursor: Any,
-        artifact: TestScenarioBuildResult,
-        run_id: str,
-    ) -> None:
-        """Persist test scenarios postgres through the owning storage boundary.
-
-        Args:
-            cursor (Any): Cursor required by the operation's typed contract.
-            artifact (TestScenarioBuildResult): Artifact required by the operation's typed contract.
-            run_id (str): Canonical run id used as a safe operational anchor.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        for scenario_id, record in artifact.records.items():
-            cursor.execute(
-                """
-                insert into test_scenarios
-                  (scenario_id, story_id, requirement_id, project, document_id,
-                   document_version_id,
-                   doc_version, requirement_revision_id, source_req_id, origin_version,
-                   title, scenario_type, priority, confidence, status, origin,
-                   generation_context_run_id, run_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s)
-                on conflict (scenario_id) do update
-                set requirement_revision_id = excluded.requirement_revision_id,
-                    source_req_id = excluded.source_req_id,
-                    document_version_id = excluded.document_version_id,
-                    doc_version = excluded.doc_version,
-                    origin_version = excluded.origin_version,
-                    title = excluded.title,
-                    scenario_type = excluded.scenario_type,
-                    priority = excluded.priority,
-                    confidence = excluded.confidence,
-                    status = excluded.status,
-                    origin = excluded.origin,
-                    generation_context_run_id = excluded.generation_context_run_id,
-                    run_id = excluded.run_id,
-                    payload = excluded.payload,
-                    updated_at = now()
-                """,
-                (
-                    scenario_id,
-                    record.story_id,
-                    record.requirement_id,
-                    record.project,
-                    record.document_id,
-                    record.document_version_id,
-                    record.doc_version,
-                    record.requirement_revision_id,
-                    record.source_req_id,
-                    record.origin_version,
-                    record.title,
-                    record.scenario_type,
-                    record.priority,
-                    record.confidence,
-                    record.status,
-                    record.origin,
-                    record.generation_context_run_id,
-                    run_id,
-                    json.dumps(record.model_dump(mode="json")),
-                ),
-            )
-            for chunk_id in record.evidence_chunk_ids:
-                cursor.execute(
-                    """
-                    insert into test_scenario_evidence
-                      (evidence_id, scenario_id, story_id, requirement_id,
-                       document_version_id, chunk_id, run_id)
-                    values (%s, %s, %s, %s, %s, %s, %s)
-                    on conflict (evidence_id) do nothing
-                    """,
-                    (
-                        test_scenario_evidence_id(
-                            scenario_identifier=scenario_id,
-                            document_version_identifier=record.document_version_id,
-                            chunk_identifier=chunk_id,
-                        ),
-                        scenario_id,
-                        record.story_id,
-                        record.requirement_id,
-                        record.document_version_id,
-                        chunk_id,
-                        run_id,
-                    ),
-                )
-
-    def _persist_test_scenarios_local(self, artifact: TestScenarioBuildResult, run_id: str) -> None:
-        """Persist test scenarios local through the owning storage boundary.
-
-        Args:
-            artifact (TestScenarioBuildResult): Artifact required by the operation's typed contract.
-            run_id (str): Canonical run id used as a safe operational anchor.
-        """
-        for scenario_id, record in artifact.records.items():
-            self._upsert_local(
-                "test_scenario",
-                scenario_id,
-                {
-                    "kind": "test_scenario",
-                    "scenario_id": scenario_id,
-                    "story_id": record.story_id,
-                    "requirement_id": record.requirement_id,
-                    "requirement_revision_id": record.requirement_revision_id,
-                    "source_req_id": record.source_req_id,
-                    "project": record.project,
-                    "document_id": record.document_id,
-                    "document_version_id": record.document_version_id,
-                    "doc_version": record.doc_version,
-                    "origin_version": record.origin_version,
-                    "title": record.title,
-                    "scenario_type": record.scenario_type,
-                    "priority": record.priority,
-                    "confidence": record.confidence,
-                    "status": record.status,
-                    "origin": record.origin,
-                    "generation_context_run_id": record.generation_context_run_id,
-                    "run_id": run_id,
-                    "test_scenario": record.model_dump(mode="json"),
-                },
-            )
-            for chunk_id in record.evidence_chunk_ids:
-                self._upsert_local(
-                    "test_scenario_evidence",
-                    test_scenario_evidence_id(
-                        scenario_identifier=scenario_id,
-                        document_version_identifier=record.document_version_id,
-                        chunk_identifier=chunk_id,
-                    ),
-                    {
-                        "kind": "test_scenario_evidence",
-                        "scenario_id": scenario_id,
-                        "story_id": record.story_id,
-                        "requirement_id": record.requirement_id,
-                        "document_version_id": record.document_version_id,
-                        "chunk_id": chunk_id,
-                        "run_id": run_id,
-                    },
-                )
-
-    def _local_test_scenario_artifact_payload(
-        self,
-        *,
-        artifact_path: str | None,
-        document_version_id: str | None,
-    ) -> dict[str, Any] | None:
-        """Execute the local test scenario artifact payload operation within its declared
-        architectural boundary.
-
-        Args:
-            artifact_path (str | None): Filesystem location authorized for this operation.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            dict[str, Any] | None: The typed result produced by the operation.
-        """
-        rows = [
-            row for row in self._read_local_rows() if row.get("kind") == "test_scenario_artifact"
-        ]
-        if artifact_path is not None:
-            for row in reversed(rows):
-                if row.get("artifact_path") == artifact_path:
-                    artifact = row.get("artifact")
-                    return dict(artifact) if isinstance(artifact, dict) else None
-        if document_version_id is not None:
-            for row in reversed(rows):
-                if row.get("_local_key") == document_version_id:
-                    artifact = row.get("artifact")
-                    return dict(artifact) if isinstance(artifact, dict) else None
-        return None
-
-    def load_coverage_status(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Per-requirement coverage: no_story / story_covered / scenario_covered.
-
-        Computed purely from existing relational columns (`user_stories.requirement_id`,
-        `test_scenarios.story_id`); no coverage table required.
-        """
-        if self.settings.postgres.mode == "local_json":
-            return self._local_coverage_status(
-                project=project, document_version_id=document_version_id
-            )
-        with self._connect() as connection, connection.cursor() as cursor:
-            # Denominator = active requirement lineages for the project. When a
-            # document version is requested, scope membership through evidence
-            # *presence in that version* (distinct requirement_evidence rows), not
-            # first_seen_document_version_id, because a lineage that first appeared
-            # in an earlier version can legitimately recur in a later one.
-            if document_version_id is not None:
-                cursor.execute(
-                    """
-                    select r.requirement_id, r.status
-                    from requirements r
-                    where r.project = %s
-                      and r.status = 'active'
-                      and exists (
-                          select 1 from requirement_evidence re
-                          where re.requirement_id = r.requirement_id
-                            and re.document_version_id = %s
-                      )
-                    """,
-                    (project, document_version_id),
-                )
-            else:
-                cursor.execute(
-                    "select requirement_id, status from requirements "
-                    "where project = %s and status = 'active'",
-                    (project,),
-                )
-            requirements = [(str(r[0]), str(r[1])) for r in cursor.fetchall()]
-
-            story_sql = (
-                "select story_id, requirement_id from user_stories "
-                "where project = %s and status = 'active'"
-            )
-            story_params: list[str] = [project]
-            if document_version_id is not None:
-                story_sql += " and document_version_id = %s"
-                story_params.append(document_version_id)
-            cursor.execute(story_sql, tuple(story_params))
-            stories = [(str(r[0]), str(r[1])) for r in cursor.fetchall()]
-
-            scenario_sql = (
-                "select story_id from test_scenarios where project = %s and status = 'active'"
-            )
-            scenario_params: list[str] = [project]
-            if document_version_id is not None:
-                scenario_sql += " and document_version_id = %s"
-                scenario_params.append(document_version_id)
-            cursor.execute(scenario_sql, tuple(scenario_params))
-            scenario_story_ids = [str(r[0]) for r in cursor.fetchall()]
-        return _compute_coverage(requirements, stories, scenario_story_ids)
-
-    def load_coverage_report(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None = None,
-    ) -> CoverageReport:
-        """Strict per-requirement coverage with a deterministic summary rollup.
-
-        Identical version-scoping semantics to :meth:`load_coverage_status` in
-        both PostgreSQL and local-JSON modes.
-        """
-        rows = self.load_coverage_status(project=project, document_version_id=document_version_id)
-        return build_coverage_report(
-            project=project,
-            document_version_id=document_version_id,
-            rows=rows,
-        )
-
-    def _local_coverage_status(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None,
-    ) -> list[dict[str, Any]]:
-        """Execute the local coverage status operation within its declared architectural boundary.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-        """
-        rows = self._read_local_rows()
-        requirement_ids_in_version: set[str] | None = None
-        if document_version_id is not None:
-            requirement_ids_in_version = {
-                str(row.get("requirement_id"))
-                for row in rows
-                if row.get("kind") == "requirement_evidence"
-                and row.get("project") == project
-                and row.get("document_version_id") == document_version_id
-            }
-        requirements = [
-            (str(row.get("requirement_id")), str(row.get("status", "active")))
-            for row in rows
-            if row.get("kind") == "requirement"
-            and row.get("project") == project
-            and str(row.get("status", "active")) == "active"
-            and (
-                requirement_ids_in_version is None
-                or str(row.get("requirement_id")) in requirement_ids_in_version
-            )
-        ]
-
-        def _matches_version(row: dict[str, Any]) -> bool:
-            """Execute the matches version operation within its declared architectural boundary.
-
-            Args:
-                row (dict[str, Any]): Validated structured data for the operation.
-
-            Returns:
-                bool: The typed result produced by the operation.
-            """
-            return (
-                document_version_id is None or row.get("document_version_id") == document_version_id
-            )
-
-        stories = [
-            (str(row.get("story_id")), str(row.get("requirement_id")))
-            for row in rows
-            if row.get("kind") == "user_story"
-            and row.get("project") == project
-            and row.get("status", "active") == "active"
-            and _matches_version(row)
-        ]
-        scenario_story_ids = [
-            str(row.get("story_id"))
-            for row in rows
-            if row.get("kind") == "test_scenario"
-            and row.get("project") == project
-            and row.get("status", "active") == "active"
-            and _matches_version(row)
-        ]
-        return _compute_coverage(requirements, stories, scenario_story_ids)
-
-    def upsert_requirement(
-        self,
-        artifact: RequirementArtifact,
-        artifact_path: str,
-        run_id: str,
-    ) -> None:
-        """Execute the upsert requirement operation within its declared architectural boundary.
-
-        Args:
-            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
-            artifact_path (str): Filesystem location authorized for this operation.
-            run_id (str): Canonical run id used as a safe operational anchor.
-        """
-        self.persist_artifact(artifact, artifact_path, run_id)
-
-    def upsert_user_story(
-        self,
-        artifact: UserStoryArtifact,
-        artifact_path: str,
-        run_id: str,
-    ) -> None:
-        """Execute the upsert user story operation within its declared architectural boundary.
-
-        Args:
-            artifact (UserStoryArtifact): Artifact required by the operation's typed contract.
-            artifact_path (str): Filesystem location authorized for this operation.
-            run_id (str): Canonical run id used as a safe operational anchor.
-        """
-        self.persist_user_story_artifact(artifact, artifact_path, run_id)
-
-    def upsert_test_scenario(
-        self,
-        artifact: TestScenarioArtifact,
-        artifact_path: str,
-        run_id: str,
-    ) -> None:
-        """Execute the upsert test scenario operation within its declared architectural boundary.
-
-        Args:
-            artifact (TestScenarioArtifact): Artifact required by the operation's typed contract.
-            artifact_path (str): Filesystem location authorized for this operation.
-            run_id (str): Canonical run id used as a safe operational anchor.
-        """
-        self.persist_test_scenario_artifact(artifact, artifact_path, run_id)
-
-    def mark_requirement_superseded(
-        self,
-        *,
-        requirement_id: str,
-        revision_id: str,
-        superseded_by_version: str,
-    ) -> None:
-        """Execute the mark requirement superseded operation within its declared architectural
-        boundary.
-
-        Args:
-            requirement_id (str): Canonical requirement id used as a safe operational anchor.
-            revision_id (str): Canonical revision id used as a safe operational anchor.
-            superseded_by_version (str): Superseded by version required by the operation's typed
-                                         contract.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            self._update_local_revision_status(revision_id, "superseded")
-            return
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    update requirement_revisions
-                    set status = 'superseded',
-                        superseded_by_version = %s,
-                        superseded_at = now(),
-                        updated_at = now()
-                    where requirement_id = %s and revision_id = %s
-                    """,
-                    (superseded_by_version, requirement_id, revision_id),
-                )
-            connection.commit()
-
-    def hard_delete_requirement(self, requirement_id: str) -> None:
-        """
-        Delete strictly outdated requirement.
-        Child user stories and test scenarios are removed in the same transaction.
-        TODO: Add approval gate before destructive cascade delete.
-        """
-        if self.settings.postgres.mode == "local_json":
-            self._hard_delete_requirement_local(requirement_id)
-            return
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from test_scenario_evidence where requirement_id = %s",
-                    (requirement_id,),
-                )
-                delete_tables = (
-                    "test_scenarios",
-                    "user_story_evidence",
-                    "user_stories",
-                    "requirement_fact_links",
-                    "requirement_evidence",
-                    "requirement_delta_events",
-                    "requirement_revisions",
-                    "requirements",
-                )
-                for table_name in delete_tables:
-                    cursor.execute(
-                        f"delete from {table_name} where requirement_id = %s",
-                        (requirement_id,),
-                    )
-            connection.commit()
-
-    def load_requirements_for_generation(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None = None,
-    ) -> list[RequirementInput]:
-        """Load requirements for generation within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[RequirementInput]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            return self._load_requirements_for_generation_local(
-                project=project,
-                document_version_id=document_version_id,
-            )
-        sql = """
-            select r.requirement_id,
-                   rr.revision_id,
-                   rr.source_req_id,
-                   rr.id_generation_type,
-                   rr.confidence,
-                   rr.statement,
-                   rr.requirement_type,
-                   rr.priority,
-                   coalesce(string_agg(distinct re.chunk_id, ','), '') as chunk_ids
-            from requirements r
-            join requirement_revisions rr on rr.revision_id = r.active_revision_id
-            left join requirement_evidence re on re.revision_id = rr.revision_id
-            where r.project = %s
-              and r.status = 'active'
-              and rr.status = 'active'
-        """
-        params: list[str] = [project]
-        if document_version_id is not None:
-            sql += " and rr.first_seen_document_version_id = %s"
-            params.append(document_version_id)
-        sql += """
-            group by r.requirement_id, rr.revision_id, rr.source_req_id,
-                     rr.id_generation_type, rr.confidence, rr.statement, rr.requirement_type,
-                     rr.priority
-            order by r.requirement_id
-        """
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(sql, tuple(params))
-            rows = cursor.fetchall()
-        return [
-            RequirementInput(
-                requirement_id=str(row[0]),
-                revision_id=str(row[1]),
-                source_req_id=str(row[2]) if row[2] is not None else None,
-                id_generation_type=_id_generation_type(row[3]),
-                confidence=float(row[4]),
-                requirement_text=str(row[5]),
-                requirement_type=str(row[6]),
-                priority=normalize_priority_label(row[7]),
-                evidence_chunk_ids=[chunk for chunk in str(row[8]).split(",") if chunk],
-            )
-            for row in rows
-        ]
-
-    def load_user_stories_for_generation(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None = None,
-    ) -> list[UserStoryRecord]:
-        """Load user stories for generation within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[UserStoryRecord]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            return self._load_user_stories_for_generation_local(
-                project=project,
-                document_version_id=document_version_id,
-            )
-        sql = "select payload from user_stories where project = %s and status = 'active'"
-        params: list[str] = [project]
-        if document_version_id is not None:
-            sql += " and document_version_id = %s"
-            params.append(document_version_id)
-        sql += " order by story_id"
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(sql, tuple(params))
-            rows = cursor.fetchall()
-        return [UserStoryRecord.model_validate(_artifact_payload_from_row(row[0])) for row in rows]
-
-    def load_test_scenarios_for_generation(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None = None,
-    ) -> list[TestScenarioRecord]:
-        """Load test scenarios for generation within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[TestScenarioRecord]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            return self._load_test_scenarios_for_generation_local(
-                project=project,
-                document_version_id=document_version_id,
-            )
-        sql = "select payload from test_scenarios where project = %s and status = 'active'"
-        params: list[str] = [project]
-        if document_version_id is not None:
-            sql += " and document_version_id = %s"
-            params.append(document_version_id)
-        sql += " order by scenario_id"
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(sql, tuple(params))
-            rows = cursor.fetchall()
-        return [
-            TestScenarioRecord.model_validate(_artifact_payload_from_row(row[0])) for row in rows
-        ]
-
-    def load_artifact_from_postgres(
-        self,
-        *,
-        artifact_kind: str,
-        artifact_path: str | None = None,
-        document_version_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Load artifact from postgres within the authorized project and version scope.
-
-        Args:
-            artifact_kind (str): Artifact kind required by the operation's typed contract.
-            artifact_path (str | None): Filesystem location authorized for this operation.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            dict[str, Any] | None: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        if artifact_kind == "requirements":
-            return self.load_requirement_artifact_payload(
-                artifact_path=artifact_path,
-                document_version_id=document_version_id,
-            )
-        if artifact_kind == "user_stories":
-            return self.load_user_story_artifact_payload(
-                artifact_path=artifact_path,
-                document_version_id=document_version_id,
-            )
-        if artifact_kind == "test_scenarios":
-            return self.load_test_scenario_artifact_payload(
-                artifact_path=artifact_path,
-                document_version_id=document_version_id,
-            )
-        raise ValueError(f"unsupported artifact kind: {artifact_kind}")
-
-    def load_artifact_payloads_for_project(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Load artifact payloads for project within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            return self._load_artifact_payloads_for_project_local(
-                project=project,
-                document_version_id=document_version_id,
-            )
-        params: list[str] = [project]
-        version_filter = ""
-        if document_version_id is not None:
-            version_filter = " and a.document_version_id = %s"
-            params.append(document_version_id)
-        queries = [
-            (
-                "requirements",
-                "requirement_artifacts",
-            ),
-            ("user_stories", "user_story_artifacts"),
-            ("test_scenarios", "test_scenario_artifacts"),
-        ]
-        rows: list[dict[str, Any]] = []
-        with self._connect() as connection, connection.cursor() as cursor:
-            for kind, table in queries:
-                cursor.execute(
-                    f"""
-                    select %s as artifact_kind, a.artifact_path, a.document_version_id, a.payload
-                    from {table} a
-                    join document_versions dv
-                      on dv.document_version_id = a.document_version_id
-                    where dv.project = %s{version_filter}
-                    order by a.created_at desc
-                    """,
-                    (kind, *params),
-                )
-                for row in cursor.fetchall():
-                    rows.append(
-                        {
-                            "artifact_kind": str(row[0]),
-                            "artifact_path": str(row[1]),
-                            "document_version_id": str(row[2]),
-                            "payload": _artifact_payload_from_row(row[3]),
-                        }
-                    )
-        return rows
-
-    def repair_project_identities(
-        self,
-        *,
-        project: str,
-        apply: bool = False,
-    ) -> dict[str, object]:
-        """Analyze or atomically apply a project-wide canonical identity repair."""
-        from multi_agentic_graph_rag.services.requirement_repair import (
-            analyze_canonical_project,
-            canonicalize_legacy_repair_payload,
-            remap_canonical_payload,
-        )
-
-        artifact_rows = [
-            row
-            for row in self.load_artifact_payloads_for_project(project=project)
-            if row.get("artifact_kind") == "requirements" and isinstance(row.get("payload"), dict)
-        ]
-        for row in artifact_rows:
-            row["payload"] = canonicalize_legacy_repair_payload(dict(row["payload"])).model_dump(
-                mode="json"
-            )
-        report = analyze_canonical_project(
-            project,
-            [dict(row["payload"]) for row in artifact_rows],
-        )
-        if report.ambiguous_cases or not apply or not report.changed:
-            return report.to_dict()
-        if self.settings.postgres.mode == "local_json":
-            lock_name = "repair-" + stable_token(project, length=24) + ".lock"
-            lock_path = self.settings.postgres.local_path.parent / "locks" / lock_name
-            with LocalFileLock(lock_path):
-                rows = self._read_local_rows()
-                repaired = _remap_local_identity_rows(rows, project=project, report=report)
-                self._write_local_rows(repaired)
-            return report.to_dict()
-
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"identity-repair:{project}",),
-                )
-                self._apply_project_identity_repair_postgres(
-                    cursor,
-                    project=project,
-                    artifact_rows=artifact_rows,
-                    report=report,
-                    remap_payload=remap_canonical_payload,
-                )
-            connection.commit()
-        return report.to_dict()
-
-    def _apply_project_identity_repair_postgres(
-        self,
-        cursor: Any,
-        *,
-        project: str,
-        artifact_rows: list[dict[str, Any]],
-        report: Any,
-        remap_payload: Any,
-    ) -> None:
-        """Apply an already validated remap inside the caller's transaction."""
-        revision_targets = {
-            old_revision: (
-                report.requirement_id_by_revision.get(old_revision),
-                report.revision_id_remap.get(old_revision, old_revision),
-            )
-            for old_revision in {
-                *report.requirement_id_by_revision,
-                *report.revision_id_remap,
-            }
-        }
-        for old_revision, (target_requirement, new_revision) in revision_targets.items():
-            cursor.execute(
-                "select requirement_id from requirement_revisions where revision_id=%s",
-                (old_revision,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                continue
-            old_requirement = str(row[0])
-            target_requirement = target_requirement or old_requirement
-            cursor.execute(
-                """
-                insert into requirements(
-                  requirement_id, project, document_id, requirement_key, source_req_id,
-                  id_generation_type, confidence, status, active_revision_id,
-                  first_seen_document_version_id, created_at, updated_at
-                )
-                select %s, project, document_id, requirement_key, source_req_id,
-                       id_generation_type, confidence, status, null,
-                       first_seen_document_version_id, created_at, now()
-                from requirements where requirement_id=%s
-                on conflict (requirement_id) do nothing
-                """,
-                (target_requirement, old_requirement),
-            )
-            if new_revision != old_revision:
-                cursor.execute(
-                    """
-                    insert into requirement_revisions
-                    select %s, %s, document_version_id, version, statement,
-                           normalized_statement, normalized_statement_hash,
-                           semantic_signature, requirement_family, requirement_type,
-                           priority, status, source_req_id, id_generation_type,
-                           confidence, source_trace, payload, created_at
-                    from requirement_revisions where revision_id=%s
-                    on conflict (revision_id) do nothing
-                    """,
-                    (new_revision, target_requirement, old_revision),
-                )
-            else:
-                cursor.execute(
-                    "update requirement_revisions set requirement_id=%s where revision_id=%s",
-                    (target_requirement, old_revision),
-                )
-            cursor.execute(
-                "update requirement_evidence set requirement_id=%s, revision_id=%s "
-                "where revision_id=%s",
-                (target_requirement, new_revision, old_revision),
-            )
-            cursor.execute(
-                "update user_stories set requirement_id=%s, requirement_revision_id=%s "
-                "where requirement_revision_id=%s",
-                (target_requirement, new_revision, old_revision),
-            )
-            cursor.execute(
-                "update test_scenarios set requirement_id=%s, requirement_revision_id=%s "
-                "where requirement_revision_id=%s",
-                (target_requirement, new_revision, old_revision),
-            )
-            cursor.execute(
-                "update requirement_fact_links set requirement_id=%s, revision_id=%s "
-                "where revision_id=%s",
-                (target_requirement, new_revision, old_revision),
-            )
-            cursor.execute(
-                "update requirement_delta_events set requirement_id=%s, revision_id=%s "
-                "where revision_id=%s",
-                (target_requirement, new_revision, old_revision),
-            )
-            if new_revision != old_revision:
-                cursor.execute(
-                    "delete from requirement_revisions where revision_id=%s",
-                    (old_revision,),
-                )
-
-        for old_evidence, new_evidence in report.evidence_id_remap.items():
-            if old_evidence == new_evidence:
-                continue
-            cursor.execute(
-                "update requirement_evidence set evidence_id=%s where evidence_id=%s",
-                (new_evidence, old_evidence),
-            )
-            cursor.execute(
-                "update requirement_fact_links set evidence_id=%s where evidence_id=%s",
-                (new_evidence, old_evidence),
-            )
-        for table, key in (
-            ("user_stories", "story_id"),
-            ("test_scenarios", "scenario_id"),
-        ):
-            cursor.execute(f"select {key}, payload from {table} where project=%s", (project,))
-            for identity, payload in cursor.fetchall():
-                remapped = _remap_identity_value(_artifact_payload_from_row(payload), report)
-                cursor.execute(
-                    f"update {table} set payload=%s where {key}=%s",
-                    (json.dumps(remapped), str(identity)),
-                )
-        for row in artifact_rows:
-            repaired = remap_payload(dict(row["payload"]), report)
-            cursor.execute(
-                "update requirement_artifacts set payload=%s where artifact_path=%s",
-                (json.dumps(repaired), str(row["artifact_path"])),
-            )
-        cursor.execute(
-            """
-            update requirements r set active_revision_id=(
-              select rr.revision_id from requirement_revisions rr
-              where rr.requirement_id=r.requirement_id and rr.status='active'
-            ), updated_at=now()
-            where r.project=%s
-            """,
-            (project,),
-        )
-        cursor.execute(
-            "delete from requirements r where r.project=%s and not exists "
-            "(select 1 from requirement_revisions rr where rr.requirement_id=r.requirement_id)",
-            (project,),
-        )
-
-    def record_run(self, run_id: str, status: str, payload: dict[str, Any]) -> None:
-        """Record run through the owning storage boundary.
-
-        Args:
-            run_id (str): Canonical run id used as a safe operational anchor.
-            status (str): Status required by the operation's typed contract.
-            payload (dict[str, Any]): Validated structured data for the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if self.settings.postgres.mode == "local_json":
-            self._upsert_local(
-                "ingestion_run",
-                run_id,
-                {"kind": "ingestion_run", "run_id": run_id, "status": status, "payload": payload},
-            )
-            return
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    insert into ingestion_runs (run_id, document_version_id, status, payload)
-                    values (%s, %s, %s, %s)
-                    on conflict (run_id) do update
-                    set status=excluded.status, payload=excluded.payload
-                    """,
-                    (
-                        run_id,
-                        payload.get("document_version_id", ""),
-                        status,
-                        json.dumps(payload),
-                    ),
-                )
-            connection.commit()
-
-    def upsert_knowledge_graph_state(self, state: KnowledgeGraphStateRecord) -> None:
-        """Persist the version-scoped KG readiness state (one row per version)."""
-        if self.settings.postgres.mode == "local_json":
-            self._upsert_local(
-                "knowledge_graph_state",
-                state.document_version_id,
-                {"kind": "knowledge_graph_state", **state.model_dump(mode="json")},
-            )
-            return
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    insert into knowledge_graph_state
-                      (document_version_id, project, document_id, doc_version, status,
-                       run_id, attempt, failure_reason, chunk_count, assertion_count,
-                       evidence_count, extractor_fingerprint, graph_schema_version,
-                       started_at, completed_at, updated_at)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-                    on conflict (document_version_id) do update set
-                      project=excluded.project,
-                      document_id=excluded.document_id,
-                      doc_version=excluded.doc_version,
-                      status=excluded.status,
-                      run_id=excluded.run_id,
-                      attempt=excluded.attempt,
-                      failure_reason=excluded.failure_reason,
-                      chunk_count=excluded.chunk_count,
-                      assertion_count=excluded.assertion_count,
-                      evidence_count=excluded.evidence_count,
-                      extractor_fingerprint=excluded.extractor_fingerprint,
-                      graph_schema_version=excluded.graph_schema_version,
-                      started_at=excluded.started_at,
-                      completed_at=excluded.completed_at,
-                      updated_at=now()
-                    """,
-                    (
-                        state.document_version_id,
-                        state.project,
-                        state.document_id,
-                        state.doc_version,
-                        state.status,
-                        state.run_id,
-                        state.attempt,
-                        state.failure_reason,
-                        state.chunk_count,
-                        state.assertion_count,
-                        state.evidence_count,
-                        state.extractor_fingerprint,
-                        state.graph_schema_version,
-                        state.started_at,
-                        state.completed_at,
-                    ),
-                )
-            connection.commit()
-
-    def get_knowledge_graph_state(
-        self, document_version_id: str
-    ) -> KnowledgeGraphStateRecord | None:
-        """Read the KG readiness state for one document version, or None if absent."""
-        if self.settings.postgres.mode == "local_json":
-            latest: dict[str, Any] | None = None
-            for row in self._read_local_rows():
-                if (
-                    row.get("kind") == "knowledge_graph_state"
-                    and row.get("document_version_id") == document_version_id
-                ):
-                    latest = row
-            if latest is None:
-                return None
-            payload = {
-                key: value
-                for key, value in latest.items()
-                if key not in {"kind", "written_at", "_local_key"}
-            }
-            return KnowledgeGraphStateRecord.model_validate(payload)
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                select document_version_id, project, document_id, doc_version, status,
-                       run_id, attempt, failure_reason, chunk_count, assertion_count,
-                       evidence_count, extractor_fingerprint, graph_schema_version,
-                       started_at, completed_at, updated_at
-                from knowledge_graph_state
-                where document_version_id = %s
-                """,
-                (document_version_id,),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None
-        return KnowledgeGraphStateRecord(
-            document_version_id=str(row[0]),
-            project=str(row[1]),
-            document_id=str(row[2]),
-            doc_version=str(row[3]),
-            status=row[4],
-            run_id=str(row[5] or ""),
-            attempt=int(row[6] or 0),
-            failure_reason=row[7],
-            chunk_count=int(row[8] or 0),
-            assertion_count=int(row[9] or 0),
-            evidence_count=int(row[10] or 0),
-            extractor_fingerprint=str(row[11] or ""),
-            graph_schema_version=str(row[12] or ""),
-            started_at=row[13],
-            completed_at=row[14],
-            updated_at=row[15],
-        )
-
-    # --- Cumulative per-project master projections (Phase C) ---
-
-    def load_master_records(
-        self, *, project: str, stage: str, cursor: Any | None = None
-    ) -> list[dict[str, Any]]:
-        """Deterministically read the cumulative records for one project/stage.
-
-        Ordered by permanent id so the materialized payload (and its checksum) is
-        reproducible. When ``cursor`` is supplied the read runs inside the caller's
-        open transaction so the master reflects rows just written in the same tx.
-        """
-        if self.settings.postgres.mode == "local_json":
-            return self._master_records_local(project, stage)
-        if cursor is not None:
-            return self._master_records_pg(cursor, project, stage)
-        with self._connect() as connection, connection.cursor() as own_cursor:
-            return self._master_records_pg(own_cursor, project, stage)
-
-    def _master_records_pg(self, cursor: Any, project: str, stage: str) -> list[dict[str, Any]]:
-        """Execute the master records pg operation within its declared architectural boundary.
-
-        Args:
-            cursor (Any): Cursor required by the operation's typed contract.
-            project (str): Project scope that isolates persistence and retrieval.
-            stage (str): Stage required by the operation's typed contract.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        if stage == "user_stories":
-            cursor.execute(
-                "select payload from user_stories where project = %s order by story_id",
-                (project,),
-            )
-            return [_artifact_payload_from_row(row[0]) for row in cursor.fetchall()]
-        if stage == "test_scenarios":
-            cursor.execute(
-                "select payload from test_scenarios where project = %s order by scenario_id",
-                (project,),
-            )
-            return [_artifact_payload_from_row(row[0]) for row in cursor.fetchall()]
-        return self._requirement_master_records_pg(cursor, project)
-
-    def _requirement_master_records_pg(self, cursor: Any, project: str) -> list[dict[str, Any]]:
-        """Execute the requirement master records pg operation within its declared architectural
-        boundary.
-
-        Args:
-            cursor (Any): Cursor required by the operation's typed contract.
-            project (str): Project scope that isolates persistence and retrieval.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        cursor.execute(
-            """
-            select requirement_id, source_req_id, id_generation_type, confidence, status,
-                   first_seen_document_version_id, active_revision_id, document_id
-            from requirements where project = %s order by requirement_id
-            """,
-            (project,),
-        )
-        lineage = cursor.fetchall()
-        cursor.execute(
-            """
-            select r.requirement_id, r.revision_id, r.statement, r.requirement_type,
-                   r.priority, r.status, r.first_seen_document_version_id,
-                   r.superseded_by_version, r.semantic_signature, r.confidence,
-                   r.source_req_id, r.id_generation_type
-            from requirement_revisions r
-            join requirements q on q.requirement_id = r.requirement_id
-            where q.project = %s
-            order by r.requirement_id, r.revision_id
-            """,
-            (project,),
-        )
-        revisions: dict[str, list[dict[str, Any]]] = {}
-        for row in cursor.fetchall():
-            revisions.setdefault(str(row[0]), []).append(
-                {
-                    "revision_id": str(row[1]),
-                    "statement": str(row[2] or ""),
-                    "requirement_type": str(row[3] or ""),
-                    "priority": str(row[4] or ""),
-                    "status": str(row[5] or ""),
-                    "first_seen_document_version_id": str(row[6] or ""),
-                    "superseded_by_version": row[7],
-                    "semantic_signature": str(row[8] or ""),
-                    "confidence": float(row[9] or 0.0),
-                    "source_req_id": row[10],
-                    "id_generation_type": str(row[11] or "generated"),
-                    "evidence": self._requirement_evidence_pg(cursor, project, str(row[1])),
-                }
-            )
-        return [
-            {
-                "requirement_id": str(row[0]),
-                "document_id": str(row[7] or ""),
-                "source_req_id": row[1],
-                "id_generation_type": str(row[2] or "generated"),
-                "confidence": float(row[3] or 0.0),
-                "status": str(row[4] or ""),
-                "origin_version": str(row[5] or ""),
-                "active_revision_id": str(row[6] or ""),
-                "revisions": revisions.get(str(row[0]), []),
-            }
-            for row in lineage
-        ]
-
-    def _requirement_evidence_pg(
-        self, cursor: Any, project: str, revision_id: str
-    ) -> list[dict[str, Any]]:
-        # Join the fact-link table so the many-to-many fact->requirement mapping is
-        # preserved in the master (a fact_id may recur across many requirements).
-        """Execute the requirement evidence pg operation within its declared architectural boundary.
-
-        Args:
-            cursor (Any): Cursor required by the operation's typed contract.
-            project (str): Project scope that isolates persistence and retrieval.
-            revision_id (str): Canonical revision id used as a safe operational anchor.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        cursor.execute(
-            """
-            select e.evidence_id, e.document_version_id, e.chunk_id, e.quote,
-                   e.start_char, e.end_char, e.page, e.section,
-                   coalesce(
-                     array_agg(l.fact_id order by l.fact_id)
-                       filter (where l.fact_id is not null),
-                     array[]::text[]
-                   ) as fact_ids
-            from requirement_evidence e
-            left join requirement_fact_links l on l.evidence_id = e.evidence_id
-            where e.revision_id = %s
-            group by e.evidence_id, e.document_version_id, e.chunk_id, e.quote,
-                     e.start_char, e.end_char, e.page, e.section
-            order by e.evidence_id
-            """,
-            (revision_id,),
-        )
-        return [
-            {
-                "evidence_id": str(row[0]),
-                "document_version_id": str(row[1] or ""),
-                "chunk_id": str(row[2] or ""),
-                "quote": str(row[3] or ""),
-                "start_char": int(row[4] or 0),
-                "end_char": int(row[5] or 0),
-                "page": row[6],
-                "section": row[7],
-                "fact_ids": [str(fact_id) for fact_id in (row[8] or [])],
-            }
-            for row in cursor.fetchall()
-        ]
-
-    def _master_records_local(self, project: str, stage: str) -> list[dict[str, Any]]:
-        """Execute the master records local operation within its declared architectural boundary.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            stage (str): Stage required by the operation's typed contract.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-        """
-        rows = self._read_local_rows()
-        if stage == "user_stories":
-            records = [
-                row["user_story"]
-                for row in rows
-                if row.get("kind") == "user_story" and row.get("project") == project
-            ]
-            return sorted(records, key=lambda item: str(item.get("story_id", "")))
-        if stage == "test_scenarios":
-            records = [
-                row["test_scenario"]
-                for row in rows
-                if row.get("kind") == "test_scenario" and row.get("project") == project
-            ]
-            return sorted(records, key=lambda item: str(item.get("scenario_id", "")))
-        return self._requirement_master_records_local(project, rows)
-
-    def _requirement_master_records_local(
-        self, project: str, rows: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Execute the requirement master records local operation within its declared architectural
-        boundary.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            rows (list[dict[str, Any]]): Rows required by the operation's typed contract.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-        """
-        lineage = {
-            str(row["requirement_id"]): row
-            for row in rows
-            if row.get("kind") == "requirement" and row.get("project") == project
-        }
-        revisions: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            if row.get("kind") != "requirement_revision" or row.get("project") != project:
-                continue
-            record = row["requirement"]
-            revisions.setdefault(str(record["requirement_id"]), []).append(record)
-        out: list[dict[str, Any]] = []
-        for requirement_id in sorted(lineage):
-            head = lineage[requirement_id]
-            rev_list = sorted(
-                revisions.get(requirement_id, []),
-                key=lambda item: str(item.get("revision_id", "")),
-            )
-            out.append(
-                {
-                    "requirement_id": requirement_id,
-                    "document_id": head.get("document_id", ""),
-                    "source_req_id": head.get("source_req_id"),
-                    "id_generation_type": head.get("id_generation_type", "generated"),
-                    "confidence": head.get("confidence", 0.0),
-                    "status": head.get("status", ""),
-                    "origin_version": head.get("first_seen_document_version_id", ""),
-                    "active_revision_id": head.get("active_revision_id", ""),
-                    "revisions": rev_list,
-                }
-            )
-        return out
-
-    def upsert_stage_master(
-        self, master: StageMasterArtifact, *, cursor: Any | None = None
-    ) -> None:
-        """Upsert the master row; on conflict the payload_revision monotonically bumps.
-
-        The single ``(project)`` primary key serializes concurrent writers: the
-        second waits on the row lock, then its ``do update`` sees the incremented
-        revision. No separate advisory lock is needed.
-        """
-        table = _MASTER_TABLE_BY_STAGE[master.stage]
-        payload = master.model_dump(mode="json")
-        if self.settings.postgres.mode == "local_json":
-            existing = self.get_stage_master(project=master.project, stage=master.stage)
-            payload["payload_revision"] = (existing.payload_revision if existing else 0) + 1
-            self._upsert_local(
-                f"{table}",
-                master.project,
-                {"kind": table, "project": master.project, "master": payload},
-            )
-            return
-        run = self._master_upsert_sql(table, master, payload, cursor)
-        if run is not None:
-            run()
-
-    def _master_upsert_sql(
-        self, table: str, master: StageMasterArtifact, payload: dict[str, Any], cursor: Any | None
-    ) -> Any:
-        """Execute the master upsert sql operation within its declared architectural boundary.
-
-        Args:
-            table (str): Table required by the operation's typed contract.
-            master (StageMasterArtifact): Master required by the operation's typed contract.
-            payload (dict[str, Any]): Validated structured data for the operation.
-            cursor (Any | None): Cursor required by the operation's typed contract.
-
-        Returns:
-            Any: The typed result produced by the operation.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-
-        def execute(active_cursor: Any) -> None:
-            """Execute the execute operation within its declared architectural boundary.
-
-            Args:
-                active_cursor (Any): Active cursor required by the operation's typed contract.
-
-            Side Effects:
-                May write transactional or derivative state through the configured store.
-            """
-            active_cursor.execute(
-                f"""
-                insert into {table}
-                  (project, artifact_schema_version, current_document_version_id, run_id,
-                   payload, checksum, payload_revision, updated_at)
-                values (%s, %s, %s, %s, %s, %s, 1, now())
-                on conflict (project) do update set
-                  artifact_schema_version = excluded.artifact_schema_version,
-                  current_document_version_id = excluded.current_document_version_id,
-                  run_id = excluded.run_id,
-                  payload = excluded.payload,
-                  checksum = excluded.checksum,
-                  payload_revision = {table}.payload_revision + 1,
-                  updated_at = now()
-                """,
-                (
-                    master.project,
-                    master.artifact_schema_version,
-                    master.current_document_version_id,
-                    master.run_id,
-                    json.dumps(payload),
-                    master.checksum,
-                ),
-            )
-
-        if cursor is not None:
-            execute(cursor)
-            return None
-
-        def run() -> None:
-            """Run run.
-
-            Side Effects:
-                May write transactional or derivative state through the configured store.
-            """
-            with self._connect() as connection, connection.cursor() as own_cursor:
-                execute(own_cursor)
-                connection.commit()
-
-        return run
-
-    def refresh_stage_master(
-        self,
-        *,
         project: str,
         stage: str,
-        document_id: str = "",
-        current_document_version_id: str = "",
-        run_id: str = "",
-        cursor: Any | None = None,
-    ) -> StageMasterArtifact:
-        """Materialize the cumulative master from normalized rows and upsert it.
-
-        Called inside each ``persist_*`` transaction on the same cursor so the
-        normalized rows and the master payload commit atomically together.
-        """
-        master = materialize_master(
-            self,
-            project=project,
-            stage=stage,
-            document_id=document_id,
-            current_document_version_id=current_document_version_id,
-            run_id=run_id,
-            cursor=cursor,
-        )
-        self.upsert_stage_master(master, cursor=cursor)
-        return master
-
-    def get_stage_master(self, *, project: str, stage: str) -> StageMasterArtifact | None:
-        """Load the cumulative master row for one project/stage, or None."""
-        table = _MASTER_TABLE_BY_STAGE[stage]
+        status: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Upsert operational run state."""
+        row = {
+            "run_id": run_id,
+            "project": project,
+            "stage": stage,
+            "status": status,
+            "payload": payload,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
         if self.settings.postgres.mode == "local_json":
-            latest: dict[str, Any] | None = None
-            for row in self._read_local_rows():
-                if row.get("kind") == table and row.get("project") == project:
-                    latest = row
-            if latest is None:
-                return None
-            return StageMasterArtifact.model_validate(latest["master"])
+            self._upsert_local("run", f"{run_id}:{stage}", row)
+            return
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                f"select payload from {table} where project = %s",
+                """
+                INSERT INTO workflow_runs(run_id, project, stage, status, payload)
+                VALUES (%s,%s,%s,%s,%s::jsonb)
+                ON CONFLICT (run_id, stage) DO UPDATE
+                SET status=EXCLUDED.status, payload=EXCLUDED.payload, updated_at=now()
+                """,
+                (run_id, project, stage, status, json.dumps(payload)),
+            )
+            connection.commit()
+
+    def set_readiness(self, readiness: KnowledgeGraphReadiness) -> None:
+        """Upsert the project readiness gate."""
+        payload = readiness.model_dump(mode="json")
+        if self.settings.postgres.mode == "local_json":
+            self._upsert_local("readiness", readiness.project, payload)
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO knowledge_graph_readiness(
+                    project,status,build_run_id,failure_reason,updated_at
+                ) VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (project) DO UPDATE SET
+                    status=EXCLUDED.status,
+                    build_run_id=EXCLUDED.build_run_id,
+                    failure_reason=EXCLUDED.failure_reason,
+                    updated_at=EXCLUDED.updated_at
+                """,
+                (
+                    readiness.project,
+                    readiness.status,
+                    readiness.build_run_id,
+                    readiness.failure_reason,
+                    readiness.updated_at,
+                ),
+            )
+            connection.commit()
+
+    def get_readiness(self, project: str) -> KnowledgeGraphReadiness | None:
+        """Load the project readiness gate."""
+        if self.settings.postgres.mode == "local_json":
+            payload = self._read_local("readiness", project)
+            return KnowledgeGraphReadiness.model_validate(payload) if payload else None
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT project,status,build_run_id,failure_reason,updated_at
+                FROM knowledge_graph_readiness WHERE project=%s
+                """,
                 (project,),
             )
             row = cursor.fetchone()
         if row is None:
             return None
-        return StageMasterArtifact.model_validate(_artifact_payload_from_row(row[0]))
-
-    def record_generation_context(
-        self,
-        run: GenerationContextRun,
-        items: list[GenerationContextItem],
-    ) -> None:
-        """Persist one retrieval snapshot (shadow comparison / audit trail)."""
-        if self.settings.postgres.mode == "local_json":
-            self._upsert_local(
-                "generation_context_run",
-                run.context_run_id,
-                {
-                    "kind": "generation_context_run",
-                    **run.model_dump(mode="json"),
-                    "items": [item.model_dump(mode="json") for item in items],
-                },
-            )
-            return
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    insert into generation_context_runs
-                      (context_run_id, stage, anchor_id, project,
-                       document_version_id, source, metrics)
-                    values (%s, %s, %s, %s, %s, %s, %s)
-                    on conflict (context_run_id) do update
-                    set source=excluded.source, metrics=excluded.metrics
-                    """,
-                    (
-                        run.context_run_id,
-                        run.stage,
-                        run.anchor_id,
-                        run.project,
-                        run.document_version_id,
-                        run.source,
-                        json.dumps(run.metrics),
-                    ),
-                )
-                for item in items:
-                    cursor.execute(
-                        """
-                        insert into generation_context_items
-                          (context_run_id, rank, item_type, item_id, source, score, selected,
-                           assertion_id, text_unit_id, entity_id, predicate, hop_count,
-                           normalized_score, reranker_score, mandatory, metadata_json)
-                        values (%s, %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        on conflict (context_run_id, rank) do update
-                        set item_type=excluded.item_type, item_id=excluded.item_id,
-                            source=excluded.source, score=excluded.score,
-                            selected=excluded.selected, assertion_id=excluded.assertion_id,
-                            text_unit_id=excluded.text_unit_id, entity_id=excluded.entity_id,
-                            predicate=excluded.predicate, hop_count=excluded.hop_count,
-                            normalized_score=excluded.normalized_score,
-                            reranker_score=excluded.reranker_score,
-                            mandatory=excluded.mandatory, metadata_json=excluded.metadata_json
-                        """,
-                        (
-                            item.context_run_id,
-                            item.rank,
-                            item.item_type,
-                            item.item_id,
-                            item.source,
-                            item.score,
-                            item.selected,
-                            item.assertion_id,
-                            item.text_unit_id,
-                            item.entity_id,
-                            item.predicate,
-                            item.hop_count,
-                            item.normalized_score,
-                            item.reranker_score,
-                            item.mandatory,
-                            json.dumps(item.metadata),
-                        ),
-                    )
-            connection.commit()
-
-    def _persist_requirement_ledger_postgres(
-        self,
-        cursor: Any,
-        artifact: RequirementArtifact,
-        active_by_requirement: dict[str, VerifiedRequirement],
-    ) -> None:
-        """Persist requirement ledger postgres through the owning storage boundary.
-
-        Args:
-            cursor (Any): Cursor required by the operation's typed contract.
-            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
-            active_by_requirement (dict[str, VerifiedRequirement]): Validated active revision for
-                                                                    every represented lineage.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
-        for canonical_fact in artifact.canonical_facts:
-            cursor.execute(
-                """
-                insert into canonical_facts
-                  (canonical_fact_id, project, document_id, normalized_text, representative_text)
-                values (%s, %s, %s, %s, %s)
-                on conflict (canonical_fact_id) do update
-                set representative_text = excluded.representative_text
-                """,
-                (
-                    canonical_fact.canonical_fact_id,
-                    artifact.project,
-                    artifact.document_id,
-                    canonical_fact.normalized_text,
-                    canonical_fact.representative_text,
-                ),
-            )
-
-        for fact_occurrence in artifact.facts:
-            trace = fact_occurrence.source_trace
-            cursor.execute(
-                """
-                insert into fact_occurrences
-                  (fact_id, canonical_fact_id, project, document_id, document_version_id,
-                   chunk_id, page, section, quote, start_char, end_char, source_path, text)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (fact_id) do update
-                set quote = excluded.quote,
-                    page = excluded.page,
-                    section = excluded.section
-                """,
-                (
-                    fact_occurrence.fact_id,
-                    fact_occurrence.canonical_fact_id,
-                    artifact.project,
-                    artifact.document_id,
-                    artifact.document_version_id,
-                    trace.chunk_id,
-                    trace.page,
-                    trace.section,
-                    trace.quote,
-                    trace.start_char,
-                    trace.end_char,
-                    artifact.source_path,
-                    fact_occurrence.text,
-                ),
-            )
-
-        superseded_revision_ids = {
-            requirement.revision_id
-            for requirement in artifact.requirements
-            if requirement.status == "superseded"
-        }
-        superseded_revision_ids.update(
-            event.revision_id
-            for event in artifact.delta_events
-            if event.event_type == "superseded" and event.revision_id
+        return KnowledgeGraphReadiness(
+            project=row[0],
+            status=row[1],
+            build_run_id=row[2],
+            failure_reason=row[3],
+            updated_at=row[4],
         )
-        for revision_id in superseded_revision_ids:
-            cursor.execute(
-                """
-                update requirement_revisions
-                set status = 'superseded',
-                    updated_at = now()
-                where revision_id = %s
-                """,
-                (revision_id,),
-            )
 
-        for requirement in active_by_requirement.values():
-            cursor.execute(
-                """
-                insert into requirements
-                  (requirement_id, project, document_id, requirement_key,
-                   source_req_id, id_generation_type, confidence, status,
-                   first_seen_document_version_id, active_revision_id)
-                values (%s, %s, %s, %s, %s, %s, %s, 'active', %s, %s)
-                on conflict (requirement_id) do update
-                set source_req_id = excluded.source_req_id,
-                    id_generation_type = excluded.id_generation_type,
-                    confidence = excluded.confidence,
-                    status = 'active',
-                    active_revision_id = excluded.active_revision_id,
-                    updated_at = now()
-                """,
-                (
-                    requirement.requirement_id,
-                    artifact.project,
-                    artifact.document_id,
-                    requirement.requirement_key,
-                    requirement.source_req_id,
-                    requirement.id_generation_type,
-                    requirement.confidence,
-                    artifact.document_version_id,
-                    requirement.revision_id,
-                ),
-            )
-
-        for requirement in artifact.requirements:
-            cursor.execute(
-                """
-                insert into requirement_revisions
-                  (revision_id, requirement_id, statement, normalized_statement,
-                   normalized_statement_hash, semantic_signature, requirement_type,
-                   requirement_family, priority, source_req_id, id_generation_type, confidence,
-                   status, first_seen_document_version_id)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (revision_id) do update
-                set statement = excluded.statement,
-                    normalized_statement = excluded.normalized_statement,
-                    normalized_statement_hash = excluded.normalized_statement_hash,
-                    semantic_signature = excluded.semantic_signature,
-                    requirement_type = excluded.requirement_type,
-                    requirement_family = excluded.requirement_family,
-                    priority = excluded.priority,
-                    source_req_id = excluded.source_req_id,
-                    id_generation_type = excluded.id_generation_type,
-                    confidence = excluded.confidence,
-                    status = excluded.status,
-                    updated_at = now()
-                """,
-                (
-                    requirement.revision_id,
-                    requirement.requirement_id,
-                    requirement.statement,
-                    requirement.normalized_statement,
-                    hashlib.md5(
-                        requirement.normalized_statement.encode("utf-8"),
-                        usedforsecurity=False,
-                    ).hexdigest(),
-                    requirement.semantic_signature,
-                    requirement.requirement_type,
-                    requirement.requirement_family or requirement.requirement_type.casefold(),
-                    requirement.priority,
-                    requirement.source_req_id,
-                    requirement.id_generation_type,
-                    requirement.confidence,
-                    requirement.status,
-                    artifact.document_version_id,
-                ),
-            )
-            for evidence in requirement.evidence:
-                trace = evidence.source_trace
+    def persist_requirements(self, artifact: RequirementsArtifact) -> None:
+        """Transactionally persist canonical requirements and traceability."""
+        if self.settings.postgres.mode == "local_json":
+            self._persist_artifact_local("requirements", artifact)
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._upsert_master(cursor, "requirements", artifact)
+            for requirement in artifact.requirements:
                 cursor.execute(
                     """
-                    insert into requirement_evidence
-                      (evidence_id, requirement_id, revision_id,
-                       document_version_id, chunk_id, page, section, quote, start_char,
-                       end_char, source_path)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    on conflict (evidence_id) do update
-                    set quote = excluded.quote,
-                        page = excluded.page,
-                        section = excluded.section
+                    INSERT INTO requirements(
+                      requirement_id,project,run_id,source_req_id,source_req_id_type,
+                      requirement_text,requirement_type,priority,status,confidence,constraints_json
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT (requirement_id) DO UPDATE SET
+                      run_id=EXCLUDED.run_id, source_req_id=EXCLUDED.source_req_id,
+                      source_req_id_type=EXCLUDED.source_req_id_type,
+                      requirement_text=EXCLUDED.requirement_text,
+                      requirement_type=EXCLUDED.requirement_type,
+                      priority=EXCLUDED.priority, confidence=EXCLUDED.confidence,
+                      constraints_json=EXCLUDED.constraints_json
                     """,
                     (
-                        evidence.evidence_id,
                         requirement.requirement_id,
-                        requirement.revision_id,
-                        artifact.document_version_id,
-                        trace.chunk_id,
-                        trace.page,
-                        trace.section,
-                        trace.quote,
-                        trace.start_char,
-                        trace.end_char,
-                        artifact.source_path,
+                        artifact.project,
+                        artifact.run_id,
+                        requirement.source_req_id,
+                        requirement.source_req_id_type,
+                        requirement.requirement_text,
+                        requirement.requirement_type,
+                        requirement.priority,
+                        requirement.status,
+                        requirement.confidence,
+                        json.dumps(requirement.constraints),
                     ),
                 )
-                for fact_id in evidence.fact_ids:
+                for evidence in requirement.evidence:
                     cursor.execute(
                         """
-                        insert into requirement_fact_links
-                          (evidence_id, fact_id, requirement_id, revision_id)
-                        values (%s, %s, %s, %s)
-                        on conflict (evidence_id, fact_id) do nothing
+                        INSERT INTO requirement_evidence(
+                          evidence_id,requirement_id,chunk_id,quote,start_char,end_char
+                        ) VALUES (%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (evidence_id) DO UPDATE SET
+                          quote=EXCLUDED.quote,start_char=EXCLUDED.start_char,end_char=EXCLUDED.end_char
                         """,
                         (
                             evidence.evidence_id,
-                            fact_id,
                             requirement.requirement_id,
-                            requirement.revision_id,
+                            evidence.chunk_id,
+                            evidence.quote,
+                            evidence.start_char,
+                            evidence.end_char,
                         ),
                     )
+                    cursor.execute(
+                        """
+                        INSERT INTO requirement_chunks(requirement_id,chunk_id)
+                        VALUES (%s,%s) ON CONFLICT DO NOTHING
+                        """,
+                        (requirement.requirement_id, evidence.chunk_id),
+                    )
+                for entity_id in requirement.entity_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO requirement_entities(requirement_id,entity_id)
+                        VALUES (%s,%s) ON CONFLICT DO NOTHING
+                        """,
+                        (requirement.requirement_id, entity_id),
+                    )
+                for relationship_id in requirement.relationship_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO requirement_relationships(requirement_id,relationship_id)
+                        VALUES (%s,%s) ON CONFLICT DO NOTHING
+                        """,
+                        (requirement.requirement_id, relationship_id),
+                    )
+            connection.commit()
 
-        for ordinal, resolution in enumerate(artifact.identity_resolutions, start=1):
-            resolution_id = "REQRES-" + stable_token(
-                artifact.project,
-                artifact.document_version_id,
-                resolution.chunk_id,
-                resolution.incoming_fingerprint,
-                ordinal,
-                length=20,
-            )
-            cursor.execute(
-                """
-                insert into requirement_identity_resolutions
-                  (resolution_id, project, document_id, document_version_id, chunk_id,
-                   incoming_fingerprint, decision, requirement_id, revision_id, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (resolution_id) do update set payload=excluded.payload
-                """,
-                (
-                    resolution_id,
-                    artifact.project,
-                    artifact.document_id,
-                    artifact.document_version_id,
-                    resolution.chunk_id,
-                    resolution.incoming_fingerprint,
-                    resolution.decision,
-                    resolution.requirement_id,
-                    resolution.revision_id,
-                    json.dumps(resolution.model_dump(mode="json")),
-                ),
-            )
-
-        for event in artifact.delta_events:
-            if event.event_type == "superseded" and event.revision_id:
+    def persist_user_stories(self, artifact: UserStoriesArtifact) -> None:
+        """Transactionally persist stories, criteria, and traceability."""
+        if self.settings.postgres.mode == "local_json":
+            self._persist_artifact_local("user_stories", artifact)
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._upsert_master(cursor, "user_stories", artifact)
+            for story in artifact.stories:
                 cursor.execute(
                     """
-                    update requirement_revisions
-                    set status = 'superseded',
-                        superseded_by_version = %s,
-                        superseded_at = now(),
-                        updated_at = now()
-                    where revision_id = %s
+                    INSERT INTO user_stories(
+                      story_id,project,run_id,source_req_id,source_req_id_type,title,priority,
+                      persona,user_story_json,business_rules_json,status,confidence
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s)
+                    ON CONFLICT (story_id) DO UPDATE SET
+                      run_id=EXCLUDED.run_id,title=EXCLUDED.title,priority=EXCLUDED.priority,
+                      persona=EXCLUDED.persona,user_story_json=EXCLUDED.user_story_json,
+                      business_rules_json=EXCLUDED.business_rules_json,
+                      confidence=EXCLUDED.confidence
                     """,
-                    (event.document_version_id, event.revision_id),
+                    (
+                        story.story_id,
+                        artifact.project,
+                        artifact.run_id,
+                        story.source_req_id,
+                        story.source_req_id_type,
+                        story.title,
+                        story.priority,
+                        story.persona,
+                        json.dumps(story.user_story.model_dump(mode="json")),
+                        json.dumps(story.business_rules),
+                        story.status,
+                        story.confidence,
+                    ),
                 )
+                for requirement_id in story.requirement_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO requirement_stories(requirement_id,story_id)
+                        VALUES (%s,%s) ON CONFLICT DO NOTHING
+                        """,
+                        (requirement_id, story.story_id),
+                    )
+                for criterion in story.acceptance_criteria:
+                    cursor.execute(
+                        """
+                        INSERT INTO acceptance_criteria(
+                          criterion_id,story_id,title,given_text,when_text,then_text
+                        ) VALUES (%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (criterion_id) DO UPDATE SET
+                          title=EXCLUDED.title,given_text=EXCLUDED.given_text,
+                          when_text=EXCLUDED.when_text,then_text=EXCLUDED.then_text
+                        """,
+                        (
+                            criterion.criterion_id,
+                            story.story_id,
+                            criterion.title,
+                            criterion.given,
+                            criterion.when,
+                            criterion.then,
+                        ),
+                    )
+                self._persist_traceability(cursor, "story", story.story_id, story.traceability)
+            connection.commit()
+
+    def persist_test_scenarios(self, artifact: TestScenariosArtifact) -> None:
+        """Transactionally persist scenarios and traceability."""
+        if self.settings.postgres.mode == "local_json":
+            self._persist_artifact_local("test_scenarios", artifact)
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._upsert_master(cursor, "test_scenarios", artifact)
+            for scenario in artifact.scenarios:
+                cursor.execute(
+                    """
+                    INSERT INTO test_scenarios(
+                      scenario_id,project,run_id,source_req_id,source_req_id_type,title,
+                      description,scenario_type,priority,preconditions_json,action,
+                      expected_result,status,confidence
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    ON CONFLICT (scenario_id) DO UPDATE SET
+                      run_id=EXCLUDED.run_id,title=EXCLUDED.title,description=EXCLUDED.description,
+                      scenario_type=EXCLUDED.scenario_type,priority=EXCLUDED.priority,
+                      preconditions_json=EXCLUDED.preconditions_json,action=EXCLUDED.action,
+                      expected_result=EXCLUDED.expected_result,confidence=EXCLUDED.confidence
+                    """,
+                    (
+                        scenario.scenario_id,
+                        artifact.project,
+                        artifact.run_id,
+                        scenario.source_req_id,
+                        scenario.source_req_id_type,
+                        scenario.title,
+                        scenario.description,
+                        scenario.scenario_type,
+                        scenario.priority,
+                        json.dumps(scenario.preconditions),
+                        scenario.action,
+                        scenario.expected_result,
+                        scenario.status,
+                        scenario.confidence,
+                    ),
+                )
+                for story_id in scenario.story_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO story_scenarios(story_id,scenario_id)
+                        VALUES (%s,%s) ON CONFLICT DO NOTHING
+                        """,
+                        (story_id, scenario.scenario_id),
+                    )
+                for requirement_id in scenario.requirement_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO requirement_scenarios(requirement_id,scenario_id)
+                        VALUES (%s,%s) ON CONFLICT DO NOTHING
+                        """,
+                        (requirement_id, scenario.scenario_id),
+                    )
+                for criterion_id in scenario.covered_acceptance_criterion_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO scenario_criteria(scenario_id,criterion_id)
+                        VALUES (%s,%s) ON CONFLICT DO NOTHING
+                        """,
+                        (scenario.scenario_id, criterion_id),
+                    )
+                self._persist_traceability(
+                    cursor, "scenario", scenario.scenario_id, scenario.traceability
+                )
+            connection.commit()
+
+    def load_requirements(self, project: str, run_id: str) -> RequirementsArtifact | None:
+        """Reconstruct the canonical requirements artifact from PostgreSQL payload."""
+        payload = self._load_master(project, run_id, "requirements")
+        return RequirementsArtifact.model_validate(payload) if payload else None
+
+    def load_project_requirements(self, project: str) -> RequirementsArtifact | None:
+        """Load all project requirement identities for stable reuse across runs."""
+        artifacts = [
+            RequirementsArtifact.model_validate(payload)
+            for payload in self._load_project_masters(project, "requirements")
+        ]
+        if not artifacts:
+            return None
+        requirements = {
+            item.requirement_id: item for artifact in artifacts for item in artifact.requirements
+        }
+        entities = {item.entity_id: item for artifact in artifacts for item in artifact.entities}
+        relationships = {
+            item.relationship_id: item for artifact in artifacts for item in artifact.relationships
+        }
+        payload = RequirementsArtifact.model_construct(
+            project=project,
+            run_id=artifacts[-1].run_id,
+            checksum="",
+            requirements=list(requirements.values()),
+            entities=list(entities.values()),
+            relationships=list(relationships.values()),
+        )
+        return RequirementsArtifact.model_validate(
+            {**payload.model_dump(mode="json"), "checksum": canonical_checksum(payload)}
+        )
+
+    def load_user_stories(self, project: str, run_id: str) -> UserStoriesArtifact | None:
+        """Reconstruct the canonical user-stories artifact."""
+        payload = self._load_master(project, run_id, "user_stories")
+        return UserStoriesArtifact.model_validate(payload) if payload else None
+
+    def load_project_user_stories(self, project: str) -> UserStoriesArtifact | None:
+        """Load all project story identities for permanent-ID reuse."""
+        artifacts = [
+            UserStoriesArtifact.model_validate(payload)
+            for payload in self._load_project_masters(project, "user_stories")
+        ]
+        if not artifacts:
+            return None
+        stories = {item.story_id: item for artifact in artifacts for item in artifact.stories}
+        payload = UserStoriesArtifact.model_construct(
+            project=project,
+            run_id=artifacts[-1].run_id,
+            checksum="",
+            stories=list(stories.values()),
+        )
+        return UserStoriesArtifact.model_validate(
+            {**payload.model_dump(mode="json"), "checksum": canonical_checksum(payload)}
+        )
+
+    def load_test_scenarios(self, project: str, run_id: str) -> TestScenariosArtifact | None:
+        """Reconstruct the canonical test-scenarios artifact."""
+        payload = self._load_master(project, run_id, "test_scenarios")
+        return TestScenariosArtifact.model_validate(payload) if payload else None
+
+    def load_project_test_scenarios(self, project: str) -> TestScenariosArtifact | None:
+        """Load all project scenario identities for permanent-ID reuse."""
+        artifacts = [
+            TestScenariosArtifact.model_validate(payload)
+            for payload in self._load_project_masters(project, "test_scenarios")
+        ]
+        if not artifacts:
+            return None
+        scenarios = {
+            item.scenario_id: item for artifact in artifacts for item in artifact.scenarios
+        }
+        payload = TestScenariosArtifact.model_construct(
+            project=project,
+            run_id=artifacts[-1].run_id,
+            checksum="",
+            scenarios=list(scenarios.values()),
+        )
+        return TestScenariosArtifact.model_validate(
+            {**payload.model_dump(mode="json"), "checksum": canonical_checksum(payload)}
+        )
+
+    def save_generation_context(
+        self,
+        *,
+        project: str,
+        run_id: str,
+        stage: str,
+        anchor_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Persist compact context for audit and resume."""
+        if self.settings.postgres.mode == "local_json":
+            self._upsert_local("context", f"{project}:{run_id}:{stage}:{anchor_id}", payload)
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                insert into requirement_delta_events
-                  (event_id, event_type, requirement_id, revision_id, previous_revision_id,
-                   superseded_by_revision_id, document_version_id, evidence_ids,
-                   impacted_artifact_types, payload)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (event_id) do update
-                set payload = excluded.payload
+                INSERT INTO generation_context(project,run_id,stage,anchor_id,payload)
+                VALUES (%s,%s,%s,%s,%s::jsonb)
+                ON CONFLICT (project,run_id,stage,anchor_id) DO UPDATE
+                SET payload=EXCLUDED.payload,updated_at=now()
                 """,
-                (
-                    event.event_id,
-                    event.event_type,
-                    event.requirement_id,
-                    event.revision_id,
-                    event.previous_revision_id,
-                    event.superseded_by_revision_id,
-                    event.document_version_id,
-                    json.dumps(event.evidence_ids),
-                    json.dumps(event.impacted_artifact_types),
-                    json.dumps(event.model_dump(mode="json")),
-                ),
+                (project, run_id, stage, anchor_id, json.dumps(payload)),
             )
+            connection.commit()
 
-    def _persist_requirement_ledger_local(
-        self,
-        artifact: RequirementArtifact,
-        active_by_requirement: dict[str, VerifiedRequirement],
-    ) -> None:
-        """Persist requirement ledger local through the owning storage boundary.
-
-        Args:
-            artifact (RequirementArtifact): Artifact required by the operation's typed contract.
-            active_by_requirement (dict[str, VerifiedRequirement]): Validated active revision for
-                                                                    every represented lineage.
-        """
-        for canonical_fact in artifact.canonical_facts:
-            self._upsert_local(
-                "canonical_fact",
-                canonical_fact.canonical_fact_id,
-                {
-                    "kind": "canonical_fact",
-                    "project": artifact.project,
-                    "document_id": artifact.document_id,
-                    "canonical_fact": canonical_fact.model_dump(mode="json"),
-                },
-            )
-
-        for fact_occurrence in artifact.facts:
-            self._upsert_local(
-                "fact_occurrence",
-                fact_occurrence.fact_id,
-                {
-                    "kind": "fact_occurrence",
-                    "project": artifact.project,
-                    "document_id": artifact.document_id,
-                    "document_version_id": artifact.document_version_id,
-                    "source_path": artifact.source_path,
-                    "fact": fact_occurrence.model_dump(mode="json"),
-                },
-            )
-
-        superseded_revision_ids = {
-            requirement.revision_id
-            for requirement in artifact.requirements
-            if requirement.status == "superseded"
-        }
-        superseded_revision_ids.update(
-            event.revision_id
-            for event in artifact.delta_events
-            if event.event_type == "superseded" and event.revision_id
+    def coverage(self, project: str, run_id: str) -> CoverageSummary:
+        """Return current project/run coverage without lifecycle masking."""
+        requirements = self.load_requirements(project, run_id)
+        stories = self.load_user_stories(project, run_id)
+        scenarios = self.load_test_scenarios(project, run_id)
+        requirement_ids = (
+            {item.requirement_id for item in requirements.requirements} if requirements else set()
         )
-        for revision_id in superseded_revision_ids:
-            self._update_local_revision_status(revision_id, "superseded")
-
-        for requirement in active_by_requirement.values():
-            self._upsert_local(
-                "requirement",
-                requirement.requirement_id,
-                {
-                    "kind": "requirement",
-                    "project": artifact.project,
-                    "document_id": artifact.document_id,
-                    "requirement_id": requirement.requirement_id,
-                    "requirement_key": requirement.requirement_key,
-                    "source_req_id": requirement.source_req_id,
-                    "id_generation_type": requirement.id_generation_type,
-                    "confidence": requirement.confidence,
-                    "status": "active",
-                    "active_revision_id": requirement.revision_id,
-                    "first_seen_document_version_id": artifact.document_version_id,
-                },
-            )
-
-        for requirement in artifact.requirements:
-            self._upsert_local(
-                "requirement_revision",
-                requirement.revision_id,
-                {
-                    "kind": "requirement_revision",
-                    "project": artifact.project,
-                    "document_id": artifact.document_id,
-                    "document_version_id": artifact.document_version_id,
-                    "requirement": requirement.model_dump(mode="json"),
-                    "status": requirement.status,
-                },
-            )
-            for evidence in requirement.evidence:
-                self._upsert_local(
-                    "requirement_evidence",
-                    evidence.evidence_id,
-                    {
-                        "kind": "requirement_evidence",
-                        "project": artifact.project,
-                        "document_id": artifact.document_id,
-                        "document_version_id": artifact.document_version_id,
-                        "requirement_id": requirement.requirement_id,
-                        "revision_id": requirement.revision_id,
-                        "source_path": artifact.source_path,
-                        "evidence": evidence.model_dump(mode="json"),
-                    },
-                )
-                for fact_id in evidence.fact_ids:
-                    self._upsert_local(
-                        "requirement_fact_link",
-                        f"{evidence.evidence_id}:{fact_id}",
-                        {
-                            "kind": "requirement_fact_link",
-                            "evidence_id": evidence.evidence_id,
-                            "fact_id": fact_id,
-                            "requirement_id": requirement.requirement_id,
-                            "revision_id": requirement.revision_id,
-                        },
-                    )
-
-        for ordinal, resolution in enumerate(artifact.identity_resolutions, start=1):
-            resolution_id = "REQRES-" + stable_token(
-                artifact.project,
-                artifact.document_version_id,
-                resolution.chunk_id,
-                resolution.incoming_fingerprint,
-                ordinal,
-                length=20,
-            )
-            self._upsert_local(
-                "requirement_identity_resolution",
-                resolution_id,
-                {
-                    "kind": "requirement_identity_resolution",
-                    "project": artifact.project,
-                    "document_id": artifact.document_id,
-                    "document_version_id": artifact.document_version_id,
-                    "resolution": resolution.model_dump(mode="json"),
-                },
-            )
-
-        for event in artifact.delta_events:
-            if event.event_type == "superseded" and event.revision_id:
-                self._update_local_revision_status(event.revision_id, "superseded")
-            self._upsert_local(
-                "requirement_delta_event",
-                event.event_id,
-                {
-                    "kind": "requirement_delta_event",
-                    "event": event.model_dump(mode="json"),
-                },
-            )
-
-    def _hard_delete_requirement_local(self, requirement_id: str) -> None:
-        """Execute the hard delete requirement local operation within its declared architectural
-        boundary.
-
-        Args:
-            requirement_id (str): Canonical requirement id used as a safe operational anchor.
-        """
-        rows = [
-            row
-            for row in self._read_local_rows()
-            if not _local_row_matches_requirement(row, requirement_id)
-        ]
-        self._write_local_rows(rows)
-
-    def _load_requirements_for_generation_local(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None,
-    ) -> list[RequirementInput]:
-        """Load requirements for generation local within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[RequirementInput]: The typed result produced by the operation.
-        """
-        rows = self._read_local_rows()
-        active_revision_by_requirement = {
-            str(row["requirement_id"]): str(row["active_revision_id"])
-            for row in rows
-            if row.get("kind") == "requirement"
-            and row.get("project") == project
-            and row.get("status") == "active"
+        story_rows = stories.stories if stories else []
+        scenario_rows = scenarios.scenarios if scenarios else []
+        covered_requirements = {
+            requirement_id for story in story_rows for requirement_id in story.requirement_ids
         }
-        inputs: list[RequirementInput] = []
-        for row in rows:
-            if row.get("kind") != "requirement_revision" or row.get("project") != project:
-                continue
-            if row.get("status") != "active":
-                continue
-            if (
-                document_version_id is not None
-                and row.get("document_version_id") != document_version_id
-            ):
-                continue
-            requirement = row.get("requirement")
-            if not isinstance(requirement, dict):
-                continue
-            requirement_id = str(requirement["requirement_id"])
-            revision_id = str(requirement["revision_id"])
-            if active_revision_by_requirement.get(requirement_id) != revision_id:
-                continue
-            inputs.append(
-                RequirementInput(
-                    requirement_id=requirement_id,
-                    revision_id=revision_id,
-                    source_req_id=(
-                        str(requirement.get("source_req_id"))
-                        if requirement.get("source_req_id") is not None
-                        else None
-                    ),
-                    id_generation_type=_id_generation_type(
-                        requirement.get("id_generation_type", "generated")
-                    ),
-                    confidence=float(requirement.get("confidence", 0.0)),
-                    requirement_text=str(requirement["statement"]),
-                    requirement_type=str(requirement["requirement_type"]),
-                    priority=normalize_priority_label(requirement["priority"]),
-                    evidence_chunk_ids=[
-                        str(evidence["source_trace"]["chunk_id"])
-                        for evidence in requirement.get("evidence", [])
-                        if isinstance(evidence, dict)
-                        and isinstance(evidence.get("source_trace"), dict)
-                    ],
-                )
+        covered_stories = {
+            story_id for scenario in scenario_rows for story_id in scenario.story_ids
+        }
+        return CoverageSummary(
+            project=project,
+            run_id=run_id,
+            requirement_count=len(requirement_ids),
+            story_count=len(story_rows),
+            scenario_count=len(scenario_rows),
+            requirements_with_stories=len(requirement_ids & covered_requirements),
+            stories_with_scenarios=len({story.story_id for story in story_rows} & covered_stories),
+        )
+
+    def _persist_traceability(self, cursor: Any, prefix: str, item_id: str, trace: Any) -> None:
+        id_column = f"{prefix}_id"
+        for chunk_id in trace.evidence_chunk_ids:
+            cursor.execute(
+                f"INSERT INTO {prefix}_evidence({id_column},chunk_id) "
+                "VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (item_id, chunk_id),
             )
-        return inputs
-
-    def _load_user_stories_for_generation_local(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None,
-    ) -> list[UserStoryRecord]:
-        """Load user stories for generation local within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[UserStoryRecord]: The typed result produced by the operation.
-        """
-        records: list[UserStoryRecord] = []
-        for row in self._read_local_rows():
-            if row.get("kind") != "user_story" or row.get("project") != project:
-                continue
-            if row.get("status", "active") != "active":
-                continue
-            if (
-                document_version_id is not None
-                and row.get("document_version_id") != document_version_id
-            ):
-                continue
-            payload = row.get("user_story")
-            if isinstance(payload, dict):
-                records.append(UserStoryRecord.model_validate(payload))
-        return records
-
-    def _load_test_scenarios_for_generation_local(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None,
-    ) -> list[TestScenarioRecord]:
-        """Load test scenarios for generation local within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[TestScenarioRecord]: The typed result produced by the operation.
-        """
-        records: list[TestScenarioRecord] = []
-        for row in self._read_local_rows():
-            if row.get("kind") != "test_scenario" or row.get("project") != project:
-                continue
-            if row.get("status", "active") != "active":
-                continue
-            if (
-                document_version_id is not None
-                and row.get("document_version_id") != document_version_id
-            ):
-                continue
-            payload = row.get("test_scenario")
-            if isinstance(payload, dict):
-                records.append(TestScenarioRecord.model_validate(payload))
-        return records
-
-    def _load_artifact_payloads_for_project_local(
-        self,
-        *,
-        project: str,
-        document_version_id: str | None,
-    ) -> list[dict[str, Any]]:
-        """Load artifact payloads for project local within the authorized project and version scope.
-
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-        """
-        rows: list[dict[str, Any]] = []
-        for row in self._read_local_rows():
-            kind = row.get("kind")
-            if kind not in {
-                "requirement_artifact",
-                "user_story_artifact",
-                "test_scenario_artifact",
-            }:
-                continue
-            artifact = row.get("artifact")
-            if not isinstance(artifact, dict) or artifact.get("project") != project:
-                continue
-            if (
-                document_version_id is not None
-                and artifact.get("document_version_id") != document_version_id
-            ):
-                continue
-            rows.append(
-                {
-                    "artifact_kind": _local_artifact_kind(str(kind)),
-                    "artifact_path": str(row.get("artifact_path", "")),
-                    "document_version_id": str(artifact.get("document_version_id", "")),
-                    "payload": artifact,
-                }
+        for entity_id in trace.entity_ids:
+            cursor.execute(
+                f"INSERT INTO {prefix}_entities({id_column},entity_id) "
+                "VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (item_id, entity_id),
             )
-        return rows
+        for relationship_id in trace.relationship_ids:
+            cursor.execute(
+                f"INSERT INTO {prefix}_relationships({id_column},relationship_id) "
+                "VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (item_id, relationship_id),
+            )
 
-    def _connect(self) -> Any:
-        """Execute the connect operation within its declared architectural boundary.
-
-        Returns:
-            Any: The typed result produced by the operation.
-        """
-        import psycopg
-
-        dsn = self.settings.postgres.dsn
-        scheme, separator, remainder = dsn.partition("://")
-        if separator and "+" in scheme:
-            dsn = f"{scheme.split('+', 1)[0]}://{remainder}"
-        return psycopg.connect(dsn)
-
-    def _validate_schema(self, cursor: Any) -> None:
-        """Validate schema against the enforced runtime contract.
-
-        Args:
-            cursor (Any): Cursor required by the operation's typed contract.
-
-        Raises:
-            SchemaMismatchError: If validated inputs or required dependencies cannot satisfy the
-            contract.
-
-        Side Effects:
-            May write transactional or derivative state through the configured store.
-        """
+    def _upsert_master(self, cursor: Any, stage: str, artifact: Any) -> None:
+        payload = artifact.model_dump(mode="json")
         cursor.execute(
             """
-            select table_name, column_name, data_type
-            from information_schema.columns
-            where table_schema = 'public'
-              and table_name = any(%s)
+            INSERT INTO master_artifacts(
+              project,run_id,stage,artifact_schema_version,checksum,payload
+            ) VALUES (%s,%s,%s,%s,%s,%s::jsonb)
+            ON CONFLICT (project,run_id,stage) DO UPDATE SET
+              artifact_schema_version=EXCLUDED.artifact_schema_version,
+              checksum=EXCLUDED.checksum,payload=EXCLUDED.payload,updated_at=now()
             """,
-            (list(_EXPECTED_COLUMNS),),
+            (
+                artifact.project,
+                artifact.run_id,
+                stage,
+                artifact.artifact_schema_version,
+                artifact.checksum,
+                json.dumps(payload),
+            ),
         )
-        actual: dict[str, dict[str, str]] = {}
-        for table_name, column_name, data_type in cursor.fetchall():
-            actual.setdefault(str(table_name), {})[str(column_name)] = str(data_type)
 
-        problems: list[str] = []
-        for table_name, columns in _EXPECTED_COLUMNS.items():
-            actual_columns = actual.get(table_name)
-            if actual_columns is None:
-                problems.append(f"{table_name}: missing table")
-                continue
-            for column_name, expected_types in columns.items():
-                actual_type = actual_columns.get(column_name)
-                if actual_type is None:
-                    problems.append(f"{table_name}.{column_name}: missing column")
-                    continue
-                if actual_type not in expected_types:
-                    expected = "/".join(sorted(expected_types))
-                    problems.append(
-                        f"{table_name}.{column_name}: expected {expected}, found {actual_type}"
-                    )
+    def _load_master(self, project: str, run_id: str, stage: str) -> dict[str, Any] | None:
+        if self.settings.postgres.mode == "local_json":
+            return self._read_local("artifact", f"{project}:{run_id}:{stage}")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payload FROM master_artifacts
+                WHERE project=%s AND run_id=%s AND stage=%s
+                """,
+                (project, run_id, stage),
+            )
+            row = cursor.fetchone()
+        return dict(row[0]) if row else None
 
-        if problems:
-            summary = "; ".join(problems[:8])
-            if len(problems) > 8:
-                summary += f"; ... {len(problems) - 8} more"
-            raise SchemaMismatchError(
-                "postgres schema does not match the current app contract. "
-                f"{summary}. Run `python -m multi_agentic_graph_rag postgres-reset --yes` "
-                "against a disposable/local database, then rerun db-check."
+    def _load_project_masters(self, project: str, stage: str) -> list[dict[str, Any]]:
+        if self.settings.postgres.mode == "local_json":
+            candidates = [
+                row
+                for row in self._local_rows()
+                if row.get("kind") == "artifact"
+                and str(row.get("key", "")).startswith(f"{project}:")
+                and str(row.get("key", "")).endswith(f":{stage}")
+            ]
+            return [dict(row["payload"]) for row in candidates]
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payload FROM master_artifacts
+                WHERE project=%s AND stage=%s
+                ORDER BY updated_at
+                """,
+                (project, stage),
+            )
+            rows = cursor.fetchall()
+        return [dict(row[0]) for row in rows]
+
+    def _persist_artifact_local(self, stage: str, artifact: Any) -> None:
+        self._upsert_local(
+            "artifact",
+            f"{artifact.project}:{artifact.run_id}:{stage}",
+            artifact.model_dump(mode="json"),
+        )
+
+    def _connect(self) -> Any:
+        import psycopg
+
+        return psycopg.connect(self.settings.postgres.dsn)
+
+    def _assert_baseline_compatible(self, cursor: Any) -> None:
+        """Reject a legacy schema instead of attempting an implicit migration."""
+        cursor.execute(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = ANY(%s)
+            """,
+            (list(_BASELINE_REQUIRED_COLUMNS),),
+        )
+        actual: dict[str, set[str]] = {}
+        for table_name, column_name in cursor.fetchall():
+            actual.setdefault(str(table_name), set()).add(str(column_name))
+        incompatible = {
+            table: sorted(required - actual[table])
+            for table, required in _BASELINE_REQUIRED_COLUMNS.items()
+            if table in actual and not required <= actual[table]
+        }
+        if incompatible:
+            raise RuntimeError(
+                "legacy PostgreSQL schema detected; no implicit migration is permitted. "
+                "Confirm the database is disposable, back it up, then run "
+                "`python -m multi_agentic_graph_rag postgres-reset --yes`. "
+                f"missing simplified columns={incompatible}"
             )
 
-    def _append_local(self, payload: dict[str, Any]) -> None:
-        """Append local.
+    def _drop_disposable_schema(self, cursor: Any) -> tuple[int, int]:
+        """Drop every table after explicitly removing its foreign-key constraints."""
+        from psycopg import sql
 
-        Args:
-            payload (dict[str, Any]): Validated structured data for the operation.
+        cursor.execute(
+            """
+            SELECT n.nspname, c.relname, constraint_row.conname
+            FROM pg_constraint AS constraint_row
+            JOIN pg_class AS c ON c.oid = constraint_row.conrelid
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE constraint_row.contype = 'f'
+              AND n.nspname = current_schema()
+            ORDER BY c.relname, constraint_row.conname
+            """
+        )
+        constraints = [
+            (str(schema), str(table), str(constraint))
+            for schema, table, constraint in cursor.fetchall()
+        ]
+        for schema, table, constraint in constraints:
+            cursor.execute(
+                sql.SQL("ALTER TABLE {}.{} DROP CONSTRAINT {}").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                    sql.Identifier(constraint),
+                )
+            )
+        cursor.execute(
+            """
+            SELECT table_schema, table_name
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+              AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """
+        )
+        tables = [(str(schema), str(table)) for schema, table in cursor.fetchall()]
+        for schema, table in tables:
+            cursor.execute(
+                sql.SQL("DROP TABLE {}.{}").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                )
+            )
+        return len(constraints), len(tables)
 
-        Side Effects:
-            May create or atomically replace files in the configured artifact boundary.
-        """
-        self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)
-        payload["written_at"] = datetime.now(UTC).isoformat()
-        with self.settings.postgres.local_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload) + "\n")
-
-    def _upsert_local(self, kind: str, key: str, payload: dict[str, Any]) -> None:
-        """Execute the upsert local operation within its declared architectural boundary.
-
-        Args:
-            kind (str): Kind required by the operation's typed contract.
-            key (str): Key required by the operation's typed contract.
-            payload (dict[str, Any]): Validated structured data for the operation.
-
-        Side Effects:
-            May create or atomically replace files in the configured artifact boundary.
-        """
-        self.settings.postgres.local_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = self._read_local_rows()
-        payload["written_at"] = datetime.now(UTC).isoformat()
-        payload["_local_key"] = key
-        replaced = False
-        for index, row in enumerate(rows):
-            if row.get("kind") == kind and row.get("_local_key") == key:
-                rows[index] = payload
-                replaced = True
-                break
-        if not replaced:
-            rows.append(payload)
-        self._write_local_rows(rows)
-
-    def _read_local_rows(self) -> list[dict[str, Any]]:
-        """Read local rows within the authorized project and version scope.
-
-        Returns:
-            list[dict[str, Any]]: The typed result produced by the operation.
-        """
-        if not self.settings.postgres.local_path.exists():
+    def _local_rows(self) -> list[dict[str, Any]]:
+        path = self.settings.postgres.local_path
+        if not path.exists():
             return []
         return [
             json.loads(line)
-            for line in self.settings.postgres.local_path.read_text(encoding="utf-8").splitlines()
+            for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
 
-    def _write_local_rows(self, rows: list[dict[str, Any]]) -> None:
-        """Write local rows through the owning storage boundary.
+    def _upsert_local(self, kind: str, key: str, payload: dict[str, Any]) -> None:
+        rows = self._local_rows()
+        row = {"kind": kind, "key": key, "payload": payload}
+        for index, existing in enumerate(rows):
+            if existing.get("kind") == kind and existing.get("key") == key:
+                rows[index] = row
+                break
+        else:
+            rows.append(row)
+        _write_rows(self.settings.postgres.local_path, rows)
 
-        Args:
-            rows (list[dict[str, Any]]): Rows required by the operation's typed contract.
-
-        Side Effects:
-            May create or atomically replace files in the configured artifact boundary.
-        """
-        self.settings.postgres.local_path.write_text(
-            "".join(json.dumps(row) + "\n" for row in rows),
-            encoding="utf-8",
-        )
-
-    def _update_local_revision_status(self, revision_id: str, status: str) -> None:
-        """Execute the update local revision status operation within its declared architectural
-        boundary.
-
-        Args:
-            revision_id (str): Canonical revision id used as a safe operational anchor.
-            status (str): Status required by the operation's typed contract.
-        """
-        rows = self._read_local_rows()
-        for row in rows:
-            if row.get("kind") != "requirement_revision" or row.get("_local_key") != revision_id:
-                continue
-            row["status"] = status
-            requirement = row.get("requirement")
-            if isinstance(requirement, dict):
-                requirement["status"] = status
-            row["written_at"] = datetime.now(UTC).isoformat()
-            break
-        self._write_local_rows(rows)
-
-    def _local_document_versions(self) -> dict[tuple[str, str], str]:
-        """Execute the local document versions operation within its declared architectural boundary.
-
-        Returns:
-            dict[tuple[str, str], str]: The typed result produced by the operation.
-        """
-        versions: dict[tuple[str, str], str] = {}
-        for payload in self._read_local_rows():
-            if payload.get("kind") == "document_version":
-                manifest = payload["manifest"]
-                versions[(manifest["document_id"], manifest["version"])] = manifest[
-                    "source_checksum"
-                ]
-        return versions
-
-    def _local_requirement_artifact_payload(
-        self,
-        *,
-        artifact_path: str | None,
-        document_version_id: str | None,
-    ) -> dict[str, Any] | None:
-        """Execute the local requirement artifact payload operation within its declared
-        architectural boundary.
-
-        Args:
-            artifact_path (str | None): Filesystem location authorized for this operation.
-            document_version_id (str | None): Canonical document version id used as a safe
-                                              operational
-                                              anchor.
-
-        Returns:
-            dict[str, Any] | None: The typed result produced by the operation.
-        """
-        rows = [row for row in self._read_local_rows() if row.get("kind") == "requirement_artifact"]
-        if artifact_path is not None:
-            for row in reversed(rows):
-                if row.get("artifact_path") == artifact_path:
-                    artifact = row.get("artifact")
-                    return dict(artifact) if isinstance(artifact, dict) else None
-        if document_version_id is not None:
-            for row in reversed(rows):
-                if row.get("_local_key") == document_version_id:
-                    artifact = row.get("artifact")
-                    return dict(artifact) if isinstance(artifact, dict) else None
+    def _read_local(self, kind: str, key: str) -> dict[str, Any] | None:
+        for row in self._local_rows():
+            if row.get("kind") == kind and row.get("key") == key:
+                return dict(row.get("payload") or {})
         return None
 
-    def _local_requirement_revision_snapshot(
-        self,
-        project: str,
-        document_id: str,
-    ) -> dict[str, RequirementRevisionSnapshot]:
-        """Execute the local requirement revision snapshot operation within its declared
-        architectural boundary.
 
-        Args:
-            project (str): Project scope that isolates persistence and retrieval.
-            document_id (str): Canonical document id used as a safe operational anchor.
-
-        Returns:
-            dict[str, RequirementRevisionSnapshot]: The typed result produced by the operation.
-        """
-        active_by_requirement: dict[str, str] = {}
-        revisions: dict[str, dict[str, Any]] = {}
-        evidence_ids_by_revision: dict[str, dict[str, str]] = {}
-        for row in self._read_local_rows():
-            if (
-                row.get("kind") == "requirement"
-                and row.get("project") == project
-                and row.get("document_id") == document_id
-                and row.get("status") == "active"
-            ):
-                active_by_requirement[str(row["requirement_id"])] = str(row["active_revision_id"])
-            if (
-                row.get("kind") == "requirement_revision"
-                and row.get("project") == project
-                and row.get("document_id") == document_id
-                and row.get("status") == "active"
-            ):
-                requirement = row.get("requirement")
-                if isinstance(requirement, dict):
-                    revisions[str(row["_local_key"])] = requirement
-            if row.get("kind") == "requirement_evidence":
-                evidence = row.get("evidence")
-                if isinstance(evidence, dict) and isinstance(evidence.get("source_trace"), dict):
-                    trace = evidence["source_trace"]
-                    key = requirement_evidence_occurrence_key(
-                        document_version_identifier=str(row.get("document_version_id", "")),
-                        chunk_identifier=str(trace.get("chunk_id", "")),
-                        quote=str(trace.get("quote", "")),
-                        start_char=int(trace.get("start_char", 0)),
-                        end_char=int(trace.get("end_char", 0)),
-                    )
-                    evidence_ids_by_revision.setdefault(str(row.get("revision_id", "")), {})[
-                        key
-                    ] = str(evidence.get("evidence_id", ""))
-
-        snapshot: dict[str, RequirementRevisionSnapshot] = {}
-        for requirement_id, revision_id in active_by_requirement.items():
-            revision = revisions.get(revision_id)
-            if not revision:
-                continue
-            snapshot[requirement_id] = RequirementRevisionSnapshot(
-                requirement_id=requirement_id,
-                revision_id=revision_id,
-                statement=str(revision["statement"]),
-                normalized_statement=str(revision["normalized_statement"]),
-                requirement_type=str(revision.get("requirement_type", "")),
-                semantic_signature=str(revision.get("semantic_signature", "")),
-                evidence_ids=evidence_ids_by_revision.get(revision_id, {}),
-            )
-        return snapshot
-
-
-def _manifest_reference_payload(manifest: DocumentManifest) -> dict[str, Any]:
-    """Execute the manifest reference payload operation within its declared architectural boundary.
-
-    Args:
-        manifest (DocumentManifest): Manifest required by the operation's typed contract.
-
-    Returns:
-        dict[str, Any]: The typed result produced by the operation.
-    """
-    payload = manifest.model_dump(mode="json")
-    payload["chunks"] = [
-        {key: value for key, value in chunk.items() if key not in {"text", "normalized_text"}}
-        for chunk in payload["chunks"]
-    ]
-    return payload
-
-
-def _artifact_payload_from_row(value: Any) -> dict[str, Any]:
-    """Execute the artifact payload from row operation within its declared architectural boundary.
-
-    Args:
-        value (Any): Value required by the operation's typed contract.
-
-    Returns:
-        dict[str, Any]: The typed result produced by the operation.
-    """
-    if isinstance(value, str):
-        value = json.loads(value)
-    if isinstance(value, dict):
-        return value
-    return dict(value)
-
-
-def _remap_local_identity_rows(
-    rows: list[dict[str, Any]],
-    *,
-    project: str,
-    report: Any,
-) -> list[dict[str, Any]]:
-    """Local-JSON equivalent of the transactional relational remap."""
-    from multi_agentic_graph_rag.services.requirement_repair import remap_canonical_payload
-
-    def belongs(row: dict[str, Any]) -> bool:
-        """Execute the belongs operation within its declared architectural boundary.
-
-        Args:
-            row (dict[str, Any]): Validated structured data for the operation.
-
-        Returns:
-            bool: The typed result produced by the operation.
-        """
-        if row.get("project") == project:
-            return True
-        for key in ("artifact", "payload", "requirement", "story", "scenario"):
-            value = row.get(key)
-            if isinstance(value, dict) and value.get("project") == project:
-                return True
-        return False
-
-    repaired: list[dict[str, Any]] = []
-    for source in rows:
-        row = json.loads(json.dumps(source))
-        if not belongs(row):
-            repaired.append(row)
-            continue
-        if row.get("kind") == "requirement_artifact" and isinstance(row.get("artifact"), dict):
-            row["artifact"] = remap_canonical_payload(dict(row["artifact"]), report)
-        row = _remap_identity_value(row, report)
-        old_revision = ""
-        if source.get("kind") == "requirement_revision":
-            old_revision = str(source.get("_local_key", ""))
-        elif isinstance(source.get("requirement"), dict):
-            old_revision = str(source["requirement"].get("revision_id", ""))
-        if old_revision:
-            target_requirement = report.requirement_id_by_revision.get(old_revision)
-            if target_requirement:
-                row["requirement_id"] = target_requirement
-            if source.get("kind") == "requirement_revision":
-                row["_local_key"] = report.revision_id_remap.get(old_revision, old_revision)
-        if source.get("kind") == "requirement_evidence":
-            old_evidence = str(source.get("_local_key", ""))
-            row["_local_key"] = report.evidence_id_remap.get(old_evidence, old_evidence)
-        repaired.append(row)
-
-    deduplicated: dict[tuple[str, str], dict[str, Any]] = {}
-    unkeyed: list[dict[str, Any]] = []
-    for row in repaired:
-        kind = str(row.get("kind", ""))
-        key = str(row.get("_local_key", ""))
-        if kind and key:
-            deduplicated[(kind, key)] = row
-        else:
-            unkeyed.append(row)
-    return [*deduplicated.values(), *unkeyed]
-
-
-def _remap_identity_value(value: Any, report: Any) -> Any:
-    """Recursively update canonical identity references in persisted JSON payloads."""
-    if isinstance(value, list):
-        return [_remap_identity_value(item, report) for item in value]
-    if not isinstance(value, dict):
-        if isinstance(value, str):
-            return report.revision_id_remap.get(value, report.evidence_id_remap.get(value, value))
-        return value
-    old_revision = str(value.get("revision_id", ""))
-    if not old_revision:
-        old_revision = str(value.get("requirement_revision_id", ""))
-    mapped = {key: _remap_identity_value(item, report) for key, item in value.items()}
-    if old_revision:
-        new_revision = report.revision_id_remap.get(old_revision, old_revision)
-        if "revision_id" in mapped:
-            mapped["revision_id"] = new_revision
-        if "requirement_revision_id" in mapped:
-            mapped["requirement_revision_id"] = new_revision
-        target_requirement = report.requirement_id_by_revision.get(old_revision)
-        if target_requirement and "requirement_id" in mapped:
-            mapped["requirement_id"] = target_requirement
-    return mapped
-
-
-def _local_artifact_kind(kind: str) -> str:
-    """Execute the local artifact kind operation within its declared architectural boundary.
-
-    Args:
-        kind (str): Kind required by the operation's typed contract.
-
-    Returns:
-        str: The typed result produced by the operation.
-    """
-    if kind == "requirement_artifact":
-        return "requirements"
-    if kind == "user_story_artifact":
-        return "user_stories"
-    if kind == "test_scenario_artifact":
-        return "test_scenarios"
-    return kind
-
-
-def _id_generation_type(value: object) -> Literal["source", "generated"]:
-    """Execute the id generation type operation within its declared architectural boundary.
-
-    Args:
-        value (object): Value required by the operation's typed contract.
-
-    Returns:
-        Literal['source', 'generated']: The typed result produced by the operation.
-    """
-    return "source" if str(value).strip().lower() == "source" else "generated"
-
-
-def _coerce_user_story_build_result(
-    artifact: UserStoryArtifact | UserStoryBuildResult,
-) -> UserStoryBuildResult:
-    """Execute the coerce user story build result operation within its declared architectural
-    boundary.
-
-    Args:
-        artifact (UserStoryArtifact | UserStoryBuildResult): Artifact required by the operation's
-                                                             typed contract.
-
-    Returns:
-        UserStoryBuildResult: The typed result produced by the operation.
-
-    Raises:
-        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-    """
-    if isinstance(artifact, UserStoryBuildResult):
-        return artifact
-    raise ValueError("persisting user stories requires internal UserStoryBuildResult records")
-
-
-def _coerce_test_scenario_build_result(
-    artifact: TestScenarioArtifact | TestScenarioBuildResult,
-) -> TestScenarioBuildResult:
-    """Execute the coerce test scenario build result operation within its declared architectural
-    boundary.
-
-    Args:
-        artifact (TestScenarioArtifact | TestScenarioBuildResult): Artifact required by the
-                                                                   operation's typed contract.
-
-    Returns:
-        TestScenarioBuildResult: The typed result produced by the operation.
-
-    Raises:
-        ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-    """
-    if isinstance(artifact, TestScenarioBuildResult):
-        return artifact
-    raise ValueError("persisting test scenarios requires internal TestScenarioBuildResult records")
-
-
-def _local_row_matches_requirement(row: dict[str, Any], requirement_id: str) -> bool:
-    """Execute the local row matches requirement operation within its declared architectural
-    boundary.
-
-    Args:
-        row (dict[str, Any]): Validated structured data for the operation.
-        requirement_id (str): Canonical requirement id used as a safe operational anchor.
-
-    Returns:
-        bool: The typed result produced by the operation.
-    """
-    if row.get("requirement_id") == requirement_id:
-        return True
-    if row.get("kind") == "requirement" and row.get("_local_key") == requirement_id:
-        return True
-    for key in ("requirement", "user_story", "test_scenario", "event"):
-        payload = row.get(key)
-        if isinstance(payload, dict) and payload.get("requirement_id") == requirement_id:
-            return True
-    return False
-
-
-def _compute_coverage(
-    requirements: list[tuple[str, str]],
-    stories: list[tuple[str, str]],
-    scenario_story_ids: list[str],
-) -> list[dict[str, Any]]:
-    """Derive per-requirement coverage status from flat relational rows.
-
-    ``requirements`` = (requirement_id, requirement_status);
-    ``stories`` = (story_id, requirement_id); ``scenario_story_ids`` = parent story of
-    each active scenario. Pure and deterministic for unit testing.
-    """
-    stories_by_requirement: dict[str, list[str]] = {}
-    for story_id, requirement_id in stories:
-        stories_by_requirement.setdefault(requirement_id, []).append(story_id)
-
-    scenario_count_by_story: dict[str, int] = {}
-    for story_id in scenario_story_ids:
-        scenario_count_by_story[story_id] = scenario_count_by_story.get(story_id, 0) + 1
-
-    result: list[dict[str, Any]] = []
-    for requirement_id, requirement_status in sorted(requirements):
-        story_ids = stories_by_requirement.get(requirement_id, [])
-        if not story_ids:
-            coverage_status = "no_story"
-        elif all(scenario_count_by_story.get(story_id, 0) > 0 for story_id in story_ids):
-            coverage_status = "scenario_covered"
-        else:
-            coverage_status = "story_covered"
-        result.append(
-            {
-                "requirement_id": requirement_id,
-                "requirement_status": requirement_status,
-                "coverage_status": coverage_status,
-                "story_ids": story_ids,
-                "scenario_count": sum(
-                    scenario_count_by_story.get(story_id, 0) for story_id in story_ids
-                ),
-            }
-        )
-    return result
-
-
-def _safe_percentage(numerator: int, denominator: int) -> float:
-    """Zero-safe percentage rounded deterministically to two decimals."""
-    if denominator <= 0:
-        return 0.0
-    return round(100.0 * numerator / denominator, 2)
-
-
-def build_coverage_report(
-    *,
-    project: str,
-    document_version_id: str | None,
-    rows: list[dict[str, Any]],
-) -> CoverageReport:
-    """Roll per-requirement coverage rows into a strict, zero-safe report."""
-    requirement_rows = [
-        CoverageRequirementRow(
-            requirement_id=str(row["requirement_id"]),
-            requirement_status=str(row["requirement_status"]),
-            coverage_status=str(row["coverage_status"]),
-            story_ids=[str(sid) for sid in row.get("story_ids", [])],
-            scenario_count=int(row.get("scenario_count", 0)),
-        )
-        for row in rows
-    ]
-    total = len(requirement_rows)
-    with_stories = sum(
-        1
-        for row in requirement_rows
-        if row.coverage_status in ("story_covered", "scenario_covered")
+def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows),
+        encoding="utf-8",
     )
-    scenario_covered = sum(
-        1 for row in requirement_rows if row.coverage_status == "scenario_covered"
-    )
-    no_story = sum(1 for row in requirement_rows if row.coverage_status == "no_story")
-    summary = CoverageSummary(
-        total_requirements=total,
-        requirements_with_stories=with_stories,
-        requirements_scenario_covered=scenario_covered,
-        no_story_count=no_story,
-        story_coverage_pct=_safe_percentage(with_stories, total),
-        scenario_coverage_pct=_safe_percentage(scenario_covered, total),
-    )
-    return CoverageReport(
-        project=project,
-        document_version_id=document_version_id,
-        requirements=requirement_rows,
-        summary=summary,
-    )
+
+
+__all__ = ["PostgresStore"]

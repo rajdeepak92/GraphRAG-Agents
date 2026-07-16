@@ -1,975 +1,52 @@
-"""Strict Pydantic contracts used by ingestion and generated artifacts."""
+"""Strict contracts for the project/run-scoped QA workflow."""
 
 from __future__ import annotations
 
-import re
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
-class StrictModel(BaseModel):
-    """Define the validated strict model data contract."""
-
-    __test__: ClassVar[bool] = False
-
-    model_config = ConfigDict(extra="forbid")
-
-
-_SOURCE_REQUIREMENT_ID_RE = re.compile(
-    r"\b(?:(?:BR|AC|FR|NFR)\s*[-_]\s*[A-Z0-9]+(?:\s*[-_]\s*[A-Z0-9]+)*|"
-    r"SYS\s*[-_ ]\s*REQ\s*[-_ ]\s*[A-Z0-9]+(?:\s*[-_]\s*[A-Z0-9]+)*)\b",
-    re.I,
-)
-_PLACEHOLDER_REQUIREMENT_TEXT_RE = re.compile(
-    r"^(?:requirement|business requirement|acceptance criteria|functional "
-    r"requirement|non-functional requirement|placeholder|tbd|n/?a|none)$",
-    re.I,
-)
-_PLACEHOLDER_USER_STORY_TEXT_RE = re.compile(
-    r"^(?:user story|story|title|persona|role|user|actor|business value|value|"
-    r"epic|feature|tbd|todo|placeholder|n/?a|na|none|null|unknown)$",
-    re.I,
-)
-_SEMANTIC_MODAL_RE = re.compile(r"\b(shall|must|should|may|will)\b", re.I)
-_ENTITY_DISCRIMINATOR_RE = re.compile(
-    r"\b(?:[A-Za-z]+[-_]\d+[A-Za-z0-9_-]*|[A-Z]{2,}[A-Z0-9_-]*|"
-    r"(?:register|channel|sensor|api|port)\s*[-_:]?\s*[A-Za-z0-9_-]+)\b"
-)
-_MUTABLE_PARAMETER_RE = re.compile(
-    r"\b\d+(?:\.\d+)?\s*(?:°\s*[CF]|ms|milliseconds?|seconds?|minutes?|hours?|%|percent|"
-    r"degrees?|bytes?|kb|mb|gb|items?|records?|requests?)\b",
-    re.I,
-)
-
-
-def normalize_priority_label(value: object) -> Literal["High", "Medium", "Low"]:
-    """Normalize an arbitrary priority string to High/Medium/Low."""
-    if value is None:
-        return "Medium"
-    text = str(value).strip()
-    if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
-        return "Medium"
-    normalized = text.lower()
-    if normalized in {"high", "critical", "mandatory", "must", "required"}:
-        return "High"
-    if normalized in {"low", "optional", "future", "nice-to-have", "nice to have"}:
-        return "Low"
-    return "Medium"
-
-
-def normalize_source_req_id(value: object) -> str | None:
-    """Normalize an optional source requirement identifier."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
-        return None
-    match = _SOURCE_REQUIREMENT_ID_RE.search(text)
-    if match is None:
-        return None
-    parts = [part for part in re.split(r"[\s_-]+", match.group(0).upper()) if part]
-    if len(parts) >= 3 and parts[0] == "SYS" and parts[1] == "REQ":
-        return "SYS_REQ_" + "_".join(parts[2:])
-    return "-".join(parts)
-
-
-class IngestionRequest(StrictModel):
-    """Define the validated ingestion request data contract."""
-
-    project: str
-    document: Path
-    version: str
-    logical_name: str | None = None
-    replace_version: bool = False
-    reasoning_provider: str | None = None
-    embedding_provider: str | None = None
-
-    @field_validator("project", "version")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class SourceTrace(StrictModel):
-    """Define the validated source trace data contract."""
-
-    chunk_id: str
-    quote: str
-    start_char: int
-    end_char: int
-    page: int | None = None
-    section: str | None = None
-
-    @field_validator("quote")
-    @classmethod
-    def quote_is_not_empty(cls, value: str) -> str:
-        """Execute the quote is not empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("quote must not be empty")
-        return value
-
-    @model_validator(mode="after")
-    def validate_span(self) -> SourceTrace:
-        """Validate span against the enforced runtime contract.
-
-        Returns:
-            SourceTrace: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        if self.end_char < self.start_char:
-            raise ValueError("end_char must be greater than or equal to start_char")
-        return self
-
-
-class ParsedBlock(StrictModel):
-    """Define the validated parsed block data contract."""
-
-    block_id: str
-    original_text: str
-    normalized_text: str
-    page: int | None = None
-    section: str | None = None
-    paragraph: int | None = None
-    start_char: int
-    end_char: int
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class DocumentChunk(StrictModel):
-    """Define the validated document chunk data contract."""
-
-    chunk_id: str
-    ordinal: int
-    text: str
-    normalized_text: str
-    page: int | None = None
-    section: str | None = None
-    start_char: int
-    end_char: int
-    source_block_ids: list[str]
-
-
-class DocumentManifest(StrictModel):
-    """Define the validated document manifest data contract."""
-
-    project: str
-    document_id: str
-    document_version_id: str
-    logical_name: str
-    version: str
-    source_path: str
-    source_checksum: str
-    parser_fingerprint: str
-    chunker_fingerprint: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    chunks: list[DocumentChunk]
-
-
-class RequirementSemanticFields(StrictModel):
-    """Validated semantic slots used for identity resolution, never permanent IDs."""
-
-    actor: str = ""
-    modality: str = ""
-    action: str = ""
-    object: str = ""
-    condition: str = ""
-    polarity: Literal["positive", "negative"] = "positive"
-    requirement_family: str = ""
-    entity_discriminators: list[str] = Field(default_factory=list)
-    mutable_parameters: list[str] = Field(default_factory=list)
-
-    def populate_from_statement(self, statement: str, requirement_type: str) -> None:
-        """Execute the populate from statement operation within its declared architectural boundary.
-
-        Args:
-            statement (str): Statement required by the operation's typed contract.
-            requirement_type (str): Requirement type required by the operation's typed contract.
-        """
-        text = " ".join(statement.strip().split())
-        modal_match = _SEMANTIC_MODAL_RE.search(text)
-        if modal_match is not None:
-            actor = text[: modal_match.start()].strip(" ,:;-")
-            remainder = text[modal_match.end() :].strip()
-            negative = remainder.lower().startswith("not ")
-            if negative:
-                remainder = remainder[4:].strip()
-            action, _, object_text = remainder.partition(" ")
-            object.__setattr__(self, "actor", self.actor.strip() or actor or "system")
-            object.__setattr__(
-                self, "modality", self.modality.strip() or modal_match.group(1).lower()
-            )
-            object.__setattr__(self, "action", self.action.strip() or action)
-            object.__setattr__(self, "object", self.object.strip() or object_text)
-            if negative:
-                object.__setattr__(self, "polarity", "negative")
-        else:
-            object.__setattr__(self, "actor", self.actor.strip() or "system")
-            object.__setattr__(self, "action", self.action.strip() or text)
-        condition_match = re.search(
-            r"\b(if|when|unless|while|during|after|before|where)\b.+$", text, re.I
-        )
-        if condition_match is not None and not self.condition.strip():
-            object.__setattr__(self, "condition", condition_match.group(0))
-        object.__setattr__(
-            self,
-            "requirement_family",
-            self.requirement_family.strip() or requirement_type.strip() or "Functional Requirement",
-        )
-        discriminators = list(dict.fromkeys(_ENTITY_DISCRIMINATOR_RE.findall(text)))
-        object.__setattr__(
-            self,
-            "entity_discriminators",
-            list(dict.fromkeys([*self.entity_discriminators, *discriminators])),
-        )
-        mutable = [match.group(0) for match in _MUTABLE_PARAMETER_RE.finditer(text)]
-        object.__setattr__(
-            self,
-            "mutable_parameters",
-            list(dict.fromkeys([*self.mutable_parameters, *mutable])),
-        )
-
-
-class LLMRequirementCandidate(RequirementSemanticFields):
-    """Coordinate llmrequirement candidate behavior within the domain boundary."""
-
-    temp_id: str
-    statement: str
-    requirement_type: str = "functional"
-    priority: str = "medium"
-    requirement_key: str | None = None
-    source_req_id: str | None = None
-    confidence: float = Field(ge=0.0, le=1.0)
-    source_trace: SourceTrace
-
-
-class LLMFactCandidate(StrictModel):
-    """Define the validated llmfact candidate data contract."""
-
-    temp_id: str
-    text: str
-    source_trace: SourceTrace
-    requirements: list[LLMRequirementCandidate] = Field(default_factory=list)
-
-
-class LLMDiscoveredRequirement(RequirementSemanticFields):
-    """Coordinate llmdiscovered requirement behavior within the domain boundary."""
-
-    req_text: str
-    requirement_type: str = "Functional Requirement"
-    priority: str = "Medium"
-    requirement_key: str | None = None
-    source_req_id: str | None = None
-    confidence: float = Field(ge=0.0, le=1.0)
-
-    @model_validator(mode="after")
-    def validate_atomic_semantics(self) -> LLMDiscoveredRequirement:
-        """Validate atomic semantics against the enforced runtime contract.
-
-        Returns:
-            LLMDiscoveredRequirement: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        modal_count = len(_SEMANTIC_MODAL_RE.findall(self.req_text))
-        if modal_count > 1:
-            raise ValueError(
-                "req_text contains multiple modal obligations; split into atomic records"
-            )
-        self.populate_from_statement(self.req_text, self.requirement_type)
-        if not self.actor or not self.action or not self.requirement_family:
-            raise ValueError("actor, action, and requirement_family must be non-empty")
-        return self
-
-    @field_validator("source_req_id", mode="before")
-    @classmethod
-    def normalize_source_identifier(cls, value: object) -> str | None:
-        """Normalize source identifier deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str | None: The typed result produced by the operation.
-        """
-        return normalize_source_req_id(value)
-
-    @field_validator("priority", mode="before")
-    @classmethod
-    def normalize_priority(cls, value: object) -> str:
-        """Normalize priority deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        if value is None:
-            return "Medium"
-
-        text = str(value).strip()
-        if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
-            return "Medium"
-
-        normalized = text.lower()
-        if normalized in {"high", "critical", "mandatory", "must", "required"}:
-            return "High"
-        if normalized in {"medium", "med", "normal", "default"}:
-            return "Medium"
-        if normalized in {"low", "optional", "future", "nice-to-have", "nice to have"}:
-            return "Low"
-
-        return "Medium"
-
-    @field_validator("requirement_type", mode="before")
-    @classmethod
-    def normalize_requirement_type(cls, value: object) -> str:
-        """Normalize requirement type deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        if value is None:
-            return "Functional Requirement"
-
-        text = str(value).strip()
-        if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
-            return "Functional Requirement"
-
-        normalized = text.lower()
-        if normalized in {"functional", "fr", "functional requirement"}:
-            return "Functional Requirement"
-        if normalized in {"business", "br", "business requirement"}:
-            return "Business Requirement"
-        if normalized in {"acceptance", "ac", "acceptance criteria", "acceptance criterion"}:
-            return "Acceptance Criteria"
-        if normalized in {"non-functional", "non functional", "nfr", "non-functional requirement"}:
-            return "Non-Functional Requirement"
-        if normalized in {"security", "security requirement"}:
-            return "Security Requirement"
-        if normalized in {"configuration", "configuration requirement"}:
-            return "Configuration Requirement"
-        if normalized in {"validation", "validation requirement"}:
-            return "Validation Requirement"
-        if normalized in {"alerting", "alerting requirement"}:
-            return "Alerting Requirement"
-        if normalized in {"health", "health requirement"}:
-            return "Health Requirement"
-        if normalized in {"data quality", "data quality requirement"}:
-            return "Data Quality Requirement"
-        if normalized in {"application", "application requirement"}:
-            return "Application Requirement"
-        if normalized in {"offline", "offline requirement"}:
-            return "Offline Requirement"
-
-        return text
-
-    @field_validator("req_text")
-    @classmethod
-    def meaningful_requirement_text(cls, value: str) -> str:
-        """Execute the meaningful requirement text operation within its declared architectural
-        boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("req_text must not be empty")
-        if _PLACEHOLDER_REQUIREMENT_TEXT_RE.match(value):
-            raise ValueError(f"req_text must not be a placeholder: {value!r}")
-        if _SOURCE_REQUIREMENT_ID_RE.search(value):
-            raise ValueError(f"req_text must not contain source identifiers: {value!r}")
-        return value
-
-
-class LLMDiscoveredFact(StrictModel):
-    """Define the validated llmdiscovered fact data contract."""
-
-    fact_text: str
-    quote: str
-    requirements: list[LLMDiscoveredRequirement] = Field(default_factory=list)
-
-    @field_validator("fact_text", "quote")
-    @classmethod
-    def non_empty_text(cls, value: str) -> str:
-        """Execute the non empty text operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class RequirementDiscoveryChunkOutput(StrictModel):
-    """Define the validated requirement discovery chunk output data contract."""
-
-    facts: list[LLMDiscoveredFact] = Field(default_factory=list)
-
-
-class LLMChunkExtraction(StrictModel):
-    """Define the validated llmchunk extraction data contract."""
-
-    chunk_id: str
-    facts: list[LLMFactCandidate] = Field(default_factory=list)
-
-
-class RequirementDiscoveryOutput(StrictModel):
-    """Define the validated requirement discovery output data contract."""
-
-    chunks: list[LLMChunkExtraction] = Field(default_factory=list)
-
-
-class CanonicalFact(StrictModel):
-    """Define the validated canonical fact data contract."""
-
-    canonical_fact_id: str
-    normalized_text: str
-    representative_text: str
-
-
-class VerifiedFact(StrictModel):
-    """Define the validated verified fact data contract."""
-
-    fact_id: str
-    canonical_fact_id: str = ""
-    text: str
-    source_trace: SourceTrace
-
-
-class RequirementEvidence(StrictModel):
-    """Define the validated requirement evidence data contract."""
-
-    evidence_id: str
-    fact_ids: list[str]
-    source_trace: SourceTrace
-
-
-class VerifiedRequirement(RequirementSemanticFields):
-    """Coordinate verified requirement behavior within the domain boundary."""
-
-    requirement_id: str
-    revision_id: str = ""
-    requirement_key: str = ""
-    source_req_id: str | None = None
-    id_generation_type: Literal["source", "generated"] = "generated"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    statement: str
-    normalized_statement: str = ""
-    semantic_signature: str = ""
-    requirement_type: str
-    priority: str
-    status: Literal["active", "superseded"] = "active"
-    fact_ids: list[str]
-    source_trace: SourceTrace
-    evidence: list[RequirementEvidence] = Field(default_factory=list)
-
-
-class RequirementDeltaEvent(StrictModel):
-    """Define the validated requirement delta event data contract."""
-
-    event_id: str
-    event_type: Literal[
-        "new",
-        "duplicate",
-        "changed",
-        "superseded",
-        "updated",
-        "strictly_outdated",
-        "unchanged",
-    ]
-    requirement_id: str
-    revision_id: str | None = None
-    previous_revision_id: str | None = None
-    superseded_by_revision_id: str | None = None
-    document_version_id: str
-    evidence_ids: list[str] = Field(default_factory=list)
-    impacted_artifact_types: list[str] = Field(default_factory=list)
-
-
-class RequirementRevisionSnapshot(StrictModel):
-    """Define the validated requirement revision snapshot data contract."""
-
-    requirement_id: str
-    revision_id: str
-    statement: str
-    normalized_statement: str
-    requirement_type: str = ""
-    semantic_signature: str = ""
-    evidence_ids: dict[str, str] = Field(default_factory=dict)
-
-
-class RequirementIdentityResolutionRecord(StrictModel):
-    """Define the validated requirement identity resolution record data contract."""
-
-    incoming_fingerprint: str
-    document_version_id: str
-    chunk_id: str
-    candidate_ids: list[str] = Field(default_factory=list)
-    candidate_scores: dict[str, float] = Field(default_factory=dict)
-    reranker_order: list[str] = Field(default_factory=list)
-    deterministic_rule: str
-    judge_result: str | None = None
-    decision: Literal["EXACT", "SAME_LINEAGE_REVISION", "DISTINCT", "AMBIGUOUS"]
-    reason: str
-    requirement_id: str
-    revision_id: str
-
-
-class RequirementIdentityResolutionArtifact(StrictModel):
-    """Define the validated requirement identity resolution artifact data contract."""
-
-    artifact_schema_version: Literal["1.0-requirement-identity-resolution"] = (
-        "1.0-requirement-identity-resolution"
-    )
-    project: str
-    document_id: str
-    document_version_id: str
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    resolutions: list[RequirementIdentityResolutionRecord] = Field(default_factory=list)
-
-
-class RequirementArtifact(StrictModel):
-    """Define the validated requirement artifact data contract."""
-
-    artifact_schema_version: Literal["1.0", "2.0", "2.1"] = "2.1"
-    project: str
-    document_id: str
-    document_version_id: str
-    version: str
-    source_path: str = ""
-    source_checksum: str
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    canonical_facts: list[CanonicalFact] = Field(default_factory=list)
-    facts: list[VerifiedFact]
-    requirements: list[VerifiedRequirement]
-    delta_events: list[RequirementDeltaEvent] = Field(default_factory=list)
-    identity_resolutions: list[RequirementIdentityResolutionRecord] = Field(default_factory=list)
-
-
-class CanonicalRequirementEvidence(StrictModel):
-    """One preserved source occurrence for a canonical requirement revision."""
-
-    evidence_id: str
-    document_version_id: str
-    chunk_id: str
-    fact_ids: list[str] = Field(default_factory=list)
-    quote: str
-    start_char: int
-    end_char: int
-    page: int | None = None
-    section: str | None = None
-    source_path: str = ""
-
-
-class CanonicalRequirement(RequirementSemanticFields):
-    """Canonical public requirement row; occurrences are nested, never duplicated."""
-
-    requirement_id: str
-    revision_id: str
-    source_req_id: str | None = None
-    id_generation_type: Literal["source", "generated"] = "generated"
-    confidence: float = Field(ge=0.0, le=1.0)
-    requirement_text: str
-    semantic_signature: str
-    requirement_type: str
-    priority: Literal["High", "Medium", "Low"]
-    status: Literal["Active", "Superseded"]
-    evidence: list[CanonicalRequirementEvidence] = Field(default_factory=list)
-
-
-class CanonicalRequirementsArtifact(StrictModel):
-    """Public schema 5.0: one row per canonical requirement revision."""
-
-    artifact_schema_version: Literal["5.0-requirements"] = "5.0-requirements"
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    requirements: list[CanonicalRequirement]
-
-
-class RequirementInput(StrictModel):
-    """Normalized requirement fed into user-story generation (stage 3 input)."""
-
-    requirement_id: str
-    revision_id: str = ""
-    source_req_id: str | None = None
-    id_generation_type: Literal["source", "generated"] = "generated"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    requirement_text: str
-    requirement_type: str = "Functional Requirement"
-    priority: Literal["High", "Medium", "Low"] = "Medium"
-    evidence_chunk_ids: list[str] = Field(default_factory=list)
-
-    @field_validator("priority", mode="before")
-    @classmethod
-    def normalize_priority(cls, value: object) -> str:
-        """Normalize priority deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        return normalize_priority_label(value)
-
-    @field_validator("requirement_id", "requirement_text")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class UserStoryStatement(StrictModel):
-    """Define the validated user story statement data contract."""
-
-    as_a: str
-    i_want: str
-    so_that: str
-
-    @field_validator("as_a", "i_want", "so_that")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class AcceptanceCriterion(StrictModel):
-    """Define the validated acceptance criterion data contract."""
-
-    id: str = ""
-    title: str
-    given: str
-    when: str
-    then: str
-
-    @field_validator("title", "given", "when", "then")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class BusinessRule(StrictModel):
-    """Define the validated business rule data contract."""
-
-    id: str = ""
-    rule: str
-
-    @field_validator("rule")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class TestScenario(StrictModel):
-    """Define the validated test scenario data contract."""
-
-    id: str = ""
-    scenario: str
-
-    @field_validator("scenario")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class _UserStoryContent(StrictModel):
-    """Define the validated user story content data contract."""
-
-    title: str
-    priority: Literal["High", "Medium", "Low"] = "Medium"
-    persona: str
-    user_story: UserStoryStatement
-    acceptance_criteria: list[str] = Field(min_length=1)
-    confidence: float = Field(ge=0.0, le=1.0)
-
-    @field_validator("priority", mode="before")
-    @classmethod
-    def normalize_priority(cls, value: object) -> str:
-        """Normalize priority deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        return normalize_priority_label(value)
-
-    @field_validator("title", "persona")
-    @classmethod
-    def meaningful_text(cls, value: str) -> str:
-        """Execute the meaningful text operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        if _PLACEHOLDER_USER_STORY_TEXT_RE.match(value):
-            raise ValueError(f"value must not be a placeholder: {value!r}")
-        return value
-
-    @field_validator("acceptance_criteria")
-    @classmethod
-    def non_empty_acceptance_criteria(cls, values: list[str]) -> list[str]:
-        """Execute the non empty acceptance criteria operation within its declared architectural
-        boundary.
-
-        Args:
-            values (list[str]): Ordered values processed without changing their identities.
-
-        Returns:
-            list[str]: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        cleaned = [value.strip() for value in values]
-        if any(not value for value in cleaned):
-            raise ValueError("acceptance_criteria entries must not be empty")
-        return cleaned
-
-
-class UserStoryModel(_UserStoryContent):
-    """A single user story exactly as returned by the reasoning model.
-
-    The model returns content only; Python assigns the permanent ``story_id`` and
-    renumbers nested acceptance-criteria / business-rule / test-scenario ids.
-    """
-
-
-class UserStoryGenerationOutput(StrictModel):
-    """Define the validated user story generation output data contract."""
-
-    user_stories: list[UserStoryModel] = Field(min_length=1)
-
-
-class UserStoryRecord(_UserStoryContent):
-    """A persisted user story with permanent id and provenance."""
-
-    story_id: str
-    requirement_id: str
-    requirement_revision_id: str = ""
-    source_req_id: str | None = None
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    origin_version: str = ""
-    status: Literal["active", "superseded", "outdated"] = "active"
-    origin: Literal["generation", "feedback"] = "generation"
-    evidence_chunk_ids: list[str] = Field(default_factory=list)
-    # Generation grounding (Area 7): the retrieved context that actually produced
-    # this story, kept separate from ``evidence_chunk_ids`` (requirement source).
-    generation_context_run_id: str = ""
-    retrieved_assertion_ids: list[str] = Field(default_factory=list)
-    retrieved_chunk_ids: list[str] = Field(default_factory=list)
-    context_mode: str = ""
-
-
-class UserStoryProjection(_UserStoryContent):
-    """Coordinate user story projection behavior within the domain boundary."""
-
-    story_id: str
-    requirement_id: str
-    revision_id: str = ""
-    source_req_id: str | None = None
-
-
-class UserStoryTraceability(StrictModel):
-    """Define the validated user story traceability data contract."""
-
-    story_id: str
-    requirement_id: str
-    revision_id: str = ""
-    source_req_id: str | None = None
-    evidence_chunk_ids: list[str] = Field(default_factory=list)
-    generation_context_run_id: str = ""
-    retrieved_assertion_ids: list[str] = Field(default_factory=list)
-    retrieved_chunk_ids: list[str] = Field(default_factory=list)
-    context_mode: str = ""
-
-
-class UserStoryArtifact(StrictModel):
-    """Define the validated user story artifact data contract."""
-
-    artifact_schema_version: Literal["3.0-user-stories"] = "3.0-user-stories"
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime | None = None
-    stories: list[UserStoryProjection]
-    traceability: list[UserStoryTraceability] = Field(default_factory=list)
-
-
-class UserStoryBuildResult(StrictModel):
-    """Define the validated user story build result data contract."""
-
-    artifact: UserStoryArtifact
-    records: dict[str, UserStoryRecord]
-    coverage: dict[str, list[str]] = Field(default_factory=dict)
-
-
-class UserStoryRequest(StrictModel):
-    """Define the validated user story request data contract."""
-
-    requirements_path: Path | None = None
-    project: str | None = None
-    document_version_id: str | None = None
-    reasoning_provider: str | None = None
-    embedding_provider: str | None = None
-    reranker_provider: str | None = None
-    top_k: int | None = None
-
-
-class UserStoryResult(StrictModel):
-    """Define the validated user story result data contract."""
-
-    run_id: str
-    status: str
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    artifact_path: Path
-    requirement_count: int
-    story_ids: list[str]
-    coverage: dict[str, list[str]] = Field(default_factory=dict)
-    warnings: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-
-
-ScenarioTypeLabel = Literal[
+RequirementType = Literal[
+    "Functional Requirement",
+    "Business Requirement",
+    "Non-Functional Requirement",
+    "Security Requirement",
+    "Configuration Requirement",
+    "Validation Requirement",
+    "Alerting Requirement",
+    "Health Requirement",
+    "Data Quality Requirement",
+    "Application Requirement",
+    "Offline Requirement",
+]
+Priority = Literal["High", "Medium", "Low"]
+SourceRequirementType = Literal["source", "generated"]
+EntityType = Literal[
+    "ACTOR",
+    "SYSTEM",
+    "COMPONENT",
+    "DATA",
+    "PROCESS",
+    "RULE",
+    "INTERFACE",
+    "EXTERNAL_SYSTEM",
+    "EVENT",
+    "STATE",
+]
+RelationshipType = Literal[
+    "USES",
+    "SUPPORTS",
+    "CONTROLS",
+    "COLLECTS_FROM",
+    "COMMUNICATES_VIA",
+    "CONNECTS_TO",
+    "REFERS_TO",
+]
+ScenarioType = Literal[
     "Positive",
     "Negative",
     "Boundary",
@@ -979,915 +56,683 @@ ScenarioTypeLabel = Literal[
     "Security",
     "Usability",
 ]
-
-_SCENARIO_TYPE_SYNONYMS: dict[str, ScenarioTypeLabel] = {
-    "positive": "Positive",
-    "happy path": "Positive",
-    "functional": "Positive",
-    "smoke": "Positive",
-    "negative": "Negative",
-    "error": "Negative",
-    "invalid": "Negative",
-    "boundary": "Boundary",
-    "edge": "Boundary",
-    "edge case": "Boundary",
-    "limit": "Boundary",
-    "alternative": "Alternative",
-    "alt": "Alternative",
-    "alt flow": "Alternative",
-    "exception": "Exception",
-    "recovery": "Exception",
-    "failover": "Exception",
-    "error handling": "Exception",
-    "performance": "Performance",
-    "load": "Performance",
-    "stress": "Performance",
-    "latency": "Performance",
-    "security": "Security",
-    "authn": "Security",
-    "authz": "Security",
-    "usability": "Usability",
-    "ux": "Usability",
-    "accessibility": "Usability",
-}
+Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
 
 
-def normalize_scenario_type_label(value: object) -> ScenarioTypeLabel:
-    """Normalize arbitrary scenario-type labels to the curated stage-4 vocabulary."""
-    if value is None:
-        return "Positive"
-    text = str(value).strip()
-    if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
-        return "Positive"
-    normalized = " ".join(text.lower().replace("-", " ").replace("_", " ").split())
-    return _SCENARIO_TYPE_SYNONYMS.get(normalized, "Positive")
+def utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(UTC)
 
 
-class _TestScenarioContent(StrictModel):
-    """Define the validated test scenario content data contract."""
-
-    title: str
-    description: str
-    scenario_type: ScenarioTypeLabel = "Positive"
-    preconditions: list[str] = Field(default_factory=list)
-    expected_result: str
-    priority: Literal["High", "Medium", "Low"] = "Medium"
-    confidence: float = Field(ge=0.0, le=1.0)
-
-    @field_validator("priority", mode="before")
-    @classmethod
-    def normalize_priority(cls, value: object) -> str:
-        """Normalize priority deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        return normalize_priority_label(value)
-
-    @field_validator("scenario_type", mode="before")
-    @classmethod
-    def normalize_scenario_type(cls, value: object) -> str:
-        """Normalize scenario type deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        return normalize_scenario_type_label(value)
-
-    @field_validator("title", "description", "expected_result")
-    @classmethod
-    def meaningful_text(cls, value: str) -> str:
-        """Execute the meaningful text operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        if _PLACEHOLDER_USER_STORY_TEXT_RE.match(value):
-            raise ValueError(f"value must not be a placeholder: {value!r}")
-        return value
+def canonical_checksum(payload: BaseModel | dict[str, Any]) -> str:
+    """Return the checksum of canonical JSON with the checksum field omitted."""
+    data = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else dict(payload)
+    data.pop("checksum", None)
+    encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
 
-class TestScenarioModel(_TestScenarioContent):
-    """A single test scenario exactly as returned by the reasoning model.
+class StrictModel(BaseModel):
+    """Base model that rejects undeclared properties."""
 
-    The model returns content only; Python assigns the permanent ``scenario_id``.
-    """
-
-
-class TestScenarioGenerationOutput(StrictModel):
-    """Define the validated test scenario generation output data contract."""
-
-    test_scenarios: list[TestScenarioModel] = Field(min_length=1)
+    __test__: ClassVar[bool] = False
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
-class TestScenarioRecord(_TestScenarioContent):
-    """A persisted test scenario with permanent id and full backward provenance."""
+class SourceProvenance(StrictModel):
+    """Source requirement provenance inherited by downstream artifacts."""
 
-    scenario_id: str
-    story_id: str
-    requirement_id: str
-    requirement_revision_id: str = ""
-    source_req_id: str | None = None
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    origin_version: str = ""
-    status: Literal["active", "superseded", "outdated"] = "active"
-    origin: Literal["generation", "feedback"] = "generation"
-    evidence_chunk_ids: list[str] = Field(default_factory=list)
-    # Generation grounding (Area 7): the retrieved context that actually produced
-    # this scenario, kept separate from ``evidence_chunk_ids`` (requirement source).
-    generation_context_run_id: str = ""
-    retrieved_assertion_ids: list[str] = Field(default_factory=list)
-    retrieved_chunk_ids: list[str] = Field(default_factory=list)
-    context_mode: str = ""
+    source_req_id: str | None
+    source_req_id_type: SourceRequirementType
+
+    @model_validator(mode="after")
+    def validate_pair(self) -> SourceProvenance:
+        """Enforce the nullable provenance pair."""
+        if self.source_req_id_type == "source":
+            if self.source_req_id is None or not self.source_req_id.strip():
+                raise ValueError("source provenance requires a non-empty source_req_id")
+            object.__setattr__(self, "source_req_id", self.source_req_id.strip())
+        elif self.source_req_id is not None:
+            raise ValueError("generated provenance requires source_req_id=null")
+        return self
 
 
-class TestScenarioProjection(_TestScenarioContent):
-    """Coordinate test scenario projection behavior within the domain boundary."""
+class IngestionRequest(StrictModel):
+    """Business input for Stage 1.1."""
 
-    scenario_id: str
-    story_id: str
-    requirement_id: str
-    revision_id: str = ""
-    source_req_id: str | None = None
-
-
-class TestScenarioTraceability(StrictModel):
-    """Define the validated test scenario traceability data contract."""
-
-    scenario_id: str
-    story_id: str
-    requirement_id: str
-    revision_id: str = ""
-    source_req_id: str | None = None
-    evidence_chunk_ids: list[str] = Field(default_factory=list)
-    generation_context_run_id: str = ""
-    retrieved_assertion_ids: list[str] = Field(default_factory=list)
-    retrieved_chunk_ids: list[str] = Field(default_factory=list)
-    context_mode: str = ""
-
-
-class TestScenarioArtifact(StrictModel):
-    """Define the validated test scenario artifact data contract."""
-
-    artifact_schema_version: Literal["3.0-test-scenarios"] = "3.0-test-scenarios"
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime | None = None
-    scenarios: list[TestScenarioProjection]
-    traceability: list[TestScenarioTraceability] = Field(default_factory=list)
-
-
-class TestScenarioBuildResult(StrictModel):
-    """Define the validated test scenario build result data contract."""
-
-    artifact: TestScenarioArtifact
-    records: dict[str, TestScenarioRecord]
-    coverage: dict[str, list[str]] = Field(default_factory=dict)
-    requirement_coverage: dict[str, list[str]] = Field(default_factory=dict)
-
-
-class TestScenarioRequest(StrictModel):
-    """Define the validated test scenario request data contract."""
-
-    user_stories_path: Path | None = None
-    requirements_path: Path | None = None
-    project: str | None = None
-    document_version_id: str | None = None
-    reasoning_provider: str | None = None
+    project_name: str
+    source_file: Path
     embedding_provider: str | None = None
-    reranker_provider: str | None = None
-    top_k: int | None = None
-    hfil_enabled: bool | None = None
-    emit_md: bool = False
-    thread_id: str | None = None
 
-
-class TestScenarioResult(StrictModel):
-    """Define the validated test scenario result data contract."""
-
-    run_id: str
-    status: str
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    artifact_path: Path
-    story_count: int
-    scenario_ids: list[str]
-    coverage: dict[str, list[str]] = Field(default_factory=dict)
-    requirement_coverage: dict[str, list[str]] = Field(default_factory=dict)
-    warnings: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-
-
-class FeedbackRequest(StrictModel):
-    """Human feedback request envelope. Requirements are intentionally immutable."""
-
-    stage: Literal["user_story", "test_scenario"]
-    target_id: str
-    comment: str
-
-
-class CanonicalScenario(StrictModel):
-    """Define the validated canonical scenario data contract."""
-
-    entity: str
-    action: str
-    condition: str
-    expected_behavior: str
-    given: str
-    when: str
-    then: str
-    canonical_text: str
-
-
-class DuplicateCandidate(StrictModel):
-    """Define the validated duplicate candidate data contract."""
-
-    left_id: str
-    right_id: str
-    cosine: float
-    reason: str = "embedding_recall"
-
-
-class DuplicateGroup(StrictModel):
-    """Define the validated duplicate group data contract."""
-
-    scenario_ids: list[str]
-    scenarios: list[TestScenarioRecord]
-    story_ids: list[str]
-    reason: str
-    confidence: float
-    verification_method: str
-
-
-class DuplicateJudgeResult(StrictModel):
-    """Define the validated duplicate judge result data contract."""
-
-    a_entails_b: bool
-    b_entails_a: bool
-    verdict: Literal["DUPLICATE", "DISTINCT"]
-    reason: str
-
-
-class HFILTurn(StrictModel):
-    """Define the validated hfilturn data contract."""
-
-    command: str
-    message: str = ""
-    deleted_scenario_ids: list[str] = Field(default_factory=list)
-    added_scenario_ids: list[str] = Field(default_factory=list)
-
-
-class HFILState(StrictModel):
-    """Define the validated hfilstate data contract."""
-
-    hfil_enabled: bool = False
-    hfil_done: bool = False
-    hfil_phase: str = "start"
-    hfil_pending_prompt: str = ""
-    hfil_scenarios: list[TestScenarioRecord] = Field(default_factory=list)
-    hfil_user_stories: list[UserStoryRecord] = Field(default_factory=list)
-    hfil_last_duplicate_groups: list[DuplicateGroup] = Field(default_factory=list)
-    hfil_messages: list[str] = Field(default_factory=list)
-
-
-class RequirementDeltaDecision(StrictModel):
-    """Define the validated requirement delta decision data contract."""
-
-    requirement_id: str
-    revision_id: str
-    label: Literal["new", "updated", "strictly_outdated", "unchanged"]
-    prior_revision_id: str | None = None
-    reason: str = ""
-
-
-class ArtifactReadResult(StrictModel):
-    """Define the validated artifact read result data contract."""
-
-    source: Literal["local_json", "postgres"]
-    valid_local: bool
-    artifact_path: str | None = None
-    payload: dict[str, Any]
-    repaired: bool = False
-    reason: str = ""
-
-
-class ReconcileReport(StrictModel):
-    """Define the validated reconcile report data contract."""
-
-    project: str
-    document_version_id: str | None = None
-    repaired_paths: list[str] = Field(default_factory=list)
-    missing_artifacts: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-MasterStage = Literal["requirements", "user_stories", "test_scenarios"]
-
-
-class StageMasterArtifact(StrictModel):
-    """Cumulative per-project master projection for one pipeline stage.
-
-    One of these exists per project per stage. ``records`` holds the full
-    cumulative set (active + all preserved historical revisions), materialized
-    deterministically from the normalized PostgreSQL rows. ``checksum`` covers
-    only the reproducible content (schema version, stage, project, document id,
-    records) — never the run/time/revision metadata — so a re-materialization
-    from unchanged rows is byte-identical and drift detection never cries wolf.
-    """
-
-    artifact_schema_version: str
-    stage: MasterStage
-    project: str
-    document_id: str
-    current_document_version_id: str = ""
-    payload_revision: int = 0
-    run_id: str = ""
-    checksum: str = ""
-    record_count: int = 0
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    records: list[dict[str, Any]] = Field(default_factory=list)
-
-
-KnowledgeGraphStatus = Literal["pending", "building", "ready", "failed", "rebuilding"]
-
-
-class KnowledgeGraphStateRecord(StrictModel):
-    """Version-scoped readiness state for the semantic knowledge graph.
-
-    ``ready`` is reached only at the end of the full successful build path
-    (extraction -> validation -> projection -> active-pointer move). A partial or
-    crashed build stays ``building`` / ``failed``, so graph-primary generation is
-    blocked fail-closed until an explicit rebuild succeeds.
-    """
-
-    document_version_id: str
-    project: str
-    document_id: str
-    doc_version: str
-    status: KnowledgeGraphStatus
-    run_id: str = ""
-    attempt: int = 0
-    failure_reason: str | None = None
-    chunk_count: int = 0
-    assertion_count: int = 0
-    evidence_count: int = 0
-    extractor_fingerprint: str = ""
-    graph_schema_version: str = ""
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-
-class IngestionResult(StrictModel):
-    """Define the validated ingestion result data contract."""
-
-    run_id: str
-    status: str
-    project: str
-    version: str
-    document_id: str
-    document_version_id: str
-    checksum: str
-    manifest_path: Path
-    artifact_path: Path
-    chunk_ids: list[str]
-    fact_ids: list[str]
-    requirement_ids: list[str]
-    # Requirement discovery and the KG build are separate commit boundaries:
-    # ``ingestion_status`` is ``completed`` when both succeed and ``degraded`` when
-    # requirements persisted but the KG build failed. ``downstream_blocked`` mirrors
-    # the graph-primary gate so operators see immediately that story/scenario
-    # generation is blocked until the rebuild command runs.
-    ingestion_status: Literal["completed", "degraded"] = "completed"
-    kg_status: KnowledgeGraphStatus | None = None
-    kg_failure_reason: str | None = None
-    downstream_blocked: bool = False
-    kg_rebuild_command: str | None = None
-    warnings: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-
-
-# --- Knowledge graph (source-semantics layer built by ``marag build-knowledge-graph``) ---
-
-_ENTITY_PLACEHOLDER_RE = re.compile(
-    r"^(?:entity|thing|item|object|subject|actor|system|component|tbd|todo|"
-    r"placeholder|n/?a|na|none|null|unknown)$",
-    re.I,
-)
-
-_ASSERTION_MODALITIES = ("fact", "shall", "must", "should", "may", "must_not")
-
-
-def _normalize_assertion_modality(value: object) -> str:
-    """Normalize assertion modality deterministically within the active scope.
-
-    Args:
-        value (object): Value required by the operation's typed contract.
-
-    Returns:
-        str: The typed result produced by the operation.
-
-    Side Effects:
-        May create or atomically replace files in the configured artifact boundary.
-    """
-    if value is None:
-        return "fact"
-    text = str(value).strip().lower().replace(" ", "_").replace("-", "_")
-    if text in {"", "null", "none", "n/a", "na", "unknown"}:
-        return "fact"
-    if text in {"must_not", "shall_not", "may_not", "should_not", "prohibited", "forbidden"}:
-        return "must_not"
-    if text in _ASSERTION_MODALITIES:
-        return text
-    if text in {"mandatory", "required", "requirement"}:
-        return "must"
-    if text in {"recommended", "recommendation"}:
-        return "should"
-    if text in {"optional", "permitted", "allowed"}:
-        return "may"
-    return "fact"
-
-
-class LLMExtractedEntity(StrictModel):
-    """One entity exactly as returned by the extraction model for a single chunk."""
-
-    name: str
-    entity_type: str = "concept"
-
-    @field_validator("name")
+    @field_validator("project_name")
     @classmethod
-    def meaningful_name(cls, value: str) -> str:
-        """Execute the meaningful name operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
+    def project_is_non_empty(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("entity name must not be empty")
-        if _ENTITY_PLACEHOLDER_RE.match(value):
-            raise ValueError(f"entity name must not be a placeholder: {value!r}")
+            raise ValueError("project_name must not be empty")
         return value
 
-    @field_validator("entity_type", mode="before")
-    @classmethod
-    def default_entity_type(cls, value: object) -> str:
-        """Execute the default entity type operation within its declared architectural boundary.
 
-        Args:
-            value (object): Value required by the operation's typed contract.
+class ParsedBlock(StrictModel):
+    """Layout-aware parser output."""
 
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        if value is None:
-            return "concept"
-        text = str(value).strip()
-        if not text or text.lower() in {"null", "none", "n/a", "na", "unknown"}:
-            return "concept"
-        return text
-
-
-class LLMExtractedAssertion(StrictModel):
-    """One assertion exactly as returned by the extraction model for a single chunk.
-
-    ``subject`` and ``object_name`` reference entities by name from the same chunk
-    output. The object is optional: an assertion may carry an entity object
-    (``object_name``), a literal value (``object_literal``), or neither (an
-    objectless/intransitive claim such as "the system shall restart"). The
-    repo-wide LLM convention is an empty string for absent optional fields, and
-    ``KnowledgeExtractionAgent._validate_assertion`` is the single authority that
-    reconciles the object shape (prefers a declared entity, demotes an undeclared
-    object to a literal, and permits no object). This schema deliberately does not
-    enforce a cross-field "exactly one object" rule: Azure strict Structured
-    Outputs cannot express it, so re-validation here would fail closed on a
-    legitimate objectless assertion instead of letting the agent reconcile it.
-    """
-
-    subject: str
-    predicate: str
-    object_name: str = ""
-    object_literal: str = ""
-    modality: Literal["fact", "shall", "must", "should", "may", "must_not"] = "fact"
-    polarity: Literal["positive", "negative"] = "positive"
-    explicitness: Literal["explicit", "inferred"] = "explicit"
-    condition: str = ""
-    quote: str
-    confidence: float = Field(ge=0.0, le=1.0)
-
-    @field_validator("subject", "predicate", "quote")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-    @field_validator("modality", mode="before")
-    @classmethod
-    def normalize_modality(cls, value: object) -> str:
-        """Normalize modality deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        return _normalize_assertion_modality(value)
-
-    @field_validator("polarity", mode="before")
-    @classmethod
-    def normalize_polarity(cls, value: object) -> str:
-        """Normalize polarity deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        text = str(value).strip().lower() if value is not None else ""
-        if text in {"negative", "neg", "not", "false"}:
-            return "negative"
-        return "positive"
-
-    @field_validator("explicitness", mode="before")
-    @classmethod
-    def normalize_explicitness(cls, value: object) -> str:
-        """Normalize explicitness deterministically within the active scope.
-
-        Args:
-            value (object): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-        """
-        text = str(value).strip().lower() if value is not None else ""
-        if text in {"inferred", "implicit", "implied", "derived"}:
-            return "inferred"
-        return "explicit"
-
-
-class KnowledgeExtractionChunkOutput(StrictModel):
-    """Define the validated knowledge extraction chunk output data contract."""
-
-    entities: list[LLMExtractedEntity] = Field(default_factory=list)
-    assertions: list[LLMExtractedAssertion] = Field(default_factory=list)
-
-
-class EntityCandidate(StrictModel):
-    """A grounded per-chunk entity occurrence awaiting resolution."""
-
-    chunk_id: str
-    surface_text: str
-    normalized_name: str
-    entity_type: str
-
-
-class AssertionCandidate(StrictModel):
-    """A grounded per-chunk assertion occurrence awaiting canonicalization."""
-
-    chunk_id: str
-    subject_name: str
-    predicate: str
-    object_name: str | None = None
-    object_literal: str | None = None
-    modality: str
-    polarity: Literal["positive", "negative"]
-    explicitness: Literal["explicit", "inferred"]
-    condition: str | None = None
-    confidence: float = Field(ge=0.0, le=1.0)
-    source_trace: SourceTrace
-
-
-class ChunkKnowledgeCandidates(StrictModel):
-    """Define the validated chunk knowledge candidates data contract."""
-
-    chunk_id: str
-    entities: list[EntityCandidate] = Field(default_factory=list)
-    assertions: list[AssertionCandidate] = Field(default_factory=list)
-
-
-class KnowledgeExtractionOutput(StrictModel):
-    """Define the validated knowledge extraction output data contract."""
-
-    chunks: list[ChunkKnowledgeCandidates] = Field(default_factory=list)
-
-
-class TextUnit(StrictModel):
-    """An atomic source segment (sentence/bullet) with source-level offsets.
-
-    Text units are derived deterministically from the ingested chunks at
-    knowledge-graph build time; overlapping chunk windows dedupe to one unit
-    per source span, and ``chunk_ids`` lists every chunk containing the unit.
-    """
-
-    text_unit_id: str
-    document_version_id: str
-    ordinal: int
-    unit_type: Literal["sentence", "bullet"]
-    text: str
-    start_char: int
-    end_char: int
+    block_id: str
+    original_text: str
+    normalized_text: str
     page: int | None = None
     section: str | None = None
-    chunk_ids: list[str] = Field(default_factory=list)
-
-
-class EntityRecord(StrictModel):
-    """A resolved project-scoped canonical entity."""
-
-    entity_id: str
-    project: str
-    canonical_name: str
-    normalized_name: str
-    entity_type: str
-    aliases: list[str] = Field(default_factory=list)
-
-
-class EntityMentionRecord(StrictModel):
-    """One grounded occurrence of an entity inside a chunk."""
-
-    mention_id: str
-    entity_id: str
-    chunk_id: str
-    surface_text: str
-    start_char: int | None = None
-    end_char: int | None = None
-
-
-class AssertionRecord(StrictModel):
-    """A canonical (deduplicated) assertion scoped to one document version."""
-
-    assertion_id: str
-    assertion_key: str
-    assertion_lineage_key: str = ""
-    project: str
-    document_id: str
-    document_version_id: str
-    subject_entity_id: str
-    predicate: str
-    object_entity_id: str | None = None
-    object_literal: str | None = None
-    modality: str
-    polarity: str
-    explicitness: str
-    condition: str | None = None
-    confidence: float = Field(ge=0.0, le=1.0)
-    display_text: str
-    # Cross-version lifecycle (Area 6). ``status`` is the live/history flag;
-    # ``previous_assertion_id`` links a revision to the one it replaced, and
-    # ``superseded_by_assertion_id`` is set on the prior node when replaced.
-    status: Literal["active", "superseded", "retired"] = "active"
-    previous_assertion_id: str | None = None
-    superseded_by_assertion_id: str | None = None
-    revision_type: Literal["new", "unchanged", "changed"] = "new"
-
-
-class AssertionEvidenceRecord(StrictModel):
-    """One exact source occurrence supporting a canonical assertion."""
-
-    evidence_id: str
-    assertion_id: str
-    source_trace: SourceTrace
-    text_unit_ids: list[str] = Field(default_factory=list)
-
-
-class KnowledgeGraphArtifact(StrictModel):
-    """Define the validated knowledge graph artifact data contract."""
-
-    artifact_schema_version: Literal["1.0-knowledge-graph"] = "1.0-knowledge-graph"
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    text_units: list[TextUnit] = Field(default_factory=list)
-    entities: list[EntityRecord] = Field(default_factory=list)
-    mentions: list[EntityMentionRecord] = Field(default_factory=list)
-    assertions: list[AssertionRecord] = Field(default_factory=list)
-    evidence: list[AssertionEvidenceRecord] = Field(default_factory=list)
-
-
-class KnowledgeGraphRequest(StrictModel):
-    """Define the validated knowledge graph request data contract."""
-
-    project: str
-    document_version_id: str
-    reasoning_provider: str | None = None
-
-    @field_validator("project", "document_version_id")
-    @classmethod
-    def non_empty(cls, value: str) -> str:
-        """Execute the non empty operation within its declared architectural boundary.
-
-        Args:
-            value (str): Value required by the operation's typed contract.
-
-        Returns:
-            str: The typed result produced by the operation.
-
-        Raises:
-            ValueError: If validated inputs or required dependencies cannot satisfy the contract.
-        """
-        value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
-        return value
-
-
-class KnowledgeGraphResult(StrictModel):
-    """Define the validated knowledge graph result data contract."""
-
-    run_id: str
-    status: str
-    project: str
-    document_id: str
-    document_version_id: str
-    doc_version: str
-    artifact_path: Path
-    chunk_count: int
-    entity_count: int
-    assertion_count: int
-    evidence_count: int
-    warnings: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-
-
-class GenerationContextRun(StrictModel):
-    """One retrieval invocation snapshot (shadow comparison / audit)."""
-
-    context_run_id: str
-    stage: str
-    anchor_id: str
-    project: str = ""
-    document_version_id: str
-    source: str
-    metrics: dict[str, Any] = Field(default_factory=dict)
-
-
-class GenerationContextItem(StrictModel):
-    """One candidate or selected item inside a retrieval snapshot.
-
-    The base fields (``item_id``/``source``/``score``/``selected``) describe the
-    legacy chunk-shaped snapshot. The additive assertion fields carry the
-    structured knowledge-graph retrieval channel (schema §18): they stay ``None``
-    for chunk items so historical rows keep validating.
-    """
-
-    context_run_id: str
-    rank: int
-    item_type: str = "chunk"
-    item_id: str
-    source: str
-    score: float | None = None
-    selected: bool = True
-    assertion_id: str | None = None
-    text_unit_id: str | None = None
-    entity_id: str | None = None
-    predicate: str | None = None
-    hop_count: int | None = None
-    normalized_score: float | None = None
-    reranker_score: float | None = None
-    mandatory: bool = False
+    paragraph: int | None = None
+    start_char: int
+    end_char: int
+    block_type: Literal[
+        "heading",
+        "paragraph",
+        "list_item",
+        "table",
+        "table_row",
+        "table_cell",
+        "code",
+        "other",
+    ] = "paragraph"
+    source_location: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class AssertionEvidenceContext(StrictModel):
-    """One exact source occurrence backing an assertion in retrieval context."""
+class ChunkLayout(StrictModel):
+    """Layout information retained on a manifest chunk."""
 
-    text_unit_id: str | None = None
+    page_start: int | None
+    page_end: int | None
+    section: str | None
+    block_types: list[
+        Literal[
+            "heading",
+            "paragraph",
+            "list_item",
+            "table",
+            "table_row",
+            "table_cell",
+            "code",
+            "other",
+        ]
+    ]
+    source_location: str | None
+
+
+class ManifestChunk(StrictModel):
+    """Stable chunk contract shared by every stage."""
+
+    chunk_id: str
+    sequence_index: int = Field(ge=0)
+    chunk_text: str
+    content_hash: str
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
+    layout: ChunkLayout
+    source_provenance: dict[str, Any] | None
+    neo4j_status: Literal["pending", "persisted"]
+    chroma_status: Literal["pending", "persisted"]
+
+    @model_validator(mode="after")
+    def validate_content(self) -> ManifestChunk:
+        if not self.chunk_text.strip():
+            raise ValueError("chunk_text must not be empty")
+        if self.end_char < self.start_char:
+            raise ValueError("end_char must be greater than or equal to start_char")
+        expected = f"sha256:{hashlib.sha256(self.chunk_text.encode('utf-8')).hexdigest()}"
+        if self.content_hash != expected:
+            raise ValueError("content_hash does not match chunk_text")
+        return self
+
+
+class ChunkManifest(StrictModel):
+    """Public Stage 1.1 artifact."""
+
+    artifact_schema_version: Literal["1.0-chunk-manifest"] = "1.0-chunk-manifest"
+    project: str
+    run_id: str
+    generated_at: datetime = Field(default_factory=utc_now)
+    checksum: str
+    chunks: list[ManifestChunk]
+
+    @model_validator(mode="after")
+    def validate_manifest(self) -> ChunkManifest:
+        indexes = [chunk.sequence_index for chunk in self.chunks]
+        if indexes != list(range(len(self.chunks))):
+            raise ValueError("chunk sequence_index values must be contiguous from zero")
+        chunk_ids = [chunk.chunk_id for chunk in self.chunks]
+        if len(chunk_ids) != len(set(chunk_ids)):
+            raise ValueError("chunk_id values must be unique")
+        if any(
+            chunk.neo4j_status != "persisted" or chunk.chroma_status != "persisted"
+            for chunk in self.chunks
+        ):
+            raise ValueError("manifest publication requires both stores to be persisted")
+        if self.checksum != canonical_checksum(self):
+            raise ValueError("chunk manifest checksum mismatch")
+        return self
+
+
+class IngestionResult(StrictModel):
+    """Stage 1.1 result."""
+
+    project: str
+    run_id: str
+    artifact_dir: Path
+    manifest_path: Path
+    chunk_ids: list[str]
+
+
+class RequirementEvidenceQuote(StrictModel):
+    """Temporary Stage 1.2 evidence supplied by the reasoning model."""
+
+    quote: str
+
+
+class LLMRequirementCandidate(SourceProvenance):
+    """One temporary requirement candidate in the combined response."""
+
+    requirement_ref: str
+    requirement_text: str
+    requirement_type: RequirementType
+    priority: Priority
+    constraints: list[str]
+    entity_refs: list[str]
+    relationship_refs: list[str]
+    evidence_quotes: list[str] = Field(min_length=1)
+    confidence: Confidence
+
+
+class LLMEntityCandidate(StrictModel):
+    """One temporary entity candidate in the combined response."""
+
+    entity_ref: str
+    name: str
+    normalized_name: str
+    entity_type: EntityType
+    aliases: list[str]
+    evidence_quotes: list[str] = Field(min_length=1)
+    confidence: Confidence
+
+
+class LLMRelationshipCandidate(StrictModel):
+    """One temporary semantic relationship in the combined response."""
+
+    relationship_ref: str
+    source_entity_ref: str
+    relationship_type: RelationshipType
+    target_entity_ref: str
+    evidence_quote: str
+    confidence: Confidence
+
+
+class RequirementDiscoveryChunkResponse(StrictModel):
+    """The only reasoning-model response allowed for a Stage 1.2 chunk."""
+
+    chunk_id: str
+    requirements: list[LLMRequirementCandidate]
+    entities: list[LLMEntityCandidate]
+    relationships: list[LLMRelationshipCandidate]
+
+    @model_validator(mode="after")
+    def validate_references(self) -> RequirementDiscoveryChunkResponse:
+        requirement_refs = [item.requirement_ref for item in self.requirements]
+        entity_refs = [item.entity_ref for item in self.entities]
+        relationship_refs = [item.relationship_ref for item in self.relationships]
+        for label, values in (
+            ("requirement_ref", requirement_refs),
+            ("entity_ref", entity_refs),
+            ("relationship_ref", relationship_refs),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"{label} values must be unique")
+        if not self.requirements and (self.entities or self.relationships):
+            raise ValueError("empty requirements requires empty entities and relationships")
+        entity_set = set(entity_refs)
+        relationship_set = set(relationship_refs)
+        referenced_entities: set[str] = set()
+        referenced_relationships: set[str] = set()
+        for requirement in self.requirements:
+            if not set(requirement.entity_refs) <= entity_set:
+                raise ValueError("requirement entity_refs contain unresolved references")
+            if not set(requirement.relationship_refs) <= relationship_set:
+                raise ValueError("requirement relationship_refs contain unresolved references")
+            referenced_entities.update(requirement.entity_refs)
+            referenced_relationships.update(requirement.relationship_refs)
+        for relationship in self.relationships:
+            if relationship.source_entity_ref not in entity_set:
+                raise ValueError("relationship source entity is unresolved")
+            if relationship.target_entity_ref not in entity_set:
+                raise ValueError("relationship target entity is unresolved")
+            if relationship.source_entity_ref == relationship.target_entity_ref:
+                raise ValueError("self-referencing relationships are invalid")
+            referenced_entities.update(
+                (relationship.source_entity_ref, relationship.target_entity_ref)
+            )
+        if set(entity_refs) != referenced_entities:
+            raise ValueError("orphan entities are invalid")
+        if set(relationship_refs) != referenced_relationships:
+            raise ValueError("orphan relationships are invalid")
+        return self
+
+
+class Evidence(StrictModel):
+    """Canonical evidence span."""
+
+    evidence_id: str
     chunk_id: str
     quote: str
-    page: int | None = None
-    section: str | None = None
-    start_char: int | None = None
-    end_char: int | None = None
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
 
 
-class AssertionContextItem(StrictModel):
-    """One structured, evidence-backed assertion selected for generation.
+class EntityMention(StrictModel):
+    """One exact entity mention."""
 
-    This is the bounded semantic-context unit (schema §14) that replaces raw
-    chunk text: subject/predicate/object plus modality, polarity, condition,
-    confidence, retrieval provenance, and exact TextUnit evidence.
-    """
-
-    assertion_id: str
-    subject_entity_id: str
-    subject_name: str
-    subject_type: str
-    predicate: str
-    object_entity_id: str | None = None
-    object_name: str | None = None
-    object_literal: str | None = None
-    modality: str
-    polarity: str
-    explicitness: str
-    condition: str | None = None
-    confidence: float = Field(ge=0.0, le=1.0)
-    hop_count: int = 0
-    source_channel: str
-    mandatory: bool = False
-    retrieval_score: float = 0.0
-    evidence: list[AssertionEvidenceContext] = Field(default_factory=list)
+    chunk_id: str
+    surface_text: str
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
 
 
-class SemanticContext(StrictModel):
-    """The bounded structured assertion context assembled for one anchor.
+class CanonicalEntity(StrictModel):
+    """Canonical project-scoped entity."""
 
-    Shadow-mode contract: generation prompts are unchanged; this payload is only
-    recorded as a retrieval snapshot until a stage's graph-primary flag is set.
-    """
-
-    stage: str
-    anchor_id: str
-    document_version_id: str
-    items: list[AssertionContextItem] = Field(default_factory=list)
-    mandatory_anchor_ids: list[str] = Field(default_factory=list)
-    metrics: dict[str, Any] = Field(default_factory=dict)
+    entity_id: str
+    name: str
+    normalized_name: str
+    entity_type: EntityType
+    aliases: list[str]
+    mentions: list[EntityMention]
 
 
-class GenerationTrace(StrictModel):
-    """The retrieved context that actually produced one generated artifact.
+class CanonicalRelationship(StrictModel):
+    """Validated LLM-generated relationship projected to Neo4j."""
 
-    Separate from requirement-source evidence: this records the graph/chunk
-    grounding (``context_run_id`` + selected assertions/chunks + mode) so a story
-    or scenario can be traced back to exactly what the LLM was shown.
-    """
+    relationship_id: str
+    chunk_id: str
+    source_entity_id: str
+    relationship_type: RelationshipType
+    target_entity_id: str
+    confidence: Confidence
+    extraction_method: Literal["llm"] = "llm"
+    evidence: list[Evidence] = Field(min_length=1)
 
-    generation_context_run_id: str = ""
-    retrieved_assertion_ids: list[str] = Field(default_factory=list)
-    retrieved_chunk_ids: list[str] = Field(default_factory=list)
-    context_mode: str = ""
 
-
-class CoverageRequirementRow(StrictModel):
-    """One requirement's coverage status inside a strict coverage report."""
+class CanonicalRequirement(SourceProvenance):
+    """Canonical active requirement."""
 
     requirement_id: str
-    requirement_status: str
-    coverage_status: str
-    story_ids: list[str] = Field(default_factory=list)
-    scenario_count: int = 0
+    requirement_text: str
+    requirement_type: RequirementType
+    priority: Priority
+    status: Literal["active"] = "active"
+    confidence: Confidence
+    constraints: list[str]
+    entity_ids: list[str]
+    relationship_ids: list[str]
+    evidence: list[Evidence] = Field(min_length=1)
+
+
+class RequirementsArtifact(StrictModel):
+    """Public Stage 1.2 artifact."""
+
+    artifact_schema_version: Literal["1.2-requirements"] = "1.2-requirements"
+    project: str
+    run_id: str
+    generated_at: datetime = Field(default_factory=utc_now)
+    checksum: str
+    requirements: list[CanonicalRequirement]
+    entities: list[CanonicalEntity]
+    relationships: list[CanonicalRelationship]
+
+    @model_validator(mode="after")
+    def validate_artifact(self) -> RequirementsArtifact:
+        entity_ids = {item.entity_id for item in self.entities}
+        relationship_ids = {item.relationship_id for item in self.relationships}
+        referenced_relationships: set[str] = set()
+        for relationship in self.relationships:
+            if relationship.source_entity_id not in entity_ids:
+                raise ValueError("relationship source endpoint is unresolved")
+            if relationship.target_entity_id not in entity_ids:
+                raise ValueError("relationship target endpoint is unresolved")
+        for requirement in self.requirements:
+            if not set(requirement.entity_ids) <= entity_ids:
+                raise ValueError("requirement entity_ids contain unresolved IDs")
+            if not set(requirement.relationship_ids) <= relationship_ids:
+                raise ValueError("requirement relationship_ids contain unresolved IDs")
+            referenced_relationships.update(requirement.relationship_ids)
+        if relationship_ids != referenced_relationships:
+            raise ValueError("orphan canonical relationships are invalid")
+        if self.checksum != canonical_checksum(self):
+            raise ValueError("requirements artifact checksum mismatch")
+        return self
+
+
+class RequirementMapEntry(SourceProvenance):
+    """Requirement occurrence retained before permanent requirement assignment."""
+
+    requirement_ref: str
+    requirement_text: str
+    requirement_type: RequirementType
+    priority: Priority
+    constraints: list[str]
+    evidence: list[Evidence] = Field(min_length=1)
+    entity_ids: list[str]
+    relationship_ids: list[str]
+    confidence: Confidence
+
+
+class RequirementChunkResult(StrictModel):
+    """Terminal Stage 1.2 result for one manifest chunk."""
+
+    chunk_id: str
+    sequence_index: int
+    status: Literal["completed", "no_requirements", "failed"]
+    requirements: list[RequirementMapEntry]
+    error: str | None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> RequirementChunkResult:
+        if self.status == "no_requirements" and self.requirements:
+            raise ValueError("no_requirements requires requirements=[]")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("only failed entries may contain an error")
+        return self
+
+
+class RequirementEntityRelationshipMap(StrictModel):
+    """Checkpointed Stage 1.2 aggregation state."""
+
+    state_schema_version: Literal["1.0-requirement-map"] = "1.0-requirement-map"
+    project: str
+    run_id: str
+    chunk_results: list[RequirementChunkResult]
+
+
+class UserStoryStatement(StrictModel):
+    """Structured user-story statement."""
+
+    as_a: str
+    i_want: str
+    so_that: str
+
+
+class LLMAcceptanceCriterion(StrictModel):
+    """Acceptance criterion before permanent ID assignment."""
+
+    title: str
+    given: str
+    when: str
+    then: str
+
+
+class AcceptanceCriterion(LLMAcceptanceCriterion):
+    """Canonical acceptance criterion."""
+
+    criterion_id: str
+
+
+class LLMUserStoryCandidate(SourceProvenance):
+    """Temporary Stage 2 story candidate."""
+
+    story_ref: str
+    title: str
+    priority: Priority
+    persona: str
+    user_story: UserStoryStatement
+    acceptance_criteria: list[LLMAcceptanceCriterion] = Field(min_length=1)
+    business_rules: list[str]
+    evidence_chunk_ids: list[str] = Field(min_length=1)
+    supporting_entity_ids: list[str]
+    supporting_relationship_ids: list[str]
+    confidence: Confidence
+
+
+class UserStoryGenerationResponse(StrictModel):
+    """Structured Stage 2 response for one canonical requirement."""
+
+    requirement_id: str
+    user_stories: list[LLMUserStoryCandidate]
+
+    @model_validator(mode="after")
+    def unique_refs(self) -> UserStoryGenerationResponse:
+        refs = [story.story_ref for story in self.user_stories]
+        if len(refs) != len(set(refs)):
+            raise ValueError("story_ref values must be unique")
+        return self
+
+
+class Traceability(StrictModel):
+    """Shared downstream traceability object."""
+
+    evidence_chunk_ids: list[str] = Field(min_length=1)
+    entity_ids: list[str]
+    relationship_ids: list[str]
+
+
+class CanonicalUserStory(SourceProvenance):
+    """Canonical active user story."""
+
+    story_id: str
+    requirement_ids: list[str] = Field(min_length=1)
+    title: str
+    priority: Priority
+    persona: str
+    user_story: UserStoryStatement
+    acceptance_criteria: list[AcceptanceCriterion] = Field(min_length=1)
+    business_rules: list[str]
+    status: Literal["active"] = "active"
+    confidence: Confidence
+    traceability: Traceability
+
+
+class UserStoriesArtifact(StrictModel):
+    """Public Stage 2 artifact."""
+
+    artifact_schema_version: Literal["1.1-user-stories"] = "1.1-user-stories"
+    project: str
+    run_id: str
+    generated_at: datetime = Field(default_factory=utc_now)
+    checksum: str
+    stories: list[CanonicalUserStory]
+
+    @model_validator(mode="after")
+    def validate_checksum(self) -> UserStoriesArtifact:
+        if self.checksum != canonical_checksum(self):
+            raise ValueError("user-stories artifact checksum mismatch")
+        return self
+
+
+class LLMTestScenarioCandidate(SourceProvenance):
+    """Temporary Stage 3 scenario candidate."""
+
+    scenario_ref: str
+    title: str
+    description: str
+    scenario_type: ScenarioType
+    priority: Priority
+    preconditions: list[str]
+    action: str
+    expected_result: str
+    covered_acceptance_criterion_ids: list[str] = Field(min_length=1)
+    evidence_chunk_ids: list[str] = Field(min_length=1)
+    supporting_entity_ids: list[str]
+    supporting_relationship_ids: list[str]
+    confidence: Confidence
+
+
+class TestScenarioGenerationResponse(StrictModel):
+    """Structured Stage 3 response for one canonical story."""
+
+    story_id: str
+    requirement_ids: list[str]
+    test_scenarios: list[LLMTestScenarioCandidate]
+
+    @model_validator(mode="after")
+    def unique_refs(self) -> TestScenarioGenerationResponse:
+        refs = [scenario.scenario_ref for scenario in self.test_scenarios]
+        if len(refs) != len(set(refs)):
+            raise ValueError("scenario_ref values must be unique")
+        return self
+
+
+class CanonicalTestScenario(SourceProvenance):
+    """Canonical active behavioral scenario."""
+
+    scenario_id: str
+    story_ids: list[str] = Field(min_length=1)
+    requirement_ids: list[str] = Field(min_length=1)
+    title: str
+    description: str
+    scenario_type: ScenarioType
+    priority: Priority
+    preconditions: list[str]
+    action: str
+    expected_result: str
+    covered_acceptance_criterion_ids: list[str] = Field(min_length=1)
+    status: Literal["active"] = "active"
+    confidence: Confidence
+    traceability: Traceability
+
+
+class TestScenariosArtifact(StrictModel):
+    """Public Stage 3 artifact."""
+
+    artifact_schema_version: Literal["1.1-test-scenarios"] = "1.1-test-scenarios"
+    project: str
+    run_id: str
+    generated_at: datetime = Field(default_factory=utc_now)
+    checksum: str
+    scenarios: list[CanonicalTestScenario]
+
+    @model_validator(mode="after")
+    def validate_checksum(self) -> TestScenariosArtifact:
+        if self.checksum != canonical_checksum(self):
+            raise ValueError("test-scenarios artifact checksum mismatch")
+        return self
+
+
+class RetrievedEvidence(StrictModel):
+    """One ranked retrieval item."""
+
+    chunk_id: str
+    text: str
+    source: Literal["authoritative", "graph", "vector"]
+    score: float
+    entity_ids: list[str]
+    relationship_ids: list[str]
+
+
+class StoryContext(StrictModel):
+    """Compact Stage 2 context package."""
+
+    requirement_id: str
+    requirement_text: str
+    source_req_id: str | None
+    source_req_id_type: SourceRequirementType
+    authoritative_evidence_chunk_ids: list[str]
+    mapped_entity_ids: list[str]
+    mapped_relationship_ids: list[str]
+    ranked_evidence: list[RetrievedEvidence]
+    retrieval_parameters: dict[str, Any]
+
+
+class ScenarioContext(StrictModel):
+    """Compact Stage 3 context package."""
+
+    story_id: str
+    requirement_ids: list[str]
+    story_text: str
+    acceptance_criteria: list[AcceptanceCriterion]
+    source_req_id: str | None
+    source_req_id_type: SourceRequirementType
+    authoritative_evidence_chunk_ids: list[str]
+    supporting_entity_ids: list[str]
+    supporting_relationship_ids: list[str]
+    ranked_evidence: list[RetrievedEvidence]
+    retrieval_parameters: dict[str, Any]
+
+
+class StageRequest(StrictModel):
+    """Project/run selector for downstream stages."""
+
+    project_name: str
+    run_id: str
+    reasoning_provider: str | None = None
+    embedding_provider: str | None = None
+
+
+class ArtifactResult(StrictModel):
+    """Generic completed-stage result."""
+
+    project: str
+    run_id: str
+    artifact_path: Path
+    item_ids: list[str]
+
+
+class KnowledgeGraphReadiness(StrictModel):
+    """Project-scoped readiness gate."""
+
+    project: str
+    status: Literal["building", "ready", "failed"]
+    build_run_id: str
+    failure_reason: str | None
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class CoverageSummary(StrictModel):
-    """Deterministic, zero-safe rollup of per-requirement coverage rows."""
-
-    total_requirements: int = 0
-    requirements_with_stories: int = 0
-    requirements_scenario_covered: int = 0
-    no_story_count: int = 0
-    story_coverage_pct: float = 0.0
-    scenario_coverage_pct: float = 0.0
-
-
-class CoverageReport(StrictModel):
-    """Strict per-requirement coverage report with a summary rollup."""
+    """Current project/run coverage summary."""
 
     project: str
-    document_version_id: str | None = None
-    requirements: list[CoverageRequirementRow] = Field(default_factory=list)
-    summary: CoverageSummary = Field(default_factory=CoverageSummary)
+    run_id: str
+    requirement_count: int
+    story_count: int
+    scenario_count: int
+    requirements_with_stories: int
+    stories_with_scenarios: int
+
+
+__all__ = [
+    "AcceptanceCriterion",
+    "ArtifactResult",
+    "CanonicalEntity",
+    "CanonicalRelationship",
+    "CanonicalRequirement",
+    "CanonicalTestScenario",
+    "CanonicalUserStory",
+    "ChunkLayout",
+    "ChunkManifest",
+    "CoverageSummary",
+    "EntityMention",
+    "Evidence",
+    "IngestionRequest",
+    "IngestionResult",
+    "KnowledgeGraphReadiness",
+    "LLMEntityCandidate",
+    "LLMRelationshipCandidate",
+    "LLMRequirementCandidate",
+    "LLMTestScenarioCandidate",
+    "LLMUserStoryCandidate",
+    "ManifestChunk",
+    "ParsedBlock",
+    "RequirementChunkResult",
+    "RequirementDiscoveryChunkResponse",
+    "RequirementEntityRelationshipMap",
+    "RequirementMapEntry",
+    "RequirementsArtifact",
+    "RetrievedEvidence",
+    "ScenarioContext",
+    "SourceProvenance",
+    "StageRequest",
+    "StoryContext",
+    "StrictModel",
+    "TestScenarioGenerationResponse",
+    "TestScenariosArtifact",
+    "Traceability",
+    "UserStoriesArtifact",
+    "UserStoryGenerationResponse",
+    "canonical_checksum",
+    "utc_now",
+]

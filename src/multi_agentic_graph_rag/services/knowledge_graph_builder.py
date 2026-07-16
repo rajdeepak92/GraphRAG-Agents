@@ -1,175 +1,196 @@
-"""Reusable semantic knowledge-graph build, shared by ingest and the standalone
-``build-knowledge-graph`` stage.
-
-This is the single implementation of "chunks -> entities + assertions -> Neo4j":
-both the ingestion pipeline (auto-build) and the standalone workflow call
-:func:`build_and_project_knowledge_graph` with an already-created reasoning model
-and Neo4j store, so neither reloads the runtime stack or recursively invokes the
-CLI. Neo4j writes stay idempotent MERGEs, so re-running a version is safe.
-"""
+"""Resolve and project validated Stage 1.2 semantic candidates."""
 
 from __future__ import annotations
 
-from typing import Any
+import hashlib
+from dataclasses import dataclass
+from typing import Literal
 
-from multi_agentic_graph_rag.agents.knowledge_extraction_agent import KnowledgeExtractionAgent
+from multi_agentic_graph_rag.agents.requirement_discovery_agent import quote_span
+from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
+from multi_agentic_graph_rag.domain.identifiers import (
+    make_entity_id,
+    make_evidence_id,
+    make_relationship_id,
+    stable_token,
+)
 from multi_agentic_graph_rag.domain.schemas import (
-    DocumentChunk,
-    KnowledgeGraphArtifact,
-)
-from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
-from multi_agentic_graph_rag.services.assertion_canonicalization import canonicalize_assertions
-from multi_agentic_graph_rag.services.assertion_lifecycle import (
-    LifecycleResult,
-    reconcile_assertion_lifecycle,
-)
-from multi_agentic_graph_rag.services.entity_resolution import resolve_entities
-from multi_agentic_graph_rag.services.text_unit_segmentation import (
-    attach_evidence_text_units,
-    segment_version_chunks,
+    CanonicalEntity,
+    CanonicalRelationship,
+    EntityMention,
+    Evidence,
+    ManifestChunk,
+    RequirementChunkResult,
+    RequirementDiscoveryChunkResponse,
+    RequirementMapEntry,
 )
 
 
-def build_and_project_knowledge_graph(
-    *,
-    project: str,
-    document_id: str,
-    document_version_id: str,
-    doc_version: str,
-    chunks: list[DocumentChunk],
-    reasoning_model: ReasoningModel,
-    neo4j: Any,
-    logger: Any | None = None,
-) -> KnowledgeGraphArtifact:
-    """Extract, resolve, canonicalize and project one version's knowledge graph.
+@dataclass(frozen=True)
+class ChunkProjection:
+    """Validated per-chunk map entry plus canonical graph records."""
 
-    Returns the projected :class:`KnowledgeGraphArtifact`. Raises on extraction or
-    projection failure so the caller (ingest or the standalone stage) fails the run
-    clearly rather than silently shipping an empty knowledge graph.
-    """
-    neo4j.ensure_knowledge_schema()
+    result: RequirementChunkResult
+    entities: list[CanonicalEntity]
+    relationships: list[CanonicalRelationship]
 
-    text_units = segment_version_chunks(
-        document_version_id=document_version_id,
-        chunks=chunks,
-    )
-    if logger is not None:
-        logger.info(
-            "Segmented {chunk_count} chunks into {text_unit_count} text units",
-            step="segment_text_units",
-            chunk_count=len(chunks),
-            text_unit_count=len(text_units),
-            document_version_id=document_version_id,
+
+class KnowledgeGraphBuilder:
+    """Project entities, mentions, and direct LLM semantic relationships."""
+
+    def __init__(self, store: Neo4jStore) -> None:
+        self.store = store
+
+    def project(
+        self,
+        *,
+        project: str,
+        chunk: ManifestChunk,
+        response: RequirementDiscoveryChunkResponse,
+    ) -> ChunkProjection:
+        """Resolve candidates, persist the graph, and build the intermediate map entry."""
+        entities_by_ref: dict[str, CanonicalEntity] = {}
+        for candidate in response.entities:
+            mention_quote = candidate.evidence_quotes[0]
+            start, end = quote_span(chunk.chunk_text, mention_quote)
+            entity_id = make_entity_id(
+                project, candidate.normalized_name.strip().lower(), candidate.entity_type
+            )
+            entities_by_ref[candidate.entity_ref] = CanonicalEntity(
+                entity_id=entity_id,
+                name=candidate.name,
+                normalized_name=candidate.normalized_name.strip().lower(),
+                entity_type=candidate.entity_type,
+                aliases=candidate.aliases,
+                mentions=[
+                    EntityMention(
+                        chunk_id=chunk.chunk_id,
+                        surface_text=mention_quote,
+                        start_char=chunk.start_char + start,
+                        end_char=chunk.start_char + end,
+                    )
+                ],
+            )
+
+        relationships_by_owner: dict[tuple[str, str], CanonicalRelationship] = {}
+        relationship_hashes: dict[str, str] = {}
+        relationships_by_ref = {
+            relationship.relationship_ref: relationship for relationship in response.relationships
+        }
+        map_entries: list[RequirementMapEntry] = []
+        for requirement in response.requirements:
+            requirement_hash = hashlib.sha256(
+                requirement.requirement_text.encode("utf-8")
+            ).hexdigest()
+            evidence: list[Evidence] = []
+            for quote in requirement.evidence_quotes:
+                start, end = quote_span(chunk.chunk_text, quote)
+                evidence.append(
+                    Evidence(
+                        evidence_id=make_evidence_id(
+                            stable_token(requirement.requirement_ref, requirement_hash),
+                            chunk.chunk_id,
+                            chunk.start_char + start,
+                            chunk.start_char + end,
+                        ),
+                        chunk_id=chunk.chunk_id,
+                        quote=quote,
+                        start_char=chunk.start_char + start,
+                        end_char=chunk.start_char + end,
+                    )
+                )
+            entity_ids = [
+                entities_by_ref[entity_ref].entity_id for entity_ref in requirement.entity_refs
+            ]
+            relationship_ids: list[str] = []
+            for relationship_ref in requirement.relationship_refs:
+                rel_candidate = relationships_by_ref[relationship_ref]
+                relationship_evidence_start, relationship_evidence_end = quote_span(
+                    chunk.chunk_text, rel_candidate.evidence_quote
+                )
+                source_id = entities_by_ref[rel_candidate.source_entity_ref].entity_id
+                target_id = entities_by_ref[rel_candidate.target_entity_ref].entity_id
+                relationship_id = make_relationship_id(
+                    project=project,
+                    chunk_id=chunk.chunk_id,
+                    requirement_text_hash=requirement_hash,
+                    source_entity_id=source_id,
+                    relationship_type=rel_candidate.relationship_type,
+                    target_entity_id=target_id,
+                    evidence_hash=hashlib.sha256(
+                        rel_candidate.evidence_quote.encode("utf-8")
+                    ).hexdigest(),
+                )
+                relationship = CanonicalRelationship(
+                    relationship_id=relationship_id,
+                    chunk_id=chunk.chunk_id,
+                    source_entity_id=source_id,
+                    relationship_type=rel_candidate.relationship_type,
+                    target_entity_id=target_id,
+                    confidence=rel_candidate.confidence,
+                    evidence=[
+                        Evidence(
+                            evidence_id=make_evidence_id(
+                                relationship_id,
+                                chunk.chunk_id,
+                                chunk.start_char + relationship_evidence_start,
+                                chunk.start_char + relationship_evidence_end,
+                            ),
+                            chunk_id=chunk.chunk_id,
+                            quote=rel_candidate.evidence_quote,
+                            start_char=chunk.start_char + relationship_evidence_start,
+                            end_char=chunk.start_char + relationship_evidence_end,
+                        )
+                    ],
+                )
+                relationships_by_owner[(requirement.requirement_ref, relationship_ref)] = (
+                    relationship
+                )
+                relationship_hashes[relationship_id] = requirement_hash
+                relationship_ids.append(relationship_id)
+            map_entries.append(
+                RequirementMapEntry(
+                    requirement_ref=requirement.requirement_ref,
+                    source_req_id=requirement.source_req_id,
+                    source_req_id_type=requirement.source_req_id_type,
+                    requirement_text=requirement.requirement_text,
+                    requirement_type=requirement.requirement_type,
+                    priority=requirement.priority,
+                    constraints=requirement.constraints,
+                    evidence=evidence,
+                    entity_ids=entity_ids,
+                    relationship_ids=relationship_ids,
+                    confidence=requirement.confidence,
+                )
+            )
+
+        entities = list(entities_by_ref.values())
+        relationships = list(relationships_by_owner.values())
+        self.store.upsert_semantic_projection(
+            project=project,
+            chunk_id=chunk.chunk_id,
+            entities=entities,
+            mentioned_entity_ids={entity.entity_id for entity in entities},
+            relationships=relationships,
+            requirement_text_hash_by_relationship=relationship_hashes,
         )
-    neo4j.project_text_units(document_version_id, text_units)
-
-    agent = KnowledgeExtractionAgent(reasoning_model, logger=logger)
-    extraction = agent.run(project=project, version=doc_version, chunks=chunks)
-
-    # Entity resolution reuses the entities participating in the document's prior
-    # active knowledge version (never every stale entity ever created for the
-    # project); see ``Neo4jStore.fetch_entities_for_resolution``.
-    existing_entities = neo4j.fetch_entities_for_resolution(
-        project=project, document_id=document_id
-    )
-    resolution = resolve_entities(
-        project=project,
-        extraction=extraction,
-        existing_entities=existing_entities,
-        chunk_text_by_id={chunk.chunk_id: chunk.text for chunk in chunks},
-    )
-    assertions, evidence = canonicalize_assertions(
-        project=project,
-        document_id=document_id,
-        document_version_id=document_version_id,
-        extraction=extraction,
-        resolution=resolution,
-    )
-    evidence = attach_evidence_text_units(
-        evidence,
-        chunks_by_id={chunk.chunk_id: chunk for chunk in chunks},
-        text_units=text_units,
-    )
-
-    # Cross-version lifecycle: diff this version's assertions against the prior
-    # active knowledge version and mark supersede/retire/new. Skipped when there is
-    # no prior version, or when re-running the same version (idempotent no-op).
-    lifecycle = _reconcile_lifecycle(
-        neo4j=neo4j,
-        document_id=document_id,
-        document_version_id=document_version_id,
-        assertions=assertions,
-        logger=logger,
-    )
-    assertions = lifecycle.assertions
-
-    artifact = KnowledgeGraphArtifact(
-        project=project,
-        document_id=document_id,
-        document_version_id=document_version_id,
-        doc_version=doc_version,
-        text_units=text_units,
-        entities=resolution.entities,
-        mentions=resolution.mentions,
-        assertions=assertions,
-        evidence=evidence,
-    )
-    if logger is not None:
-        logger.info(
-            "Projecting source-knowledge graph into Neo4j",
-            step="project_knowledge_graph",
-            document_version_id=document_version_id,
-            entity_count=len(artifact.entities),
-            assertion_count=len(artifact.assertions),
-            evidence_count=len(artifact.evidence),
-            store_responsibility="source_knowledge_graph",
+        expected = {relationship.relationship_id for relationship in relationships}
+        if self.store.validate_relationships(project, expected) != expected:
+            raise ValueError("Neo4j semantic projection read-back validation failed")
+        status: Literal["completed", "no_requirements"] = (
+            "completed" if map_entries else "no_requirements"
         )
-    neo4j.project_knowledge_graph(artifact)
-    if lifecycle.prior_updates:
-        neo4j.apply_assertion_lifecycle(lifecycle.prior_updates)
-    return artifact
-
-
-def _reconcile_lifecycle(
-    *,
-    neo4j: Any,
-    document_id: str,
-    document_version_id: str,
-    assertions: list[Any],
-    logger: Any | None,
-) -> LifecycleResult:
-    """Reconcile lifecycle deterministically within the active scope.
-
-    Args:
-        neo4j (Any): Neo4j required by the operation's typed contract.
-        document_id (str): Canonical document id used as a safe operational anchor.
-        document_version_id (str): Canonical document version id used as a safe operational anchor.
-        assertions (list[Any]): Assertions required by the operation's typed contract.
-        logger (Any | None): Optional run-scoped logger used only for sanitized diagnostics.
-
-    Returns:
-        LifecycleResult: The typed result produced by the operation.
-
-    Side Effects:
-        Emits sanitized run-scoped diagnostics when a logger is available.
-    """
-    prior_version = neo4j.active_knowledge_version(document_id)
-    if prior_version is None or prior_version == document_version_id:
-        return LifecycleResult(assertions=assertions)
-    prior_assertions = neo4j.fetch_assertion_lineage(prior_version)
-    result = reconcile_assertion_lifecycle(
-        new_assertions=assertions, prior_assertions=prior_assertions
-    )
-    if logger is not None and (result.prior_updates or result.ambiguous_lineage_keys):
-        superseded = sum(1 for u in result.prior_updates if u.status == "superseded")
-        retired = sum(1 for u in result.prior_updates if u.status == "retired")
-        logger.info(
-            "Reconciled assertion lifecycle against prior knowledge version",
-            step="assertion_lifecycle",
-            document_version_id=document_version_id,
-            prior_version=prior_version,
-            superseded_count=superseded,
-            retired_count=retired,
-            ambiguous_count=len(result.ambiguous_lineage_keys),
+        return ChunkProjection(
+            result=RequirementChunkResult(
+                chunk_id=chunk.chunk_id,
+                sequence_index=chunk.sequence_index,
+                status=status,
+                requirements=map_entries,
+                error=None,
+            ),
+            entities=entities,
+            relationships=relationships,
         )
-    return result
+
+
+__all__ = ["ChunkProjection", "KnowledgeGraphBuilder"]

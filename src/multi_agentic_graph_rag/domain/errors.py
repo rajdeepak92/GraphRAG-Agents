@@ -1,4 +1,4 @@
-"""Domain exceptions."""
+"""Application exception hierarchy."""
 
 
 class MaragError(Exception):
@@ -6,40 +6,25 @@ class MaragError(Exception):
 
 
 class ConfigurationError(MaragError):
-    """Configuration is invalid."""
+    """Operational configuration is invalid."""
 
 
-class IngestionError(MaragError):
-    """Ingestion failed."""
+class ModelOutputError(MaragError):
+    """A reasoning provider did not produce valid structured output."""
 
 
-class VersionConflictError(IngestionError):
-    """Same logical version has different source bytes."""
+class StoreUnavailableError(MaragError):
+    """A required external store is unavailable."""
 
 
-class StoreUnavailableError(IngestionError):
-    """A required backing store is unavailable."""
+class TraceValidationError(MaragError):
+    """Supplied evidence or traceability is invalid."""
 
 
-class ModelOutputError(IngestionError):
-    """A model returned output that could not be validated."""
-
-
-class SchemaMismatchError(StoreUnavailableError):
-    """A backing store schema does not match the current application contract."""
-
-
-class TraceValidationError(IngestionError):
-    """LLM trace data does not match source text."""
-
-
-class CheckpointError(MaragError):
-    """A local crash-resume checkpoint file is missing, corrupted, or mismatched."""
-
-
-class UserStoryValidationError(MaragError):
-    """Generated user-story content failed meaningfulness validation."""
-
-
-class TestScenarioValidationError(MaragError):
-    """Generated test-scenario content failed meaningfulness validation."""
+__all__ = [
+    "ConfigurationError",
+    "MaragError",
+    "ModelOutputError",
+    "StoreUnavailableError",
+    "TraceValidationError",
+]

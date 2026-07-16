@@ -1,4 +1,4 @@
-"""Configuration loader with CLI/env/.env/config/default precedence."""
+"""Load operational configuration from config.json, .env, and environment."""
 
 from __future__ import annotations
 
@@ -7,10 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from multi_agentic_graph_rag.common_defs import EnvVar, ModeName, PathDef, ProviderName
 from multi_agentic_graph_rag.config.huggingface_env import (
     env_bool,
-    env_positive_int,
     export_huggingface_environment,
     first_huggingface_token,
 )
@@ -19,524 +17,242 @@ from multi_agentic_graph_rag.config.settings import (
     AzureOpenAISettings,
     ChromaSettings,
     ChunkingSettings,
-    DiscoverySettings,
     HuggingFaceSettings,
-    KnowledgeGraphSettings,
     ModelSection,
     Neo4jSettings,
     PathsSettings,
     PostgresSettings,
-    RequirementIdentitySettings,
-    TestScenarioSettings,
-    UserStorySettings,
+    RetrievalSettings,
+    RuntimeSettings,
 )
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
-    """Read dotenv within the authorized project and version scope.
-
-    Args:
-        path (Path): Filesystem location authorized for this operation.
-
-    Returns:
-        dict[str, str]: The typed result produced by the operation.
-    """
     if not path.exists():
         return {}
-    values: dict[str, str] = {}
+    result: dict[str, str] = {}
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
+        result[key.strip()] = value.strip().strip("\"'")
+    return result
 
 
-def _deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Execute the deep update operation within its declared architectural boundary.
-
-    Args:
-        base (dict[str, Any]): Base required by the operation's typed contract.
-        override (dict[str, Any]): Override required by the operation's typed contract.
-
-    Returns:
-        dict[str, Any]: The typed result produced by the operation.
-    """
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_update(base[key], value)
-        else:
-            base[key] = value
-    return base
+def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
+    value = data.get(name, {})
+    return dict(value) if isinstance(value, dict) else {}
 
 
-def _cfg_path(root: Path, data: dict[str, Any], key: str, default: str) -> Path:
-    """Execute the cfg path operation within its declared architectural boundary.
-
-    Args:
-        root (Path): Filesystem location authorized for this operation.
-        data (dict[str, Any]): Validated structured data for the operation.
-        key (str): Key required by the operation's typed contract.
-        default (str): Default required by the operation's typed contract.
-
-    Returns:
-        Path: The typed result produced by the operation.
-    """
-    raw = data.get("paths", {}).get(key, default)
-    path = Path(str(raw))
-    return path if path.is_absolute() else root / path
+def _path(root: Path, value: object, default: str) -> Path:
+    candidate = Path(str(value or default))
+    return candidate if candidate.is_absolute() else root / candidate
 
 
-def _positive_int(value: Any, *, default: int) -> int:
-    """Execute the positive int operation within its declared architectural boundary.
-
-    Args:
-        value (Any): Value required by the operation's typed contract.
-        default (int): Default required by the operation's typed contract.
-
-    Returns:
-        int: The typed result produced by the operation.
-    """
-    if value is None:
-        return default
+def _int(value: object, default: int) -> int:
     try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(1, parsed)
-
-
-def _optional_positive_int(value: Any) -> int | None:
-    """Execute the optional positive int operation within its declared architectural boundary.
-
-    Args:
-        value (Any): Value required by the operation's typed contract.
-
-    Returns:
-        int | None: The typed result produced by the operation.
-    """
-    if value is None or value == "":
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _float(value: Any, *, default: float) -> float:
-    """Execute the float operation within its declared architectural boundary.
-
-    Args:
-        value (Any): Value required by the operation's typed contract.
-        default (float): Default required by the operation's typed contract.
-
-    Returns:
-        float: The typed result produced by the operation.
-    """
-    if value is None or value == "":
-        return default
-    try:
-        return float(value)
+        return int(str(value)) if value not in (None, "") else default
     except (TypeError, ValueError):
         return default
 
 
-def load_config(
-    config_path: Path | None = None,
-    cli_overrides: dict[str, Any] | None = None,
-) -> AppSettings:
-    """Load config within the authorized project and version scope.
-
-    Args:
-        config_path (Path | None): Filesystem location authorized for this operation.
-        cli_overrides (dict[str, Any] | None): Cli overrides required by the operation's typed
-                                               contract.
-
-    Returns:
-        AppSettings: The typed result produced by the operation.
-    """
+def load_config(config_path: Path | None = None) -> AppSettings:
+    """Load and validate the current operational configuration."""
     root = Path(os.environ.get("PROJECT_ROOT", Path.cwd())).resolve()
-    config_file = config_path or root / "config.json"
-    config_data: dict[str, Any] = {}
-    if config_file.exists():
-        config_data = json.loads(config_file.read_text(encoding="utf-8"))
+    path = config_path or root / "config.json"
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    env = {**_read_dotenv(root / ".env"), **os.environ}
 
-    env_file_values = _read_dotenv(root / ".env")
-    env = {**env_file_values, **os.environ}
-    huggingface_token = first_huggingface_token(env)
-    huggingface_offline = env_bool(env.get(EnvVar.HUGGINGFACE_OFFLINE.value), default=False)
-
-    if cli_overrides:
-        config_data = _deep_update(config_data, cli_overrides)
-
+    paths_cfg = _section(data, "paths")
+    generated_dir = _path(
+        root,
+        env.get("GENERATED_DIR", paths_cfg.get("generated_requirements_dir")),
+        "generated",
+    )
+    staging_dir = _path(
+        root,
+        env.get("RUNTIME_STAGING_DIR", paths_cfg.get("runtime_staging_dir")),
+        "runtime/staging",
+    )
     paths = PathsSettings(
         project_root=root,
-        global_cache_dir=Path(
-            env.get(
-                EnvVar.GLOBAL_CACHE_DIR.value,
-                _cfg_path(root, config_data, "global_cache_dir", PathDef.GLOBAL_CACHE_DIR.value),
-            )
+        generated_dir=generated_dir,
+        chroma_persist_dir=_path(
+            root,
+            env.get("CHROMA_PERSIST_DIR", paths_cfg.get("chroma_persist_dir")),
+            "runtime/databases/chroma",
         ),
-        documents_inbox_dir=Path(
-            env.get(
-                EnvVar.DOCUMENTS_INBOX_DIR.value,
-                _cfg_path(
-                    root,
-                    config_data,
-                    "documents_inbox_dir",
-                    PathDef.DOCUMENTS_INBOX_DIR.value,
-                ),
-            )
-        ),
-        generated_requirements_dir=Path(
-            env.get(
-                EnvVar.GENERATED_REQUIREMENTS_DIR.value,
-                _cfg_path(
-                    root,
-                    config_data,
-                    "generated_requirements_dir",
-                    PathDef.GENERATED_REQUIREMENTS_DIR.value,
-                ),
-            )
-        ),
-        chroma_persist_dir=Path(
-            env.get(
-                EnvVar.CHROMA_PERSIST_DIR.value,
-                _cfg_path(
-                    root,
-                    config_data,
-                    "chroma_persist_dir",
-                    PathDef.CHROMA_DB_PATH.value,
-                ),
-            )
-        ),
-        runtime_staging_dir=Path(
-            env.get(
-                EnvVar.RUNTIME_STAGING_DIR.value,
-                _cfg_path(
-                    root,
-                    config_data,
-                    "runtime_staging_dir",
-                    PathDef.RUNTIME_STAGING_DIR.value,
-                ),
-            )
-        ),
-        runtime_logs_dir=Path(
-            env.get(
-                EnvVar.RUNTIME_LOGS_DIR.value,
-                _cfg_path(root, config_data, "runtime_logs_dir", PathDef.RUNTIME_LOGS_DIR.value),
-            )
-        ),
-        runtime_locks_dir=Path(
-            env.get(
-                EnvVar.RUNTIME_LOCKS_DIR.value,
-                _cfg_path(root, config_data, "runtime_locks_dir", PathDef.RUNTIME_LOCKS_DIR.value),
-            )
+        runtime_staging_dir=staging_dir,
+        runtime_logs_dir=_path(
+            root,
+            env.get("RUNTIME_LOGS_DIR", paths_cfg.get("runtime_logs_dir")),
+            "runtime/logs",
         ),
     )
 
-    for cache_var in ("HF_HOME", "TRANSFORMERS_CACHE", "TORCH_HOME", "UV_CACHE_DIR"):
-        os.environ.setdefault(cache_var, str(paths.global_cache_dir / cache_var.lower()))
-    export_huggingface_environment(token=huggingface_token, offline=huggingface_offline)
+    reasoning_cfg = _section(data, "reasoning_model")
+    embedding_cfg = _section(data, "embedding_model")
+    reranker_cfg = _section(data, "reranker_model")
+    postgres_cfg = _section(data, "postgres")
+    neo4j_cfg = _section(data, "neo4j")
+    azure_cfg = _section(data, "azure_openai")
+    hf_cfg = _section(data, "huggingface")
+    runtime_cfg = _section(data, "runtime")
+    retrieval_cfg = _section(data, "retrieval")
 
-    reasoning_cfg = config_data.get("reasoning_model", {})
-    embedding_cfg = config_data.get("embedding_model", {})
-    reranker_cfg = config_data.get("reranker_model", {})
-    postgres_cfg = config_data.get("postgres", {})
-    neo4j_cfg = config_data.get("neo4j", {})
-    discovery_cfg = config_data.get("discovery", {})
-    configured_discovery_batch_size = _positive_int(
-        discovery_cfg.get("batch_size"),
-        default=1,
+    hf_token = first_huggingface_token(env)
+    hf_offline = env_bool(
+        env.get("HUGGINGFACE_OFFLINE"),
+        default=bool(hf_cfg.get("offline", False)),
     )
-    discovery_batch_size = env_positive_int(
-        env.get(EnvVar.DISCOVERY_BATCH_SIZE.value)
-        or env.get(EnvVar.HUGGINGFACE_DISCOVERY_BATCH_SIZE.value),
-        default=configured_discovery_batch_size,
-    )
-    log_llm_responses = env_bool(
-        env.get(EnvVar.LOG_LLM_RESPONSES.value),
-        default=bool(discovery_cfg.get("log_llm_responses", False)),
-    )
-
-    user_story_cfg = config_data.get("user_story", {})
-    user_story_max_new_tokens = _optional_positive_int(
-        env.get(EnvVar.USER_STORY_MAX_NEW_TOKENS.value, user_story_cfg.get("max_new_tokens"))
-    )
-    user_story = UserStorySettings(
-        top_k=_positive_int(
-            env.get(EnvVar.USER_STORY_TOP_K.value, user_story_cfg.get("top_k")), default=4
-        ),
-        dense_k=_positive_int(
-            env.get(EnvVar.USER_STORY_DENSE_K.value, user_story_cfg.get("dense_k")), default=8
-        ),
-        sparse_k=_positive_int(
-            env.get(EnvVar.USER_STORY_SPARSE_K.value, user_story_cfg.get("sparse_k")), default=8
-        ),
-        neighbor_window=_positive_int(
-            env.get(EnvVar.USER_STORY_NEIGHBOR_WINDOW.value, user_story_cfg.get("neighbor_window")),
-            default=1,
-        ),
-        max_new_tokens=user_story_max_new_tokens,
-    )
-
-    test_scenario_cfg = config_data.get("test_scenario", {})
-    test_scenario_max_new_tokens = _optional_positive_int(
-        env.get(
-            EnvVar.TEST_SCENARIO_MAX_NEW_TOKENS.value,
-            test_scenario_cfg.get("max_new_tokens"),
-        )
-    )
-    test_scenario = TestScenarioSettings(
-        top_k=_positive_int(
-            env.get(EnvVar.TEST_SCENARIO_TOP_K.value, test_scenario_cfg.get("top_k")),
-            default=4,
-        ),
-        dense_k=_positive_int(
-            env.get(EnvVar.TEST_SCENARIO_DENSE_K.value, test_scenario_cfg.get("dense_k")),
-            default=8,
-        ),
-        sparse_k=_positive_int(
-            env.get(EnvVar.TEST_SCENARIO_SPARSE_K.value, test_scenario_cfg.get("sparse_k")),
-            default=8,
-        ),
-        neighbor_window=_positive_int(
-            env.get(
-                EnvVar.TEST_SCENARIO_NEIGHBOR_WINDOW.value,
-                test_scenario_cfg.get("neighbor_window"),
-            ),
-            default=1,
-        ),
-        max_new_tokens=test_scenario_max_new_tokens,
-    )
-
-    knowledge_graph_cfg = config_data.get("knowledge_graph", {})
-    knowledge_graph = KnowledgeGraphSettings(
-        enabled=env_bool(
-            env.get(EnvVar.KNOWLEDGE_GRAPH_ENABLED.value),
-            default=bool(knowledge_graph_cfg.get("enabled", True)),
-        ),
-        shadow_mode=env_bool(
-            env.get(EnvVar.KNOWLEDGE_GRAPH_SHADOW_MODE.value),
-            default=bool(knowledge_graph_cfg.get("shadow_mode", True)),
-        ),
-        graph_primary_story=env_bool(
-            env.get(EnvVar.GRAPH_PRIMARY_STORY.value),
-            default=bool(knowledge_graph_cfg.get("graph_primary_story", True)),
-        ),
-        graph_primary_scenario=env_bool(
-            env.get(EnvVar.GRAPH_PRIMARY_SCENARIO.value),
-            default=bool(knowledge_graph_cfg.get("graph_primary_scenario", True)),
-        ),
-        expansion_k=_positive_int(
-            env.get(
-                EnvVar.KNOWLEDGE_GRAPH_EXPANSION_K.value,
-                knowledge_graph_cfg.get("expansion_k"),
-            ),
-            default=6,
-        ),
-        graph_min_assertions=_positive_int(
-            env.get(
-                EnvVar.KNOWLEDGE_GRAPH_MIN_ASSERTIONS.value,
-                knowledge_graph_cfg.get("graph_min_assertions"),
-            ),
-            default=3,
-        ),
-    )
-
-    requirement_identity_cfg = config_data.get("requirement_identity", {})
-    requirement_identity = RequirementIdentitySettings(
-        candidate_top_k=_positive_int(
-            env.get(
-                EnvVar.REQUIREMENT_CANDIDATE_TOP_K.value,
-                requirement_identity_cfg.get("candidate_top_k"),
-            ),
-            default=2,
-        ),
-        max_entailment_calls=_positive_int(
-            env.get(
-                EnvVar.REQUIREMENT_MAX_ENTAILMENT_CALLS.value,
-                requirement_identity_cfg.get("max_entailment_calls"),
-            ),
-            default=200,
-        ),
-        max_structured_attempts=_positive_int(
-            env.get(
-                EnvVar.REQUIREMENT_MAX_STRUCTURED_ATTEMPTS.value,
-                requirement_identity_cfg.get("max_structured_attempts"),
-            ),
-            default=2,
-        ),
-        recall_cosine_threshold=_float(
-            env.get(
-                EnvVar.REQUIREMENT_RECALL_COSINE_THRESHOLD.value,
-                requirement_identity_cfg.get("recall_cosine_threshold"),
-            ),
-            default=0.62,
-        ),
-        token_overlap_threshold=_float(
-            requirement_identity_cfg.get("token_overlap_threshold"),
-            default=0.6,
-        ),
-        use_reranker=env_bool(
-            env.get(EnvVar.REQUIREMENT_USE_RERANKER.value),
-            default=bool(requirement_identity_cfg.get("use_reranker", True)),
-        ),
-        require_entailment_for_merge=bool(
-            requirement_identity_cfg.get("require_entailment_for_merge", True)
-        ),
-    )
+    export_huggingface_environment(token=hf_token, offline=hf_offline)
 
     settings = AppSettings(
-        app_env=env.get(
-            EnvVar.APP_ENV.value, config_data.get("application", {}).get("app_env", "development")
-        ),
-        log_level=env.get(
-            EnvVar.LOG_LEVEL.value, config_data.get("application", {}).get("log_level", "INFO")
-        ),
+        app_env=env.get("APP_ENV", _section(data, "application").get("app_env", "development")),
+        log_level=env.get("LOG_LEVEL", _section(data, "application").get("log_level", "INFO")),
         paths=paths,
         reasoning_model=ModelSection(
             provider=env.get(
-                EnvVar.REASONING_MODEL_PROVIDER.value,
-                env.get(
-                    EnvVar.REASONING_LLM_PROVIDER.value,
-                    reasoning_cfg.get("provider", ProviderName.HUGGINGFACE.value),
-                ),
+                "REASONING_MODEL_PROVIDER",
+                reasoning_cfg.get("provider", "huggingface"),
             ),
             model=env.get(
-                EnvVar.HUGGINGFACE_REASONING_MODEL.value,
+                "HUGGINGFACE_REASONING_MODEL",
                 reasoning_cfg.get("model", "Qwen/Qwen2.5-Coder-7B-Instruct"),
             ),
             deployment=env.get(
-                EnvVar.AZURE_OPENAI_REASONING_DEPLOYMENT.value, reasoning_cfg.get("deployment")
+                "AZURE_OPENAI_REASONING_DEPLOYMENT",
+                reasoning_cfg.get("deployment"),
             ),
         ),
         embedding_model=ModelSection(
             provider=env.get(
-                EnvVar.EMBEDDING_MODEL_PROVIDER.value,
-                env.get(
-                    EnvVar.EMBEDDING_PROVIDER.value,
-                    embedding_cfg.get("provider", ProviderName.HUGGINGFACE.value),
-                ),
+                "EMBEDDING_MODEL_PROVIDER",
+                embedding_cfg.get("provider", "huggingface"),
             ),
             model=env.get(
-                EnvVar.HUGGINGFACE_EMBEDDING_MODEL.value, embedding_cfg.get("model", "BAAI/bge-m3")
+                "HUGGINGFACE_EMBEDDING_MODEL",
+                embedding_cfg.get("model", "BAAI/bge-m3"),
             ),
             deployment=env.get(
-                EnvVar.AZURE_OPENAI_EMBEDDING_DEPLOYMENT.value, embedding_cfg.get("deployment")
+                "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+                embedding_cfg.get("deployment"),
             ),
         ),
         reranker_model=ModelSection(
             provider=env.get(
-                EnvVar.RERANKER_MODEL_PROVIDER.value,
-                reranker_cfg.get("provider", ProviderName.HUGGINGFACE.value),
+                "RERANKER_MODEL_PROVIDER",
+                reranker_cfg.get("provider", "huggingface"),
             ),
             model=env.get(
-                EnvVar.HUGGINGFACE_RERANKER_MODEL.value,
+                "HUGGINGFACE_RERANKER_MODEL",
                 reranker_cfg.get("model", "BAAI/bge-reranker-base"),
             ),
         ),
-        chunking=ChunkingSettings(**config_data.get("chunking", {})),
-        discovery=DiscoverySettings(
-            batch_size=discovery_batch_size,
-            log_llm_responses=log_llm_responses,
-            ledger_enabled=env_bool(
-                env.get(EnvVar.DISCOVERY_LEDGER_ENABLED.value),
-                default=bool(discovery_cfg.get("ledger_enabled", True)),
+        chunking=ChunkingSettings(**_section(data, "chunking")),
+        runtime=RuntimeSettings(
+            concurrency=_int(env.get("WORKFLOW_CONCURRENCY", runtime_cfg.get("concurrency")), 1),
+            timeout_seconds=_int(
+                env.get("WORKFLOW_TIMEOUT_SECONDS", runtime_cfg.get("timeout_seconds")), 120
             ),
-            ledger_max_entries=_positive_int(
+            transient_max_attempts=_int(
                 env.get(
-                    EnvVar.DISCOVERY_LEDGER_MAX_ENTRIES.value,
-                    discovery_cfg.get("ledger_max_entries"),
+                    "TRANSIENT_MAX_ATTEMPTS",
+                    runtime_cfg.get("transient_max_attempts"),
                 ),
-                default=500,
+                2,
             ),
-            ledger_top_k=_positive_int(
-                env.get(
-                    EnvVar.DISCOVERY_LEDGER_TOP_K.value,
-                    discovery_cfg.get("ledger_top_k"),
-                ),
-                default=40,
+        ),
+        retrieval=RetrievalSettings(
+            top_k=_int(env.get("RETRIEVAL_TOP_K", retrieval_cfg.get("top_k")), 6),
+            vector_k=_int(env.get("RETRIEVAL_VECTOR_K", retrieval_cfg.get("vector_k")), 12),
+            graph_k=_int(env.get("RETRIEVAL_GRAPH_K", retrieval_cfg.get("graph_k")), 12),
+            max_hops=_int(env.get("RETRIEVAL_MAX_HOPS", retrieval_cfg.get("max_hops")), 2),
+            token_budget=_int(
+                env.get("RETRIEVAL_TOKEN_BUDGET", retrieval_cfg.get("token_budget")), 6000
             ),
         ),
         postgres=PostgresSettings(
-            mode=env.get(
-                EnvVar.POSTGRES_MODE.value, postgres_cfg.get("mode", ModeName.POSTGRES.value)
-            ),
+            mode=env.get("POSTGRES_MODE", postgres_cfg.get("mode", "postgres")),
             dsn=env.get(
-                EnvVar.POSTGRES_DSN.value,
-                postgres_cfg.get("dsn", "postgresql://marag:marag@127.0.0.1:5432/marag"),
+                "POSTGRES_DSN",
+                postgres_cfg.get(
+                    "dsn",
+                    "postgresql://marag:marag@127.0.0.1:5432/marag",
+                ),
             ),
-            local_path=Path(
-                postgres_cfg.get("local_path", paths.runtime_staging_dir / "postgres_records.jsonl")
+            local_path=_path(
+                root,
+                postgres_cfg.get("local_path"),
+                "runtime/staging/postgres_records.jsonl",
             ),
         ),
         neo4j=Neo4jSettings(
-            mode=env.get(EnvVar.NEO4J_MODE.value, neo4j_cfg.get("mode", ModeName.NEO4J.value)),
-            uri=env.get(EnvVar.NEO4J_URI.value, neo4j_cfg.get("uri", "bolt://127.0.0.1:7687")),
-            username=env.get(EnvVar.NEO4J_USERNAME.value, neo4j_cfg.get("username", "neo4j")),
-            password=env.get(EnvVar.NEO4J_PASSWORD.value, neo4j_cfg.get("password", "")),
-            database=env.get(EnvVar.NEO4J_DATABASE.value, neo4j_cfg.get("database", "neo4j")),
-            local_path=Path(
-                neo4j_cfg.get("local_path", paths.runtime_staging_dir / "neo4j_projection.jsonl")
+            mode=env.get("NEO4J_MODE", neo4j_cfg.get("mode", "neo4j")),
+            uri=env.get("NEO4J_URI", neo4j_cfg.get("uri", "bolt://127.0.0.1:7687")),
+            username=env.get("NEO4J_USERNAME", neo4j_cfg.get("username", "neo4j")),
+            password=env.get("NEO4J_PASSWORD", neo4j_cfg.get("password", "")),
+            database=env.get("NEO4J_DATABASE", neo4j_cfg.get("database", "neo4j")),
+            local_path=_path(
+                root,
+                neo4j_cfg.get("local_path"),
+                "runtime/staging/neo4j_projection.jsonl",
             ),
         ),
-        chroma=ChromaSettings(**config_data.get("chroma", {})),
-        user_story=user_story,
-        test_scenario=test_scenario,
-        knowledge_graph=knowledge_graph,
-        requirement_identity=requirement_identity,
+        chroma=ChromaSettings(
+            collection_prefix=_section(data, "chroma").get("collection_prefix", "marag")
+        ),
         azure_openai=AzureOpenAISettings(
-            endpoint=env.get(EnvVar.AZURE_OPENAI_ENDPOINT.value, ""),
-            api_key=env.get(EnvVar.AZURE_OPENAI_API_KEY.value, ""),
-            api_version=env.get(EnvVar.AZURE_OPENAI_API_VERSION.value, "2024-10-21"),
-            reasoning_deployment=env.get(EnvVar.AZURE_OPENAI_REASONING_DEPLOYMENT.value, ""),
-            embedding_deployment=env.get(EnvVar.AZURE_OPENAI_EMBEDDING_DEPLOYMENT.value, ""),
+            endpoint=env.get("AZURE_OPENAI_ENDPOINT", azure_cfg.get("endpoint", "")),
+            api_key=env.get("AZURE_OPENAI_API_KEY", azure_cfg.get("api_key", "")),
+            api_version=env.get(
+                "AZURE_OPENAI_API_VERSION",
+                azure_cfg.get("api_version", "2024-10-21"),
+            ),
+            reasoning_deployment=env.get(
+                "AZURE_OPENAI_REASONING_DEPLOYMENT",
+                azure_cfg.get("reasoning_deployment", ""),
+            ),
+            embedding_deployment=env.get(
+                "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+                azure_cfg.get("embedding_deployment", ""),
+            ),
         ),
         huggingface=HuggingFaceSettings(
-            token=huggingface_token,
+            token=hf_token,
             reasoning_model=env.get(
-                EnvVar.HUGGINGFACE_REASONING_MODEL.value, "Qwen/Qwen2.5-Coder-7B-Instruct"
+                "HUGGINGFACE_REASONING_MODEL",
+                hf_cfg.get("reasoning_model", "Qwen/Qwen2.5-Coder-7B-Instruct"),
             ),
-            embedding_model=env.get(EnvVar.HUGGINGFACE_EMBEDDING_MODEL.value, "BAAI/bge-m3"),
+            embedding_model=env.get(
+                "HUGGINGFACE_EMBEDDING_MODEL",
+                hf_cfg.get("embedding_model", "BAAI/bge-m3"),
+            ),
             reranker_model=env.get(
-                EnvVar.HUGGINGFACE_RERANKER_MODEL.value, "BAAI/bge-reranker-base"
+                "HUGGINGFACE_RERANKER_MODEL",
+                hf_cfg.get("reranker_model", "BAAI/bge-reranker-base"),
             ),
-            offline=huggingface_offline,
-            max_new_tokens=env_positive_int(
-                env.get(EnvVar.HUGGINGFACE_MAX_NEW_TOKENS.value), default=4096
+            offline=hf_offline,
+            max_new_tokens=_int(
+                env.get("HUGGINGFACE_MAX_NEW_TOKENS", hf_cfg.get("max_new_tokens")), 4096
             ),
-            discovery_batch_size=discovery_batch_size,
-            log_llm_responses=log_llm_responses,
+            log_llm_responses=env_bool(
+                env.get("LOG_LLM_RESPONSES"),
+                default=bool(hf_cfg.get("log_llm_responses", False)),
+            ),
         ),
-        raw_config=config_data,
     )
-
-    ensure_runtime_dirs(settings)
-    return settings
-
-
-def ensure_runtime_dirs(settings: AppSettings) -> None:
-    """Ensure runtime dirs.
-
-    Args:
-        settings (AppSettings): Validated settings that control this operation.
-
-    Side Effects:
-        May create or atomically replace files in the configured artifact boundary.
-    """
-    dirs = [
-        settings.paths.global_cache_dir,
-        settings.paths.documents_inbox_dir,
-        settings.paths.generated_requirements_dir,
+    for directory in (
+        settings.paths.generated_dir,
         settings.paths.chroma_persist_dir,
         settings.paths.runtime_staging_dir,
         settings.paths.runtime_logs_dir,
-        settings.paths.runtime_locks_dir,
         settings.postgres.local_path.parent,
         settings.neo4j.local_path.parent,
-    ]
-    for directory in dirs:
+    ):
         directory.mkdir(parents=True, exist_ok=True)
+    return settings
+
+
+__all__ = ["load_config"]

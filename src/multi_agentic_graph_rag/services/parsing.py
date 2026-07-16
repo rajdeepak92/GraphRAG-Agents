@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from typing import Any
 
 from multi_agentic_graph_rag.domain.schemas import ParsedBlock
-from multi_agentic_graph_rag.observability.logging import RunLogger
 
 PARSER_FINGERPRINT = "parsing-v1"
 
@@ -38,7 +38,7 @@ def normalize_text(text: str) -> str:
 
 def parse_document(
     path: Path,
-    logger: RunLogger | None = None,
+    logger: Any | None = None,
 ) -> tuple[list[ParsedBlock], str]:
     """Parse document.
 
@@ -127,6 +127,14 @@ def _parse_text(path: Path) -> list[ParsedBlock]:
                 paragraph=index + 1,
                 start_char=max(start, 0),
                 end_char=max(end, 0),
+                block_type=(
+                    "heading"
+                    if raw.startswith("#")
+                    else "list_item"
+                    if raw.lstrip().startswith(("-", "*", "+"))
+                    else "paragraph"
+                ),
+                source_location=f"char={max(start, 0)}:{max(end, 0)}",
             )
         )
     if not blocks and text.strip():
@@ -138,6 +146,8 @@ def _parse_text(path: Path) -> list[ParsedBlock]:
                 paragraph=1,
                 start_char=0,
                 end_char=len(text),
+                block_type="paragraph",
+                source_location=f"char=0:{len(text)}",
             )
         )
     return blocks
@@ -173,6 +183,12 @@ def _parse_docx(path: Path) -> list[ParsedBlock]:
                 paragraph=index,
                 start_char=cursor,
                 end_char=cursor + len(raw),
+                block_type=(
+                    "heading"
+                    if paragraph.style and paragraph.style.name.lower().startswith("heading")
+                    else "paragraph"
+                ),
+                source_location=f"paragraph={index}",
                 metadata={"style": paragraph.style.name if paragraph.style else None},
             )
         )
@@ -212,6 +228,8 @@ def _parse_pdf(path: Path) -> list[ParsedBlock]:
                         paragraph=len(blocks) + 1,
                         start_char=cursor,
                         end_char=cursor + len(raw),
+                        block_type="paragraph",
+                        source_location=f"page={page_index}",
                     )
                 )
                 cursor += len(raw) + 1

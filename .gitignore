@@ -83,7 +83,12 @@ runtime/logs/*
 tests/*
 # Reviewable acceptance tests: tracked despite the local test workspace being
 # ignored, so the proof of correctness never lives only in an ignored file.
-!tests/test_story_scenario_identity.py
-!tests/test_chunk_retention_contract.py
-!tests/test_knowledge_graph_readiness.py
-!tests/test_master_projection.py
+!tests/test_canonicalization.py
+!tests/test_cli_and_removal.py
+!tests/test_checkpoint_recovery.py
+!tests/test_contracts.py
+!tests/test_discovery_contract.py
+!tests/test_end_to_end_workflow.py
+!tests/test_ingestion_graph.py
+!tests/test_retrieval_isolation.py
+!tests/test_storage_schema.py

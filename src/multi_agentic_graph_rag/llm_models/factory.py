@@ -57,8 +57,8 @@ def create_reasoning_model(
             )
         return AzureOpenAIReasoningModel(
             settings.azure_openai,
-            discovery_batch_size=settings.discovery.batch_size,
-            log_llm_responses=settings.discovery.log_llm_responses,
+            discovery_batch_size=1,
+            log_llm_responses=settings.huggingface.log_llm_responses,
             logger=logger,
             run_dir=run_dir,
         )
@@ -77,7 +77,7 @@ def create_reasoning_model(
             logger=logger,
             run_dir=run_dir,
         )
-    raise ConfigurationError(f"Unsupported reasoning model provider for ingest: {provider}")
+    raise ConfigurationError(f"Unsupported reasoning model provider: {provider}")
 
 
 def create_embedding_model(
@@ -130,7 +130,7 @@ def create_embedding_model(
                 "install with: uv sync --dev --extra local-llm"
             )
         return HuggingFaceEmbeddingModel(settings.huggingface)
-    raise ConfigurationError(f"Unsupported embedding model provider for ingest: {provider}")
+    raise ConfigurationError(f"Unsupported embedding model provider: {provider}")
 
 
 def create_reranker_model(settings: AppSettings) -> RerankerModel:
@@ -158,4 +158,4 @@ def create_reranker_model(settings: AppSettings) -> RerankerModel:
                 "install with: uv sync --dev --extra local-llm"
             )
         return HuggingFaceRerankerModel(settings.huggingface)
-    raise ConfigurationError(f"Unsupported reranker model provider for ingest: {provider}")
+    raise ConfigurationError(f"Unsupported reranker model provider: {provider}")

@@ -1,214 +1,23 @@
-"""Canonical shared runtime literals."""
-
-from __future__ import annotations
+"""Small shared runtime literals."""
 
 from enum import StrEnum
 
 
 class EnvVar(StrEnum):
-    """Define canonical env var literals shared across runtime boundaries."""
+    """Hugging Face environment aliases used by provider setup."""
 
-    APP_ENV = "APP_ENV"
-    AZURE_OPENAI_API_KEY = "AZURE_OPENAI_API_KEY"
-    AZURE_OPENAI_API_VERSION = "AZURE_OPENAI_API_VERSION"
-    AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "AZURE_OPENAI_EMBEDDING_DEPLOYMENT"
-    AZURE_OPENAI_ENDPOINT = "AZURE_OPENAI_ENDPOINT"
-    AZURE_OPENAI_REASONING_DEPLOYMENT = "AZURE_OPENAI_REASONING_DEPLOYMENT"
-    CHROMA_PERSIST_DIR = "CHROMA_PERSIST_DIR"
-    DISCOVERY_BATCH_SIZE = "DISCOVERY_BATCH_SIZE"
-    DISCOVERY_LEDGER_ENABLED = "DISCOVERY_LEDGER_ENABLED"
-    DISCOVERY_LEDGER_MAX_ENTRIES = "DISCOVERY_LEDGER_MAX_ENTRIES"
-    DISCOVERY_LEDGER_TOP_K = "DISCOVERY_LEDGER_TOP_K"
-    DOCUMENTS_INBOX_DIR = "DOCUMENTS_INBOX_DIR"
-    EMBEDDING_MODEL_PROVIDER = "EMBEDDING_MODEL_PROVIDER"
-    EMBEDDING_PROVIDER = "EMBEDDING_PROVIDER"
-    GENERATED_REQUIREMENTS_DIR = "GENERATED_REQUIREMENTS_DIR"
-    GLOBAL_CACHE_DIR = "GLOBAL_CACHE_DIR"
-    GRAPH_PRIMARY_SCENARIO = "GRAPH_PRIMARY_SCENARIO"
-    GRAPH_PRIMARY_STORY = "GRAPH_PRIMARY_STORY"
-    HF_HOME = "HF_HOME"
-    HF_HUB_OFFLINE = "HF_HUB_OFFLINE"
     HF_TOKEN = "HF_TOKEN"
-    HUGGINGFACE_DISCOVERY_BATCH_SIZE = "HUGGINGFACE_DISCOVERY_BATCH_SIZE"
-    HUGGINGFACE_EMBEDDING_MODEL = "HUGGINGFACE_EMBEDDING_MODEL"
-    HUGGINGFACE_MAX_NEW_TOKENS = "HUGGINGFACE_MAX_NEW_TOKENS"
-    HUGGINGFACE_OFFLINE = "HUGGINGFACE_OFFLINE"
-    HUGGINGFACE_REASONING_MODEL = "HUGGINGFACE_REASONING_MODEL"
-    HUGGINGFACE_RERANKER_MODEL = "HUGGINGFACE_RERANKER_MODEL"
     HUGGINGFACE_TOKEN = "HUGGINGFACE_TOKEN"
     HUGGING_FACE_HUB_TOKEN = "HUGGING_FACE_HUB_TOKEN"
-    KNOWLEDGE_GRAPH_ENABLED = "KNOWLEDGE_GRAPH_ENABLED"
-    KNOWLEDGE_GRAPH_EXPANSION_K = "KNOWLEDGE_GRAPH_EXPANSION_K"
-    KNOWLEDGE_GRAPH_MIN_ASSERTIONS = "KNOWLEDGE_GRAPH_MIN_ASSERTIONS"
-    KNOWLEDGE_GRAPH_SHADOW_MODE = "KNOWLEDGE_GRAPH_SHADOW_MODE"
-    REQUIREMENT_CANDIDATE_TOP_K = "REQUIREMENT_CANDIDATE_TOP_K"
-    REQUIREMENT_MAX_ENTAILMENT_CALLS = "REQUIREMENT_MAX_ENTAILMENT_CALLS"
-    REQUIREMENT_MAX_STRUCTURED_ATTEMPTS = "REQUIREMENT_MAX_STRUCTURED_ATTEMPTS"
-    REQUIREMENT_RECALL_COSINE_THRESHOLD = "REQUIREMENT_RECALL_COSINE_THRESHOLD"
-    REQUIREMENT_USE_RERANKER = "REQUIREMENT_USE_RERANKER"
-    LOG_LEVEL = "LOG_LEVEL"
-    LOG_LLM_RESPONSES = "LOG_LLM_RESPONSES"
-    MARAG_ALLOW_SERVICE_STOP = "MARAG_ALLOW_SERVICE_STOP"
-    MARAG_NEO4J_AUTO_START = "MARAG_NEO4J_AUTO_START"
-    MARAG_NEO4J_BOLT_PORT = "MARAG_NEO4J_BOLT_PORT"
-    MARAG_NEO4J_HTTP_PORT = "MARAG_NEO4J_HTTP_PORT"
-    MARAG_NEO4J_START_MODE = "MARAG_NEO4J_START_MODE"
-    MARAG_POSTGRES_ALLOW_STOP = "MARAG_POSTGRES_ALLOW_STOP"
-    MARAG_POSTGRES_AUTO_START = "MARAG_POSTGRES_AUTO_START"
-    MARAG_POSTGRES_HOST = "MARAG_POSTGRES_HOST"
-    MARAG_POSTGRES_PORT = "MARAG_POSTGRES_PORT"
-    MARAG_POSTGRES_SERVICE_NAME = "MARAG_POSTGRES_SERVICE_NAME"
-    NEO4J_DATABASE = "NEO4J_DATABASE"
-    NEO4J_DBMS_HOME = "NEO4J_DBMS_HOME"
-    NEO4J_JAVA_HOME = "NEO4J_JAVA_HOME"
-    NEO4J_MODE = "NEO4J_MODE"
-    NEO4J_PASSWORD = "NEO4J_PASSWORD"
-    NEO4J_URI = "NEO4J_URI"
-    NEO4J_USERNAME = "NEO4J_USERNAME"
-    POSTGRES_DSN = "POSTGRES_DSN"
-    POSTGRES_MODE = "POSTGRES_MODE"
-    PROJECT_ROOT = "PROJECT_ROOT"
-    REASONING_LLM_PROVIDER = "REASONING_LLM_PROVIDER"
-    REASONING_MODEL_PROVIDER = "REASONING_MODEL_PROVIDER"
-    RERANKER_MODEL_PROVIDER = "RERANKER_MODEL_PROVIDER"
-    RUNTIME_LOCKS_DIR = "RUNTIME_LOCKS_DIR"
-    RUNTIME_LOGS_DIR = "RUNTIME_LOGS_DIR"
-    RUNTIME_STAGING_DIR = "RUNTIME_STAGING_DIR"
-    TEST_SCENARIO_DENSE_K = "TEST_SCENARIO_DENSE_K"
-    TEST_SCENARIO_MAX_NEW_TOKENS = "TEST_SCENARIO_MAX_NEW_TOKENS"
-    TEST_SCENARIO_NEIGHBOR_WINDOW = "TEST_SCENARIO_NEIGHBOR_WINDOW"
-    TEST_SCENARIO_SPARSE_K = "TEST_SCENARIO_SPARSE_K"
-    TEST_SCENARIO_TOP_K = "TEST_SCENARIO_TOP_K"
-    TORCH_HOME = "TORCH_HOME"
-    TRANSFORMERS_CACHE = "TRANSFORMERS_CACHE"
+    HF_HUB_OFFLINE = "HF_HUB_OFFLINE"
     TRANSFORMERS_OFFLINE = "TRANSFORMERS_OFFLINE"
-    UV_CACHE_DIR = "UV_CACHE_DIR"
-    USER_STORY_DENSE_K = "USER_STORY_DENSE_K"
-    USER_STORY_MAX_NEW_TOKENS = "USER_STORY_MAX_NEW_TOKENS"
-    USER_STORY_NEIGHBOR_WINDOW = "USER_STORY_NEIGHBOR_WINDOW"
-    USER_STORY_SPARSE_K = "USER_STORY_SPARSE_K"
-    USER_STORY_TOP_K = "USER_STORY_TOP_K"
-
-
-class PathDef(StrEnum):
-    """Define canonical path def literals shared across runtime boundaries."""
-
-    GLOBAL_CACHE_DIR = ".global_cache"
-    DOCUMENTS_INBOX_DIR = "documents/inbox"
-    GENERATED_REQUIREMENTS_DIR = "generated"
-    CHROMA_DB_PATH = "runtime/databases/chroma"
-    RUNTIME_STAGING_DIR = "runtime/staging"
-    RUNTIME_LOGS_DIR = "runtime/logs"
-    RUNTIME_LOCKS_DIR = "runtime/locks"
-    LEGACY_GENERATED_DIR = ".generated"
 
 
 class ProviderName(StrEnum):
-    """Define canonical provider name literals shared across runtime boundaries."""
+    """Supported model providers."""
 
     AZURE_OPENAI = "azure_openai"
     HUGGINGFACE = "huggingface"
-    LOCAL_HEURISTIC = "local_heuristic"
-    LOCAL_HASH = "local_hash"
-    NONE = "none"
 
 
-class ModeName(StrEnum):
-    """Define canonical mode name literals shared across runtime boundaries."""
-
-    POSTGRES = "postgres"
-    NEO4J = "neo4j"
-    LOCAL_JSON = "local_json"
-    DESKTOP_DBMS = "desktop_dbms"
-
-
-class StatusName(StrEnum):
-    """Define canonical status name literals shared across runtime boundaries."""
-
-    STARTED = "started"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    RETRYING = "retrying"
-    SKIPPED = "skipped"
-    RESUMED = "resumed"
-    DECLINED = "declined"
-    APPLIED = "applied"
-    REPLAYED = "replayed"
-    CAPTURED = "captured"
-    WARNING = "warning"
-    WARN = "warn"
-    PASS = "PASS"
-    FAIL = "FAIL"
-    INTERRUPTED = "interrupted"
-    EXITED = "exited"
-    NEW = "new"
-    IDEMPOTENT = "idempotent"
-    REPLACED = "replaced"
-
-
-class IdentifierPrefix(StrEnum):
-    """Define canonical identifier prefix literals shared across runtime boundaries."""
-
-    RUN = "RUN-"
-    REQ = "REQ-"
-    US = "US-"
-    SC = "SC-"
-    DOC = "DOC-"
-    FACT = "FACT-"
-    FACTCAN = "FACTCAN-"
-    REQREV = "REQREV-"
-    REQEVID = "REQEVID-"
-    REQDELTA = "REQDELTA-"
-    USEVID = "USEVID-"
-    SCEVID = "SCEVID-"
-    ENTITY = "ENT-"
-    MENTION = "MENTION-"
-    ASSERTION = "AST-"
-    ASTEVID = "ASTEVID-"
-    TEXTUNIT = "TU-"
-
-
-class ServiceName(StrEnum):
-    """Define canonical service name literals shared across runtime boundaries."""
-
-    POSTGRES = "postgres"
-    NEO4J = "neo4j"
-    CHROMA = "chroma"
-    POSTGRES_SERVICE = "postgres_service"
-    NEO4J_BOLT = "neo4j_bolt"
-    NEO4J_HTTP = "neo4j_http"
-    MARAG_DB_CHECK = "marag_db_check"
-
-
-class RuntimeCommand(StrEnum):
-    """Define canonical runtime command literals shared across runtime boundaries."""
-
-    VERSION = "version"
-    CONFIG_CHECK = "config-check"
-    HF_CHECK = "hf-check"
-    DOCTOR = "doctor"
-    DB_CHECK = "db-check"
-    POSTGRES_RESET = "postgres-reset"
-    INGEST = "ingest"
-    GENERATE_USER_STORIES = "user-stories"
-    GENERATE_TEST_SCENARIOS = "test-scenarios"
-    BUILD_KNOWLEDGE_GRAPH = "knowledge-graph"
-    COVERAGE = "coverage"
-    RECONCILE = "reconcile"
-    RUN_STATUS = "run-status"
-    RUN_RESUME = "run-resume"
-    ARTIFACT_VERIFY = "artifact-verify"
-    ARTIFACT_VERIFY_USER_STORIES = "artifact-verify-user-stories"
-    ARTIFACT_VERIFY_TEST_SCENARIOS = "artifact-verify-test-scenarios"
-
-
-__all__ = [
-    "EnvVar",
-    "IdentifierPrefix",
-    "ModeName",
-    "PathDef",
-    "ProviderName",
-    "RuntimeCommand",
-    "ServiceName",
-    "StatusName",
-]
+__all__ = ["EnvVar", "ProviderName"]
