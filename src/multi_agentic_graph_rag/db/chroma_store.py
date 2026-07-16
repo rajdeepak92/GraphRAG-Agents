@@ -90,8 +90,8 @@ class ChromaStore:
         collection = self._client().get_or_create_collection(self.collection_name(project))
         result = collection.query(
             query_embeddings=[query_embedding],
-            n_results=min(max(n_results * 2, n_results), max(collection.count(), 1)),
-            where={"project": project},
+            n_results=min(n_results, len(allowed_chunk_ids), max(collection.count(), 1)),
+            where=build_allowlist_where(project, allowed_chunk_ids),
             include=["documents", "distances", "metadatas"],
         )
         ids = _first(result.get("ids"))
@@ -116,6 +116,21 @@ class ChromaStore:
         return chromadb.PersistentClient(path=str(self.settings.paths.chroma_persist_dir))
 
 
+def build_allowlist_where(project: str, allowed_chunk_ids: set[str]) -> dict[str, Any]:
+    """Build a Chroma metadata filter scoping to the project and manifest allowlist.
+
+    Pushes the current-run manifest chunk-ID allowlist server-side via ``$in`` so
+    out-of-manifest candidates are never returned; the caller retains a post-hoc
+    intersection as the final deterministic scope gate.
+    """
+    return {
+        "$and": [
+            {"project": project},
+            {"chunk_id": {"$in": sorted(allowed_chunk_ids)}},
+        ]
+    }
+
+
 def _first(value: Any) -> list[Any]:
     if not value:
         return []
@@ -123,4 +138,4 @@ def _first(value: Any) -> list[Any]:
     return list(first) if first is not None else []
 
 
-__all__ = ["ChromaStore"]
+__all__ = ["ChromaStore", "build_allowlist_where"]

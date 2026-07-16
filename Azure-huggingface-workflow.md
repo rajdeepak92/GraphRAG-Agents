@@ -88,7 +88,10 @@ the reranker, Neo4j, ChromaDB, and PostgreSQL.
   another model call.
 - Stages 2 and 3 may make one targeted output-repair call without repeating
   retrieval.
-- All retrieval is project-scoped and intersected with the selected run’s
-  manifest chunk IDs.
+- All retrieval is project-scoped. ChromaDB candidates are filtered server-side
+  by project and the run's manifest chunk-ID allowlist (`$in` metadata filter),
+  and the allowlist is re-intersected in Python as the final scope gate.
+- A failed Stage 1.2 chunk is isolated, blocks `requirements.json`, and marks
+  readiness `failed`; Stages 2 and 3 also emit diagnostic `progress_*.json`.
 - Readiness must be `ready` and its `build_run_id` must match the requested run.
 - Empty grounded result arrays are valid; unsupported content is rejected.

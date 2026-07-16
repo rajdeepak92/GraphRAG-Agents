@@ -59,6 +59,7 @@ class DiscoveryPipelineState(TypedDict, total=False):
     current_index: int
     current_response: dict[str, Any]
     current_projection: dict[str, Any]
+    current_failure: dict[str, Any]
     chunk_results: list[dict[str, Any]]
     entities: list[dict[str, Any]]
     relationships: list[dict[str, Any]]
@@ -236,14 +237,25 @@ def _manifest_chunk(state: DiscoveryPipelineState) -> ManifestChunk:
     return manifest.chunks[state["current_index"]]
 
 
+def _chunk_failure(chunk: ManifestChunk, exc: Exception) -> dict[str, Any]:
+    return {
+        "chunk_id": chunk.chunk_id,
+        "sequence_index": chunk.sequence_index,
+        "error": f"{exc.__class__.__name__}: {exc}",
+    }
+
+
 def _call_combined_model(
     state: DiscoveryPipelineState,
     runtime: _Runtime,
 ) -> DiscoveryPipelineState:
-    if state.get("current_response"):
+    if state.get("current_response") or state.get("current_failure"):
         return {}
     chunk = _manifest_chunk(state)
-    response = retry_transient_once(lambda: runtime.agent.discover(chunk))
+    try:
+        response = retry_transient_once(lambda: runtime.agent.discover(chunk))
+    except Exception as exc:  # transient-exhausted or terminal invalid response
+        return {"current_failure": _chunk_failure(chunk, exc)}
     return {"current_response": response.model_dump(mode="json")}
 
 
@@ -251,15 +263,18 @@ def _project_chunk_semantics(
     state: DiscoveryPipelineState,
     runtime: _Runtime,
 ) -> DiscoveryPipelineState:
-    if state.get("current_projection"):
+    if state.get("current_failure") or state.get("current_projection"):
         return {}
     chunk = _manifest_chunk(state)
     response = RequirementDiscoveryChunkResponse.model_validate(state["current_response"])
-    projection = KnowledgeGraphBuilder(runtime.neo4j).project(
-        project=state["project"],
-        chunk=chunk,
-        response=response,
-    )
+    try:
+        projection = KnowledgeGraphBuilder(runtime.neo4j).project(
+            project=state["project"],
+            chunk=chunk,
+            response=response,
+        )
+    except Exception as exc:  # terminal Neo4j projection/read-back failure
+        return {"current_response": {}, "current_failure": _chunk_failure(chunk, exc)}
     return {
         "current_projection": {
             "result": projection.result.model_dump(mode="json"),
@@ -272,11 +287,28 @@ def _project_chunk_semantics(
 
 
 def _record_chunk_result(state: DiscoveryPipelineState) -> DiscoveryPipelineState:
+    failure = state.get("current_failure")
+    if failure:
+        result = RequirementChunkResult(
+            chunk_id=failure["chunk_id"],
+            sequence_index=failure["sequence_index"],
+            status="failed",
+            requirements=[],
+            error=failure["error"],
+        )
+        return {
+            "current_index": state["current_index"] + 1,
+            "current_response": {},
+            "current_projection": {},
+            "current_failure": {},
+            "chunk_results": [*state["chunk_results"], result.model_dump(mode="json")],
+        }
     projection = state["current_projection"]
     return {
         "current_index": state["current_index"] + 1,
         "current_response": {},
         "current_projection": {},
+        "current_failure": {},
         "chunk_results": [
             *state["chunk_results"],
             dict(projection["result"]),

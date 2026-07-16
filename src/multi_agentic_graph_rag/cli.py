@@ -109,7 +109,7 @@ def db_check() -> None:
         postgres = PostgresStore(settings)
         connectivity = postgres.check()
         postgres.ensure_schema()
-        results["postgres"] = f"{connectivity}; PASS simplified schema"
+        results["postgres"] = f"{connectivity}; PASS simplified schema + checkpoint tables"
     except Exception as exc:
         failures = True
         results["postgres"] = f"FAIL {type(exc).__name__}: {exc}"

@@ -14,15 +14,21 @@ Allure reporting are outside the current scope.
    requirement/entity/relationship reasoning-model response. Python validates
    grounding and provenance, projects validated entities and semantic
    relationships to Neo4j, canonicalizes requirements, persists PostgreSQL
-   traceability, and publishes `requirements/requirements.json`.
+   traceability, and publishes `requirements/requirements.json`. Each chunk ends
+   as `completed`, `no_requirements`, or `failed`; a failed chunk is isolated
+   from its siblings, blocks `requirements.json` publication, and marks
+   knowledge-graph readiness `failed`.
 3. Stage 2 retrieves current-run graph and vector evidence for every requirement
-   and publishes `user-stories/user-stories.json`.
+   and publishes `user-stories/user-stories.json` plus the diagnostic
+   `user-stories/progress_story.json`.
 4. Stage 3 retrieves current-run evidence for every story and publishes
-   `test-scenario/test-scenarios.json`.
+   `test-scenario/test-scenarios.json` plus the diagnostic
+   `test-scenario/progress_scenario.json`.
 
 All four LangGraph workflows use PostgreSQL checkpointing when PostgreSQL mode
 is configured. Item-level state is checkpointed by chunk, requirement, or story,
-and external writes are idempotent.
+and external writes are idempotent. `progress_*.json` files are diagnostic
+mirrors only; the checkpointer is the sole recovery authority.
 
 ## Storage boundaries
 
@@ -31,7 +37,8 @@ and external writes are idempotent.
 - ChromaDB stores Stage 1.1 chunk text and embeddings in one normalized
   collection per project. Stage 1.2 never accesses ChromaDB.
 - PostgreSQL stores runs, readiness, canonical artifacts, evidence and
-  traceability mappings, generation contexts, and LangGraph checkpoints.
+  traceability mappings, generation contexts, and LangGraph checkpoints. The
+  checkpoint tables are provisioned idempotently by `db-check`/schema setup.
 - Local JSON artifacts are validated mirrors under
   `generated/<project>/<run-id>/`.
 

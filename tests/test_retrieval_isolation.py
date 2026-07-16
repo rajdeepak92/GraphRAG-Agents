@@ -6,6 +6,7 @@ import hashlib
 from typing import Any
 
 from multi_agentic_graph_rag.config.settings import RetrievalSettings
+from multi_agentic_graph_rag.db.chroma_store import build_allowlist_where
 from multi_agentic_graph_rag.domain.schemas import (
     CanonicalRequirement,
     ChunkLayout,
@@ -14,6 +15,16 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 from multi_agentic_graph_rag.services.manifest import build_chunk_manifest
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
+
+
+def test_build_allowlist_where_scopes_to_project_and_manifest() -> None:
+    where = build_allowlist_where("alpha", {"CHK-2", "CHK-1"})
+    assert where == {
+        "$and": [
+            {"project": "alpha"},
+            {"chunk_id": {"$in": ["CHK-1", "CHK-2"]}},
+        ]
+    }
 
 
 class _Neo4j:

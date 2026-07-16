@@ -694,6 +694,24 @@ class CoverageSummary(StrictModel):
     stories_with_scenarios: int
 
 
+class ProgressItem(StrictModel):
+    """Per-anchor terminal coverage status for a diagnostic progress report."""
+
+    anchor_id: str
+    status: Literal["generated", "no_story", "no_scenario"]
+    candidate_count: int
+
+
+class ProgressReport(StrictModel):
+    """Diagnostic Stage 2/3 progress artifact. Never the recovery authority."""
+
+    stage: Literal["user_story", "test_scenario"]
+    project: str
+    run_id: str
+    generated_at: datetime = Field(default_factory=utc_now)
+    items: list[ProgressItem]
+
+
 __all__ = [
     "AcceptanceCriterion",
     "ArtifactResult",
@@ -717,6 +735,8 @@ __all__ = [
     "LLMUserStoryCandidate",
     "ManifestChunk",
     "ParsedBlock",
+    "ProgressItem",
+    "ProgressReport",
     "RequirementChunkResult",
     "RequirementDiscoveryChunkResponse",
     "RequirementEntityRelationshipMap",

@@ -272,13 +272,21 @@ class PostgresStore:
         return "PASS postgres connectivity"
 
     def ensure_schema(self) -> None:
-        """Create the disposable-development baseline schema."""
+        """Create the disposable-development baseline schema and checkpoint tables."""
         if self.settings.postgres.mode == "local_json":
             return
         with self._connect() as connection, connection.cursor() as cursor:
             self._assert_baseline_compatible(cursor)
             cursor.execute(_SCHEMA_SQL)
             connection.commit()
+        self._setup_checkpoint_tables()
+
+    def _setup_checkpoint_tables(self) -> None:
+        """Idempotently provision the LangGraph checkpoint tables."""
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        with PostgresSaver.from_conn_string(self.settings.postgres.dsn) as saver:
+            saver.setup()
 
     def reset_schema(self) -> str:
         """Explicitly drop and recreate managed development tables."""
@@ -289,10 +297,7 @@ class PostgresStore:
             constraint_count, table_count = self._drop_disposable_schema(cursor)
             cursor.execute(_SCHEMA_SQL)
             connection.commit()
-        from langgraph.checkpoint.postgres import PostgresSaver
-
-        with PostgresSaver.from_conn_string(self.settings.postgres.dsn) as saver:
-            saver.setup()
+        self._setup_checkpoint_tables()
         return (
             "PASS postgres simplified schema reset "
             f"constraints_dropped={constraint_count} tables_dropped={table_count}"

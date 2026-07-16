@@ -15,6 +15,7 @@ from multi_agentic_graph_rag.domain.schemas import (
     LLMRequirementCandidate,
     LLMTestScenarioCandidate,
     LLMUserStoryCandidate,
+    ProgressReport,
     RequirementDiscoveryChunkResponse,
     ScenarioContext,
     StageRequest,
@@ -296,6 +297,22 @@ def test_all_four_graphs_publish_traceable_current_run_artifacts(tmp_path: Path)
         config={"configurable": {"thread_id": "e2e-stage-3"}},
     )
     assert scenarios["scenario_ids"]
+
+    story_progress = Path(stories["artifact_path"]).parent / "progress_story.json"
+    scenario_progress = Path(scenarios["artifact_path"]).parent / "progress_scenario.json"
+    assert story_progress.exists()
+    assert scenario_progress.exists()
+    story_report = ProgressReport.model_validate_json(story_progress.read_text(encoding="utf-8"))
+    scenario_report = ProgressReport.model_validate_json(
+        scenario_progress.read_text(encoding="utf-8")
+    )
+    assert story_report.stage == "user_story"
+    assert [item.status for item in story_report.items] == ["generated"]
+    assert scenario_report.stage == "test_scenario"
+    assert [item.status for item in scenario_report.items] == ["generated"]
+    # Diagnostic-only: deleting them must not affect the durable artifacts.
+    story_progress.unlink()
+    scenario_progress.unlink()
 
     coverage = postgres.coverage(project, run_id)
     assert coverage.requirement_count == 1

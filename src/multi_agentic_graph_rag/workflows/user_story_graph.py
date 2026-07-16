@@ -24,6 +24,8 @@ from multi_agentic_graph_rag.domain.schemas import (
     CanonicalRequirement,
     ChunkManifest,
     LLMUserStoryCandidate,
+    ProgressItem,
+    ProgressReport,
     RequirementsArtifact,
     StageRequest,
     StoryContext,
@@ -211,6 +213,23 @@ def _run_pipeline(
         json.dumps({"contexts": final["contexts"]}, indent=2),
         encoding="utf-8",
     )
+    counts: dict[str, int] = {requirement.requirement_id: 0 for requirement in requirements}
+    for requirement_id, _candidate in candidates:
+        counts[requirement_id] = counts.get(requirement_id, 0) + 1
+    progress = ProgressReport(
+        stage="user_story",
+        project=request.project_name,
+        run_id=request.run_id,
+        items=[
+            ProgressItem(
+                anchor_id=requirement_id,
+                status="generated" if count else "no_story",
+                candidate_count=count,
+            )
+            for requirement_id, count in counts.items()
+        ],
+    )
+    atomic_write_model(progress, output_dir / "progress_story.json")
     artifact_path = atomic_write_model(artifact, output_dir / "user-stories.json")
     return {
         "artifact_path": str(artifact_path),
