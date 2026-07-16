@@ -63,17 +63,17 @@ class ChromaStore:
                 include=["documents", "metadatas", "embeddings"],
             )
         )
-        ids = list(result.get("ids") or [])
+        ids = _as_list(result.get("ids"))
         if not ids:
             return None
-        documents = list(result.get("documents") or [])
-        metadatas = list(result.get("metadatas") or [])
-        embeddings = list(result.get("embeddings") or [])
+        documents = _as_list(result.get("documents"))
+        metadatas = _as_list(result.get("metadatas"))
+        embeddings = _as_list(result.get("embeddings"))
         return {
             "id": str(ids[0]),
-            "document": str(documents[0] or "") if documents else "",
-            "metadata": dict(metadatas[0] or {}) if metadatas else {},
-            "embedding": list(embeddings[0]) if embeddings else [],
+            "document": str(documents[0]) if documents and documents[0] is not None else "",
+            "metadata": dict(metadatas[0]) if metadatas and metadatas[0] is not None else {},
+            "embedding": list(embeddings[0]) if len(embeddings) else [],
         }
 
     def query_chunks(
@@ -131,8 +131,15 @@ def build_allowlist_where(project: str, allowed_chunk_ids: set[str]) -> dict[str
     }
 
 
+def _as_list(value: Any) -> list[Any]:
+    """Coerce a Chroma result field (possibly a numpy array or None) to a list."""
+    if value is None:
+        return []
+    return list(value)
+
+
 def _first(value: Any) -> list[Any]:
-    if not value:
+    if value is None or len(value) == 0:
         return []
     first = value[0]
     return list(first) if first is not None else []
