@@ -37,12 +37,15 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reasoning_model,
     create_reranker_model,
 )
+from multi_agentic_graph_rag.observability.logging import RunLogger, get_logger
 from multi_agentic_graph_rag.services.checkpointing import workflow_checkpointer
 from multi_agentic_graph_rag.services.manifest import atomic_write_model, load_model
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
 from multi_agentic_graph_rag.services.user_story_builder import (
     build_user_stories_artifact,
 )
+
+_LOG = get_logger(__name__)
 
 
 class UserStoryState(TypedDict, total=False):
@@ -213,6 +216,11 @@ def _run_pipeline(
         json.dumps({"contexts": final["contexts"]}, indent=2),
         encoding="utf-8",
     )
+    _LOG.info(
+        "json.write name=story_context.json path=%s contexts=%d",
+        context_path,
+        len(final["contexts"]),
+    )
     counts: dict[str, int] = {requirement.requirement_id: 0 for requirement in requirements}
     for requirement_id, _candidate in candidates:
         counts[requirement_id] = counts.get(requirement_id, 0) + 1
@@ -315,6 +323,11 @@ def _generate_user_stories(
         requirement,
         StoryContext.model_validate(state["current_context"]),
     )
+    _LOG.info(
+        "story.generated requirement_id=%s stories=%d",
+        requirement.requirement_id,
+        len(response.user_stories),
+    )
     return {"current_response": response.model_dump(mode="json")}
 
 
@@ -364,6 +377,14 @@ def run_user_story_generation(
         status="started",
         payload={},
     )
+    story_dir = (
+        resolved.paths.generated_dir
+        / normalize_project(request.project_name)
+        / request.run_id
+        / "user-stories"
+    )
+    story_dir.mkdir(parents=True, exist_ok=True)
+    _LOG.info("stage-2.start project=%s run_id=%s", request.project_name, request.run_id)
     with workflow_checkpointer(resolved) as checkpointer:
         neo4j = Neo4jStore(resolved)
         runtime = _Runtime(
@@ -376,7 +397,9 @@ def run_user_story_generation(
                 reranker=create_reranker_model(resolved),
                 settings=resolved.retrieval,
             ),
-            agent=UserStoryGenerationAgent(create_reasoning_model(resolved)),
+            agent=UserStoryGenerationAgent(
+                create_reasoning_model(resolved, logger=RunLogger(_LOG), run_dir=story_dir)
+            ),
             checkpointer=checkpointer,
         )
         graph = build_user_story_graph(runtime)

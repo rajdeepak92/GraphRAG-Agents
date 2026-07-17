@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from multi_agentic_graph_rag.config.settings import AppSettings
+from multi_agentic_graph_rag.domain.identifiers import normalize_project
 from multi_agentic_graph_rag.domain.schemas import (
     CoverageSummary,
     KnowledgeGraphReadiness,
@@ -18,6 +19,92 @@ from multi_agentic_graph_rag.domain.schemas import (
     UserStoriesArtifact,
     canonical_checksum,
 )
+
+_PROJECT_DELETE_STEPS: tuple[tuple[str, str], ...] = (
+    (
+        "scenario_criteria",
+        "DELETE FROM scenario_criteria c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s",
+    ),
+    (
+        "scenario_evidence",
+        "DELETE FROM scenario_evidence c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s",
+    ),
+    (
+        "scenario_entities",
+        "DELETE FROM scenario_entities c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s",
+    ),
+    (
+        "scenario_relationships",
+        "DELETE FROM scenario_relationships c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s",
+    ),
+    (
+        "story_scenarios",
+        "DELETE FROM story_scenarios c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s",
+    ),
+    (
+        "requirement_scenarios",
+        "DELETE FROM requirement_scenarios c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s",
+    ),
+    (
+        "acceptance_criteria",
+        "DELETE FROM acceptance_criteria c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s",
+    ),
+    (
+        "story_evidence",
+        "DELETE FROM story_evidence c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s",
+    ),
+    (
+        "story_entities",
+        "DELETE FROM story_entities c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s",
+    ),
+    (
+        "story_relationships",
+        "DELETE FROM story_relationships c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s",
+    ),
+    (
+        "requirement_stories",
+        "DELETE FROM requirement_stories c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s",
+    ),
+    (
+        "requirement_evidence",
+        "DELETE FROM requirement_evidence c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s",
+    ),
+    (
+        "requirement_chunks",
+        "DELETE FROM requirement_chunks c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s",
+    ),
+    (
+        "requirement_entities",
+        "DELETE FROM requirement_entities c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s",
+    ),
+    (
+        "requirement_relationships",
+        "DELETE FROM requirement_relationships c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s",
+    ),
+    ("test_scenarios", "DELETE FROM test_scenarios WHERE project = %s"),
+    ("user_stories", "DELETE FROM user_stories WHERE project = %s"),
+    ("requirements", "DELETE FROM requirements WHERE project = %s"),
+    ("generation_context", "DELETE FROM generation_context WHERE project = %s"),
+    ("master_artifacts", "DELETE FROM master_artifacts WHERE project = %s"),
+    ("knowledge_graph_readiness", "DELETE FROM knowledge_graph_readiness WHERE project = %s"),
+    ("workflow_runs", "DELETE FROM workflow_runs WHERE project = %s"),
+)
+_CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
 
 _BASELINE_REQUIRED_COLUMNS = {
     "requirements": {
@@ -134,6 +221,7 @@ CREATE TABLE IF NOT EXISTS requirement_evidence (
     start_char INTEGER NOT NULL,
     end_char INTEGER NOT NULL
 );
+
 CREATE TABLE IF NOT EXISTS requirement_chunks (
     requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
     chunk_id TEXT NOT NULL,
@@ -288,6 +376,39 @@ class PostgresStore:
         with PostgresSaver.from_conn_string(self.settings.postgres.dsn) as saver:
             saver.setup()
 
+    def delete_project(self, project: str) -> dict[str, int]:
+        """Delete all project-scoped rows (FK-safe) plus its LangGraph checkpoints."""
+        if self.settings.postgres.mode == "local_json":
+            rows = self._local_rows()
+            prefix = f"{project}:"
+            kept = [
+                row
+                for row in rows
+                if not str(row.get("key", "")).startswith(prefix)
+                and (row.get("payload") or {}).get("project") != project
+            ]
+            _write_rows(self.settings.postgres.local_path, kept)
+            return {"local_rows_deleted": len(rows) - len(kept)}
+        removed: dict[str, int] = {}
+        thread_prefix = f"{normalize_project(project)}:%"
+        with self._connect() as connection, connection.cursor() as cursor:
+            for table, statement in _PROJECT_DELETE_STEPS:
+                cursor.execute(statement, (project,))
+                if cursor.rowcount and cursor.rowcount > 0:
+                    removed[table] = cursor.rowcount
+            for table in _CHECKPOINT_TABLES:
+                cursor.execute("SELECT to_regclass(%s)", (table,))
+                if cursor.fetchone()[0] is None:
+                    continue
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE thread_id LIKE %s",
+                    (thread_prefix,),
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    removed[table] = cursor.rowcount
+            connection.commit()
+        return removed
+
     def reset_schema(self) -> str:
         """Explicitly drop and recreate managed development tables."""
         if self.settings.postgres.mode == "local_json":
@@ -317,6 +438,29 @@ class PostgresStore:
         finally:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_unlock(hashtext(%s))", (f"discovery:{project}",))
+            connection.close()
+
+    @contextmanager
+    def project_maintenance_lease(self, project: str) -> Iterator[None]:
+        """Acquire a non-blocking project reset lease or fail without waiting."""
+        if self.settings.postgres.mode == "local_json":
+            yield
+            return
+        connection = self._connect()
+        lock_name = f"maintenance:{project}"
+        acquired = False
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (lock_name,))
+                row = cursor.fetchone()
+                acquired = bool(row and row[0])
+            if not acquired:
+                raise RuntimeError(f"project maintenance lease is already held: {project}")
+            yield
+        finally:
+            if acquired:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_unlock(hashtext(%s))", (lock_name,))
             connection.close()
 
     def record_run(
@@ -447,7 +591,8 @@ class PostgresStore:
                           evidence_id,requirement_id,chunk_id,quote,start_char,end_char
                         ) VALUES (%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (evidence_id) DO UPDATE SET
-                          quote=EXCLUDED.quote,start_char=EXCLUDED.start_char,end_char=EXCLUDED.end_char
+                          quote=EXCLUDED.quote,start_char=EXCLUDED.start_char,
+                          end_char=EXCLUDED.end_char
                         """,
                         (
                             evidence.evidence_id,

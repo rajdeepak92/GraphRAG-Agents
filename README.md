@@ -6,18 +6,22 @@ Allure reporting are outside the current scope.
 
 ## Workflow
 
+`ingest` is additive and never deletes existing project state. Use the explicit
+`project-reset --project <name> --yes` maintenance command when a clean project
+is intentionally required. Then:
+
 1. Stage 1.1 parses one source file, creates stable chunks, persists only
    project-scoped `Chunk` nodes in Neo4j, writes chunk embeddings to one Chroma
    collection per project, validates both stores, and publishes
    `requirements/chunk_manifest.json`.
 2. Stage 1.2 processes every manifest chunk with exactly one combined
-   requirement/entity/relationship reasoning-model response. Python validates
-   grounding and provenance, projects validated entities and semantic
-   relationships to Neo4j, canonicalizes requirements, persists PostgreSQL
-   traceability, and publishes `requirements/requirements.json`. Each chunk ends
-   as `completed`, `no_requirements`, or `failed`; a failed chunk is isolated
-   from its siblings, blocks `requirements.json` publication, and marks
-   knowledge-graph readiness `failed`.
+   reasoning-model response containing `chunk_id`, `requirements`, `entities`,
+   and `relationships`. Python rejects extra or missing fields, validates
+   temporary references, exact source-ID coverage, evidence, and semantic
+   grounding, checkpoints the validated response, then projects only allowlisted
+   relationship types. Schema or semantic invalidity gets no repair call. The
+   first terminal invalid chunk stops Stage 1.2, blocks publication, and marks
+   readiness `failed`.
 3. Stage 2 retrieves current-run graph and vector evidence for every requirement
    and publishes `user-stories/user-stories.json` plus the diagnostic
    `user-stories/progress_story.json`.
@@ -33,7 +37,8 @@ mirrors only; the checkpointer is the sole recovery authority.
 ## Storage boundaries
 
 - Neo4j stores project-scoped chunks, canonical entities, `MENTIONS` edges, and
-  allowlisted LLM-generated semantic relationships.
+  only `USES`, `SUPPORTS`, `CONTROLS`, `COLLECTS_FROM`, `COMMUNICATES_VIA`,
+  `CONNECTS_TO`, and `REFERS_TO` semantic relationships.
 - ChromaDB stores Stage 1.1 chunk text and embeddings in one normalized
   collection per project. Stage 1.2 never accesses ChromaDB.
 - PostgreSQL stores runs, readiness, canonical artifacts, evidence and
@@ -57,13 +62,15 @@ uv run python -m multi_agentic_graph_rag db-check
 ```
 
 Configure either Azure OpenAI or private Hugging Face models in `.env`.
+Set `HUGGINGFACE_DEVICE=auto`, `cpu`, or `cuda`; explicit `cuda` fails fast when
+the installed PyTorch build cannot access an NVIDIA GPU.
 PostgreSQL, Neo4j, and ChromaDB must be reachable for the real workflow.
 `local_json` PostgreSQL and Neo4j modes are available for isolated development
 tests.
 
 ## Commands
 
-Run joined Stage 1.1 and Stage 1.2:
+Run joined Stage 1.1 and Stage 1.2 additively:
 
 ```powershell
 uv run python -m multi_agentic_graph_rag ingest `
@@ -102,6 +109,15 @@ development PostgreSQL database:
 
 ```powershell
 uv run python -m multi_agentic_graph_rag postgres-reset --yes
+```
+
+Reset one project across Neo4j, ChromaDB, PostgreSQL checkpoints/artifacts, and
+generated files only when explicitly intended:
+
+```powershell
+uv run python -m multi_agentic_graph_rag project-reset `
+  --project customer-portal `
+  --yes
 ```
 
 ## Verification

@@ -109,6 +109,14 @@ class ChromaStore:
                 break
         return selected
 
+    def delete_project(self, project: str) -> bool:
+        """Delete the project's collection; return False when it did not exist."""
+        try:
+            self._client().delete_collection(self.collection_name(project))
+        except Exception:
+            return False
+        return True
+
     def _client(self) -> Any:
         import chromadb
 

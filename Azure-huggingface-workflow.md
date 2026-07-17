@@ -30,8 +30,18 @@ HF_TOKEN=<secret>
 HUGGINGFACE_REASONING_MODEL=Qwen/Qwen2.5-Coder-7B-Instruct
 HUGGINGFACE_EMBEDDING_MODEL=BAAI/bge-m3
 HUGGINGFACE_RERANKER_MODEL=BAAI/bge-reranker-base
+HUGGINGFACE_DEVICE=auto
+HUGGINGFACE_QUANTIZATION=none
+HUGGINGFACE_DISABLE_THINKING=true
 HUGGINGFACE_OFFLINE=false
+HUGGINGFACE_STAGE12_MAX_NEW_TOKENS=1536
 ```
+
+Set `HUGGINGFACE_DEVICE=cuda` to require CUDA for Hugging Face reasoning,
+embeddings, and reranking. The command fails instead of falling back to CPU when
+the installed PyTorch build cannot access CUDA. For a 12 GB GPU, use
+`Qwen/Qwen3-8B` with `HUGGINGFACE_QUANTIZATION=bitsandbytes_4bit` and
+`HUGGINGFACE_DISABLE_THINKING=true` for strict JSON extraction.
 
 Do not commit `.env`.
 
@@ -58,8 +68,16 @@ $Ingest = uv run python -m multi_agentic_graph_rag ingest `
   --document $Source
 ```
 
-The JSON output contains `run_id`, `chunk_manifest`, and `requirements`.
-Use the returned run ID:
+`ingest` is additive. The JSON output contains `run_id`, `chunk_manifest`, and
+`requirements`. To remove a contaminated project first, run:
+
+```powershell
+uv run python -m multi_agentic_graph_rag project-reset `
+  --project $Project `
+  --yes
+```
+
+Use the returned ingest run ID:
 
 ```powershell
 $RunId = "<RUN-ID>"
@@ -83,15 +101,20 @@ the reranker, Neo4j, ChromaDB, and PostgreSQL.
 
 ## Operational rules
 
-- Stage 1.2 receives exactly one manifest chunk per primary call.
-- A successful but invalid Stage 1.2 response is terminal; it is not repaired by
-  another model call.
+- Stage 1.2 receives exactly one manifest chunk per primary call and uses
+  `max_attempts=1`; malformed or semantically invalid output receives no repair
+  prompt. One classified transient provider failure may repeat the same primary
+  call once.
+- Stage 1.2 returns separate `requirements`, `entities`, and `relationships`
+  arrays with strict temporary references. Relationships use only the seven
+  allowlisted semantic types.
 - Stages 2 and 3 may make one targeted output-repair call without repeating
   retrieval.
 - All retrieval is project-scoped. ChromaDB candidates are filtered server-side
   by project and the run's manifest chunk-ID allowlist (`$in` metadata filter),
   and the allowlist is re-intersected in Python as the final scope gate.
-- A failed Stage 1.2 chunk is isolated, blocks `requirements.json`, and marks
-  readiness `failed`; Stages 2 and 3 also emit diagnostic `progress_*.json`.
+- The first failed Stage 1.2 chunk stops the run, blocks `requirements.json`,
+  and marks readiness `failed`; Stages 2 and 3 also emit diagnostic
+  `progress_*.json`.
 - Readiness must be `ready` and its `build_run_id` must match the requested run.
 - Empty grounded result arrays are valid; unsupported content is rejected.

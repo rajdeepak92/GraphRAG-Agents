@@ -12,7 +12,13 @@ from pydantic import BaseModel, ValidationError
 
 from multi_agentic_graph_rag.common_prompt_defs import PromptSharedFragments
 from multi_agentic_graph_rag.config.settings import AzureOpenAISettings
-from multi_agentic_graph_rag.domain.errors import ConfigurationError, ModelOutputError
+from multi_agentic_graph_rag.domain.errors import (
+    ConfigurationError,
+    ContentFilterError,
+    MalformedModelOutputError,
+    ModelOutputError,
+    ProviderRefusalError,
+)
 from multi_agentic_graph_rag.observability.logging import sanitized_exception_summary
 
 T = TypeVar("T", bound=BaseModel)
@@ -26,7 +32,7 @@ _EMBEDDING_MAX_REQUEST_TOKENS = 300_000
 # worst-case call count (transport attempts x schema attempts). The SDK retries
 # only transient HTTP failures (timeouts, 429, 5xx), never a well-formed response
 # that violates the Python schema — that is the schema-repair loop's job.
-_TRANSPORT_MAX_RETRIES = 2
+_TRANSPORT_MAX_RETRIES = 0
 _AZURE_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
     {
         "default",
@@ -211,7 +217,7 @@ class AzureOpenAIReasoningModel:
                     call_index=call_index,
                 )
                 if attempt >= attempt_limit:
-                    raise ModelOutputError(
+                    raise MalformedModelOutputError(
                         "Azure OpenAI structured output violated the Python schema: "
                         f"{sanitized_exception_summary(error)}"
                     ) from error
@@ -285,7 +291,7 @@ class AzureOpenAIReasoningModel:
             )
         except Exception as error:
             if _is_content_filter_error(error):
-                raise ModelOutputError(
+                raise ContentFilterError(
                     "Azure OpenAI content filtering blocked the request"
                 ) from error
             if _is_azure_configuration_error(error, openai):
@@ -297,10 +303,10 @@ class AzureOpenAIReasoningModel:
             raise ModelOutputError("Azure OpenAI returned no structured response choice")
         choice = response.choices[0]
         if getattr(choice, "finish_reason", None) == "content_filter":
-            raise ModelOutputError("Azure OpenAI content filtering blocked the response")
+            raise ContentFilterError("Azure OpenAI content filtering blocked the response")
         message = choice.message
         if getattr(message, "refusal", None):
-            raise ModelOutputError("Azure OpenAI refused the structured request")
+            raise ProviderRefusalError("Azure OpenAI refused the structured request")
         content = getattr(message, "content", None)
         if not isinstance(content, str) or not content.strip():
             raise ModelOutputError("Azure OpenAI returned no parsed structured response content")

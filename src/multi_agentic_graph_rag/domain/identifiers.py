@@ -88,7 +88,7 @@ def make_relationship_id(
     target_entity_id: str,
     evidence_hash: str,
 ) -> str:
-    """Build the deterministic semantic projection ID."""
+    """Build a deterministic semantic projection ID from complete grounded provenance."""
     return "REL-" + stable_token(
         normalize_project(project),
         chunk_id,

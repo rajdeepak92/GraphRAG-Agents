@@ -25,6 +25,7 @@ def create_reasoning_model(
     *,
     logger: Any | None = None,
     run_dir: Path | None = None,
+    stage12: bool = False,
 ) -> ReasoningModel:
     """Create reasoning model.
 
@@ -72,8 +73,18 @@ def create_reasoning_model(
                 "REASONING_MODEL_PROVIDER=huggingface requires transformers; "
                 "install with: uv sync --dev --extra local-llm"
             )
+        huggingface_settings = settings.huggingface
+        if stage12:
+            huggingface_settings = huggingface_settings.model_copy(
+                update={
+                    "max_new_tokens": min(
+                        huggingface_settings.max_new_tokens,
+                        huggingface_settings.stage12_max_new_tokens,
+                    )
+                }
+            )
         return HuggingFaceReasoningModel(
-            settings.huggingface,
+            huggingface_settings,
             logger=logger,
             run_dir=run_dir,
         )

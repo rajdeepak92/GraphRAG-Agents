@@ -101,10 +101,9 @@ def build_requirements_artifact(
         representative = next(
             (item for item in group if item.source_req_id_type == "source"), group[0]
         )
-        if key[0] == "source":
-            prior = existing_by_source.get(key[1])
-        else:
-            prior = existing_generated.get(key[1])
+        prior = (
+            existing_by_source.get(key[1]) if key[0] == "source" else existing_generated.get(key[1])
+        )
         evidence = _unique_by(
             [item for occurrence in group for item in occurrence.evidence],
             lambda item: item.evidence_id,

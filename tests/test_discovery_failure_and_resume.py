@@ -136,7 +136,7 @@ def _runtime(settings: AppSettings, agent: _Agent, checkpointer: Any) -> Discove
     )
 
 
-def test_failed_chunk_is_isolated_and_blocks_publication(tmp_path: Path) -> None:
+def test_failed_chunk_stops_immediately_and_blocks_publication(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     chunk_a = _chunk("CHK-A", 0, "The service shall retain audit events.")
     chunk_b = _chunk("CHK-B", 1, "The gateway shall reject malformed requests.")
@@ -144,13 +144,13 @@ def test_failed_chunk_is_isolated_and_blocks_publication(tmp_path: Path) -> None
     agent = _Agent(fail_on={"CHK-B"})
     graph = build_requirement_discovery_graph(_runtime(settings, agent, InMemorySaver()))
 
-    with pytest.raises(ValueError, match="CHK-B"):
+    with pytest.raises(RuntimeError, match="CHK-B"):
         graph.invoke(
             {"request": StageRequest(project_name=_PROJECT, run_id=_RUN).model_dump(mode="json")},
             config={"configurable": {"thread_id": "fail-isolation"}},
         )
 
-    # The sibling chunk was still processed, and publication is withheld.
+    # Processing stops at the first terminal chunk and publication is withheld.
     assert agent.calls == ["CHK-A", "CHK-B"]
     assert not (artifact_dir / "requirements.json").exists()
 

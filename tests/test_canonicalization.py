@@ -25,9 +25,9 @@ from multi_agentic_graph_rag.services.user_story_builder import (
 )
 
 
-def _entry(source_id: str, text: str) -> RequirementMapEntry:
+def _entry(source_id: str, text: str, chunk_id: str = "CHK-1") -> RequirementMapEntry:
     return RequirementMapEntry(
-        requirement_ref="req_1",
+        requirement_ref=f"ref-{chunk_id}",
         source_req_id=source_id,
         source_req_id_type="source",
         requirement_text=text,
@@ -36,8 +36,8 @@ def _entry(source_id: str, text: str) -> RequirementMapEntry:
         constraints=[],
         evidence=[
             Evidence(
-                evidence_id=f"EVD-{source_id}",
-                chunk_id="CHK-1",
+                evidence_id=f"EVD-{chunk_id}",
+                chunk_id=chunk_id,
                 quote=text,
                 start_char=0,
                 end_char=len(text),
@@ -65,7 +65,7 @@ def test_conflicting_text_for_same_source_id_fails() -> None:
                 chunk_id="CHK-2",
                 sequence_index=1,
                 status="completed",
-                requirements=[_entry("BR-1", "The system shall delete events.")],
+                requirements=[_entry("BR-1", "The system shall delete events.", "CHK-2")],
                 error=None,
             ),
         ],

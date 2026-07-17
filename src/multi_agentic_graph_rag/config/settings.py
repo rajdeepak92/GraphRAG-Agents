@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+HuggingFaceDevice = Literal["auto", "cpu", "cuda"]
+HuggingFaceQuantization = Literal["none", "bitsandbytes_4bit"]
 
 
 class ModelSection(BaseModel):
@@ -94,8 +98,12 @@ class HuggingFaceSettings(BaseModel):
     reasoning_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-base"
+    device: HuggingFaceDevice = "auto"
+    quantization: HuggingFaceQuantization = "none"
+    disable_thinking: bool = True
     offline: bool = False
     max_new_tokens: int = 4096
+    stage12_max_new_tokens: int = Field(default=1536, ge=1)
     discovery_batch_size: int = 1
     log_llm_responses: bool = False
 

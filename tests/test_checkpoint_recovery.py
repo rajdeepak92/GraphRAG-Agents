@@ -6,6 +6,7 @@ import hashlib
 from types import SimpleNamespace
 from typing import Any
 
+from multi_agentic_graph_rag.db.neo4j_store import SemanticProjectionReadback
 from multi_agentic_graph_rag.domain.schemas import ChunkLayout, ManifestChunk
 from multi_agentic_graph_rag.services.manifest import build_chunk_manifest
 from multi_agentic_graph_rag.workflows.ingestion_graph import _persist_chunk_chroma
@@ -54,6 +55,12 @@ class _Neo4j:
     def validate_relationships(self, project: str, expected: set[str]) -> set[str]:
         return expected
 
+    def read_semantic_projection(self, **_: Any) -> SemanticProjectionReadback:
+        return SemanticProjectionReadback(set(), set(), set())
+
+    def validate_semantic_projection(self, **_: Any) -> None:
+        return None
+
 
 def test_completed_chroma_write_is_not_repeated_before_validation() -> None:
     chroma = _Chroma()
@@ -84,7 +91,7 @@ def test_completed_semantic_projection_is_not_repeated_before_map_insert() -> No
         "run_id": "RUN-1",
         "manifest": manifest.model_dump(mode="json"),
         "current_index": 0,
-        "current_response": {
+        "validated_response": {
             "chunk_id": "CHK-1",
             "requirements": [],
             "entities": [],

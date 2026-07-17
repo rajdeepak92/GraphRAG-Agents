@@ -10,6 +10,7 @@ import pytest
 from multi_agentic_graph_rag.agents.requirement_discovery_agent import (
     RequirementDiscoveryAgent,
 )
+from multi_agentic_graph_rag.domain.errors import SemanticValidationError
 from multi_agentic_graph_rag.domain.schemas import ChunkLayout, ManifestChunk
 
 
@@ -53,61 +54,66 @@ def _payload() -> dict[str, Any]:
         "chunk_id": "CHK-1",
         "requirements": [
             {
-                "requirement_ref": "req_1",
+                "requirement_ref": "REQREF-1",
                 "source_req_id": "BR-COM-001",
                 "source_req_id_type": "source",
-                "requirement_text": quote,
+                "confidence": 0.98,
                 "requirement_type": "Functional Requirement",
                 "priority": "Medium",
+                "requirement_text": quote,
                 "constraints": [],
-                "entity_refs": ["entity_1", "entity_2"],
-                "relationship_refs": ["relationship_1"],
+                "entity_refs": ["ENTREF-1", "ENTREF-2"],
+                "relationship_refs": ["RELREF-1"],
                 "evidence_quotes": [quote],
-                "confidence": 0.98,
             }
         ],
         "entities": [
             {
-                "entity_ref": "entity_1",
+                "entity_ref": "ENTREF-1",
                 "name": "gateway",
                 "normalized_name": "gateway",
-                "entity_type": "SYSTEM",
+                "entity_type": "COMPONENT",
                 "aliases": [],
-                "evidence_quotes": ["gateway"],
-                "confidence": 0.99,
+                "evidence_quotes": [quote],
+                "confidence": 0.98,
             },
             {
-                "entity_ref": "entity_2",
+                "entity_ref": "ENTREF-2",
                 "name": "TLS",
                 "normalized_name": "tls",
                 "entity_type": "INTERFACE",
                 "aliases": [],
-                "evidence_quotes": ["TLS"],
-                "confidence": 0.99,
+                "evidence_quotes": [quote],
+                "confidence": 0.98,
             },
         ],
         "relationships": [
             {
-                "relationship_ref": "relationship_1",
-                "source_entity_ref": "entity_1",
+                "relationship_ref": "RELREF-1",
+                "source_entity_ref": "ENTREF-1",
                 "relationship_type": "COMMUNICATES_VIA",
-                "target_entity_ref": "entity_2",
+                "target_entity_ref": "ENTREF-2",
                 "evidence_quote": quote,
-                "confidence": 0.96,
+                "confidence": 0.98,
             }
         ],
     }
 
 
-def test_discovery_uses_one_provider_attempt_and_preserves_source_id() -> None:
+def test_discovery_uses_one_call_and_preserves_source_id() -> None:
     model = _Model(_payload())
     response = RequirementDiscoveryAgent(model).discover(_chunk())
     assert model.max_attempts == [1]
     assert response.requirements[0].source_req_id == "BR-COM-001"
 
 
+def test_discovery_keeps_allowlisted_relationship_type() -> None:
+    response = RequirementDiscoveryAgent(_Model(_payload())).discover(_chunk())
+    assert response.relationships[0].relationship_type == "COMMUNICATES_VIA"
+
+
 def test_discovery_rejects_invented_source_prefix() -> None:
     payload = _payload()
     payload["requirements"][0]["source_req_id"] = "SYS-BR-COM-001"
-    with pytest.raises(ValueError, match="not visibly present"):
+    with pytest.raises(SemanticValidationError):
         RequirementDiscoveryAgent(_Model(payload)).discover(_chunk())

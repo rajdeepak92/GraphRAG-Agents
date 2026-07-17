@@ -96,14 +96,14 @@ class _DiscoveryAgent:
                     requirement_ref="req_1",
                     source_req_id=None,
                     source_req_id_type="generated",
-                    requirement_text=chunk.chunk_text,
+                    confidence=0.95,
                     requirement_type="Functional Requirement",
                     priority="Medium",
+                    requirement_text=chunk.chunk_text,
                     constraints=[],
                     entity_refs=[],
                     relationship_refs=[],
                     evidence_quotes=[chunk.chunk_text],
-                    confidence=0.95,
                 )
             ],
             entities=[],
@@ -122,9 +122,7 @@ class _Retrieval:
             requirement_text=requirement.requirement_text,
             source_req_id=requirement.source_req_id,
             source_req_id_type=requirement.source_req_id_type,
-            authoritative_evidence_chunk_ids=[
-                evidence.chunk_id for evidence in requirement.evidence
-            ],
+            authoritative_evidence_chunk_ids=[item.chunk_id for item in requirement.evidence],
             mapped_entity_ids=requirement.entity_ids,
             mapped_relationship_ids=requirement.relationship_ids,
             ranked_evidence=[],

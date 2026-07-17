@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from multi_agentic_graph_rag.config.huggingface_env import (
     env_bool,
@@ -17,6 +17,8 @@ from multi_agentic_graph_rag.config.settings import (
     AzureOpenAISettings,
     ChromaSettings,
     ChunkingSettings,
+    HuggingFaceDevice,
+    HuggingFaceQuantization,
     HuggingFaceSettings,
     ModelSection,
     Neo4jSettings,
@@ -233,9 +235,38 @@ def load_config(config_path: Path | None = None) -> AppSettings:
                 "HUGGINGFACE_RERANKER_MODEL",
                 hf_cfg.get("reranker_model", "BAAI/bge-reranker-base"),
             ),
+            device=cast(
+                HuggingFaceDevice,
+                str(
+                    env.get(
+                        "HUGGINGFACE_DEVICE",
+                        hf_cfg.get("device", "auto"),
+                    )
+                ).lower(),
+            ),
+            quantization=cast(
+                HuggingFaceQuantization,
+                str(
+                    env.get(
+                        "HUGGINGFACE_QUANTIZATION",
+                        hf_cfg.get("quantization", "none"),
+                    )
+                ).lower(),
+            ),
+            disable_thinking=env_bool(
+                env.get("HUGGINGFACE_DISABLE_THINKING"),
+                default=bool(hf_cfg.get("disable_thinking", True)),
+            ),
             offline=hf_offline,
             max_new_tokens=_int(
                 env.get("HUGGINGFACE_MAX_NEW_TOKENS", hf_cfg.get("max_new_tokens")), 4096
+            ),
+            stage12_max_new_tokens=_int(
+                env.get(
+                    "HUGGINGFACE_STAGE12_MAX_NEW_TOKENS",
+                    hf_cfg.get("stage12_max_new_tokens"),
+                ),
+                1536,
             ),
             log_llm_responses=env_bool(
                 env.get("LOG_LLM_RESPONSES"),

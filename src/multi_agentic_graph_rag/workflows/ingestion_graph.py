@@ -27,6 +27,7 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 from multi_agentic_graph_rag.llm_models.factory import create_embedding_model
 from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel
+from multi_agentic_graph_rag.observability.logging import get_logger
 from multi_agentic_graph_rag.services.checkpointing import workflow_checkpointer
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.manifest import (
@@ -36,6 +37,8 @@ from multi_agentic_graph_rag.services.manifest import (
 )
 from multi_agentic_graph_rag.services.parsing import parse_document
 from multi_agentic_graph_rag.services.retry import retry_transient_once
+
+_LOG = get_logger(__name__)
 
 
 class IngestionState(TypedDict, total=False):
@@ -206,6 +209,24 @@ def _parse_and_create_chunks(
     chunks, chunker_fingerprint = chunk_blocks(blocks, runtime.settings.chunking)
     if not chunks:
         raise ValueError("source document produced no chunks")
+    source_path = state["source_file"]
+    chunks = [
+        chunk.model_copy(
+            update={
+                "source_provenance": {
+                    **(chunk.source_provenance or {}),
+                    "source_path": source_path,
+                }
+            }
+        )
+        for chunk in chunks
+    ]
+    _LOG.info(
+        "ingest.parse_and_chunk blocks=%d chunks=%d project=%s",
+        len(blocks),
+        len(chunks),
+        state["project"],
+    )
     return {
         "chunks": [chunk.model_dump(mode="json") for chunk in chunks],
         "current_index": state.get("current_index", 0),
@@ -320,6 +341,11 @@ def _validate_chunk(
     ):
         raise ValueError("Chroma chunk read-back validation failed")
     updated = chunk.model_copy(update={"chroma_status": "persisted"})
+    _LOG.info(
+        "ingest.chunk.persisted chunk_id=%s seq=%d neo4j=ok chroma=ok",
+        chunk.chunk_id,
+        chunk.sequence_index,
+    )
     return {
         "chunks": _replace_current(state, updated),
         "current_index": state["current_index"] + 1,

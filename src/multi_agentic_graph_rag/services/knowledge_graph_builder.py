@@ -36,7 +36,7 @@ class ChunkProjection:
 
 
 class KnowledgeGraphBuilder:
-    """Project entities, mentions, and direct LLM semantic relationships."""
+    """Project entities, mentions, and direct allowlisted semantic relationships."""
 
     def __init__(self, store: Neo4jStore) -> None:
         self.store = store
@@ -48,7 +48,7 @@ class KnowledgeGraphBuilder:
         chunk: ManifestChunk,
         response: RequirementDiscoveryChunkResponse,
     ) -> ChunkProjection:
-        """Resolve candidates, persist the graph, and build the intermediate map entry."""
+        """Resolve candidates, write only missing graph records, and validate full read-back."""
         entities_by_ref: dict[str, CanonicalEntity] = {}
         for candidate in response.entities:
             mention_quote = candidate.evidence_quotes[0]
@@ -105,11 +105,14 @@ class KnowledgeGraphBuilder:
             relationship_ids: list[str] = []
             for relationship_ref in requirement.relationship_refs:
                 rel_candidate = relationships_by_ref[relationship_ref]
-                relationship_evidence_start, relationship_evidence_end = quote_span(
+                relationship_start, relationship_end = quote_span(
                     chunk.chunk_text, rel_candidate.evidence_quote
                 )
                 source_id = entities_by_ref[rel_candidate.source_entity_ref].entity_id
                 target_id = entities_by_ref[rel_candidate.target_entity_ref].entity_id
+                evidence_hash = hashlib.sha256(
+                    rel_candidate.evidence_quote.encode("utf-8")
+                ).hexdigest()
                 relationship_id = make_relationship_id(
                     project=project,
                     chunk_id=chunk.chunk_id,
@@ -117,9 +120,7 @@ class KnowledgeGraphBuilder:
                     source_entity_id=source_id,
                     relationship_type=rel_candidate.relationship_type,
                     target_entity_id=target_id,
-                    evidence_hash=hashlib.sha256(
-                        rel_candidate.evidence_quote.encode("utf-8")
-                    ).hexdigest(),
+                    evidence_hash=evidence_hash,
                 )
                 relationship = CanonicalRelationship(
                     relationship_id=relationship_id,
@@ -133,13 +134,13 @@ class KnowledgeGraphBuilder:
                             evidence_id=make_evidence_id(
                                 relationship_id,
                                 chunk.chunk_id,
-                                chunk.start_char + relationship_evidence_start,
-                                chunk.start_char + relationship_evidence_end,
+                                chunk.start_char + relationship_start,
+                                chunk.start_char + relationship_end,
                             ),
                             chunk_id=chunk.chunk_id,
                             quote=rel_candidate.evidence_quote,
-                            start_char=chunk.start_char + relationship_evidence_start,
-                            end_char=chunk.start_char + relationship_evidence_end,
+                            start_char=chunk.start_char + relationship_start,
+                            end_char=chunk.start_char + relationship_end,
                         )
                     ],
                 )
@@ -166,17 +167,51 @@ class KnowledgeGraphBuilder:
 
         entities = list(entities_by_ref.values())
         relationships = list(relationships_by_owner.values())
+        expected_entities = {item.entity_id for item in entities}
+        expected_mentions = expected_entities
+        expected_relationships = {item.relationship_id for item in relationships}
+        existing = self.store.read_semantic_projection(
+            project=project,
+            chunk_id=chunk.chunk_id,
+            entity_ids=expected_entities,
+            relationship_ids=expected_relationships,
+        )
+        missing_entities = expected_entities - existing.entity_ids
+        missing_mentions = expected_mentions - existing.mentioned_entity_ids
+        missing_relationships = expected_relationships - existing.relationship_ids
         self.store.upsert_semantic_projection(
             project=project,
             chunk_id=chunk.chunk_id,
+            entities=[item for item in entities if item.entity_id in missing_entities],
+            mentioned_entity_ids=missing_mentions,
+            relationships=[
+                item for item in relationships if item.relationship_id in missing_relationships
+            ],
+            requirement_text_hash_by_relationship={
+                key: value
+                for key, value in relationship_hashes.items()
+                if key in missing_relationships
+            },
+        )
+        validated = self.store.read_semantic_projection(
+            project=project,
+            chunk_id=chunk.chunk_id,
+            entity_ids=expected_entities,
+            relationship_ids=expected_relationships,
+        )
+        if (
+            validated.entity_ids != expected_entities
+            or validated.mentioned_entity_ids != expected_mentions
+            or validated.relationship_ids != expected_relationships
+        ):
+            raise ValueError("Neo4j semantic projection read-back validation failed")
+        self.store.validate_semantic_projection(
+            project=project,
+            chunk_id=chunk.chunk_id,
             entities=entities,
-            mentioned_entity_ids={entity.entity_id for entity in entities},
             relationships=relationships,
             requirement_text_hash_by_relationship=relationship_hashes,
         )
-        expected = {relationship.relationship_id for relationship in relationships}
-        if self.store.validate_relationships(project, expected) != expected:
-            raise ValueError("Neo4j semantic projection read-back validation failed")
         status: Literal["completed", "no_requirements"] = (
             "completed" if map_entries else "no_requirements"
         )

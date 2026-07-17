@@ -35,15 +35,15 @@ def test_entity_id_is_stable_and_project_scoped() -> None:
     )
 
 
-def test_relationship_id_is_deterministic() -> None:
+def test_relationship_id_is_deterministic_and_provenance_scoped() -> None:
     kwargs = {
         "project": "alpha",
         "chunk_id": "CHK-1",
-        "requirement_text_hash": "abc123",
+        "requirement_text_hash": "REQ-HASH",
         "source_entity_id": "ENT-A",
         "relationship_type": "CONTROLS",
         "target_entity_id": "ENT-B",
-        "evidence_hash": "def456",
+        "evidence_hash": "EVD-HASH",
     }
     assert make_relationship_id(**kwargs) == make_relationship_id(**kwargs)
     swapped = {**kwargs, "source_entity_id": "ENT-B", "target_entity_id": "ENT-A"}

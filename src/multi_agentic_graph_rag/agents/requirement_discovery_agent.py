@@ -6,13 +6,25 @@ import json
 import re
 
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
+from multi_agentic_graph_rag.domain.errors import SemanticValidationError
 from multi_agentic_graph_rag.domain.schemas import (
+    LLMRequirementCandidate,
     ManifestChunk,
     RequirementDiscoveryChunkResponse,
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
 
 _SPACE = re.compile(r"\s+")
+_SOURCE_ID = re.compile(r"\b[A-Z]{2,}(?:-[A-Z0-9]+){1,}\b")
+_WORD = re.compile(r"[A-Z0-9]+", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[.!?]+(?:[\"')\]]+)?(?=\s|$)")
+_SEMANTIC_MARKERS = re.compile(
+    r"\b(?:shall|must|should|may|not|never|only|if|when|unless|within|before|after|"
+    r"until|during|while|at least|at most|up to|every|each|all|remaining|"
+    r"\d+(?:\.\d+)?(?:\s*(?:%|ms|s|sec(?:ond)?s?|min(?:ute)?s?|hours?|days?|"
+    r"hz|°c|psi|mm/s))?)\b",
+    re.IGNORECASE,
+)
 
 
 class RequirementDiscoveryAgent:
@@ -39,7 +51,10 @@ class RequirementDiscoveryAgent:
             request_id=chunk.chunk_id,
             max_attempts=1,
         )
-        self.validate_response(chunk, response)
+        try:
+            self.validate_response(chunk, response)
+        except ValueError as error:
+            raise SemanticValidationError(str(error)) from error
         return response
 
     @staticmethod
@@ -47,10 +62,22 @@ class RequirementDiscoveryAgent:
         chunk: ManifestChunk,
         response: RequirementDiscoveryChunkResponse,
     ) -> None:
-        """Apply deterministic quote, provenance, and association validation."""
+        """Apply deterministic completeness, provenance, quote, and association validation."""
         if response.chunk_id != chunk.chunk_id:
             raise ValueError("response chunk_id does not match the supplied manifest chunk")
         normalized_chunk = _normalize(chunk.chunk_text)
+        explicit_rows = _explicit_requirement_rows(chunk.chunk_text)
+        returned_source_ids = {
+            item.source_req_id
+            for item in response.requirements
+            if item.source_req_id_type == "source" and item.source_req_id is not None
+        }
+        if explicit_rows and returned_source_ids != set(explicit_rows):
+            missing = sorted(set(explicit_rows) - returned_source_ids)
+            extra = sorted(returned_source_ids - set(explicit_rows))
+            raise ValueError(
+                f"explicit source requirement coverage mismatch missing={missing} extra={extra}"
+            )
         requirements_by_ref = {
             requirement.requirement_ref: requirement for requirement in response.requirements
         }
@@ -61,11 +88,24 @@ class RequirementDiscoveryAgent:
                 source_id = requirement.source_req_id or ""
                 if source_id not in chunk.chunk_text:
                     raise ValueError("source_req_id is not visibly present in the chunk")
-                if _normalize(requirement.requirement_text) not in normalized_chunk:
+                expected_text = explicit_rows.get(source_id)
+                if expected_text is not None:
+                    if requirement.requirement_text != expected_text:
+                        raise ValueError("source requirement text is not preserved exactly")
+                    if expected_text not in requirement.evidence_quotes:
+                        raise ValueError(
+                            "source requirement evidence must contain the exact row text"
+                        )
+                elif _normalize(requirement.requirement_text) not in normalized_chunk:
                     raise ValueError("source requirement text is not preserved from the chunk")
+            else:
+                _require_atomic_generated_requirement(requirement.requirement_text)
+            _require_semantic_markers(requirement)
+        entities_by_ref = {entity.entity_ref: entity for entity in response.entities}
         for entity in response.entities:
             for quote in entity.evidence_quotes:
                 _require_exact_quote(normalized_chunk, quote, "entity")
+                _require_entity_grounding(entity.name, entity.aliases, quote, "entity")
         relationship_owners: dict[str, list[str]] = {
             relationship.relationship_ref: [] for relationship in response.relationships
         }
@@ -77,14 +117,29 @@ class RequirementDiscoveryAgent:
             owners = relationship_owners[relationship.relationship_ref]
             if not owners:
                 raise ValueError("relationship is not owned by a requirement")
-            for owner in owners:
-                requirement = requirements_by_ref[owner]
-                if not any(
-                    _normalize(relationship.evidence_quote) in _normalize(quote)
-                    or _normalize(quote) in _normalize(relationship.evidence_quote)
-                    for quote in requirement.evidence_quotes
-                ):
-                    raise ValueError("relationship evidence is not associated with its requirement")
+            if len(owners) != 1:
+                raise ValueError("relationship must be owned by exactly one requirement")
+            requirement = requirements_by_ref[owners[0]]
+            if not any(
+                _normalize(relationship.evidence_quote) in _normalize(quote)
+                or _normalize(quote) in _normalize(relationship.evidence_quote)
+                for quote in requirement.evidence_quotes
+            ):
+                raise ValueError("relationship evidence is outside its requirement evidence")
+            source = entities_by_ref[relationship.source_entity_ref]
+            target = entities_by_ref[relationship.target_entity_ref]
+            _require_entity_grounding(
+                source.name,
+                source.aliases,
+                relationship.evidence_quote,
+                "relationship source endpoint",
+            )
+            _require_entity_grounding(
+                target.name,
+                target.aliases,
+                relationship.evidence_quote,
+                "relationship target endpoint",
+            )
 
 
 def quote_span(chunk_text: str, quote: str) -> tuple[int, int]:
@@ -104,6 +159,71 @@ def quote_span(chunk_text: str, quote: str) -> tuple[int, int]:
 def _require_exact_quote(normalized_chunk: str, quote: str, label: str) -> None:
     if not quote.strip() or _normalize(quote) not in normalized_chunk:
         raise ValueError(f"{label} evidence quote is not present in the chunk")
+
+
+def _require_atomic_generated_requirement(requirement_text: str) -> None:
+    """Reject headings, tables, or multiple prose items collapsed into one candidate."""
+    normalized = _normalize(requirement_text)
+    if requirement_text != normalized:
+        raise ValueError("generated requirement must be one normalized atomic sentence")
+    sentence_ends = list(_SENTENCE_END.finditer(normalized))
+    if len(sentence_ends) != 1 or sentence_ends[0].end() != len(normalized):
+        raise ValueError("generated requirement must be one complete atomic sentence")
+
+
+def _require_entity_grounding(
+    name: str,
+    aliases: list[str],
+    quote: str,
+    label: str,
+) -> None:
+    """Require a visible name or alias in each entity-bearing evidence quote."""
+    evidence_tokens = {_singular_token(token) for token in _WORD.findall(quote)}
+    candidates = (name, *aliases)
+    for candidate in candidates:
+        candidate_tokens = {_singular_token(token) for token in _WORD.findall(candidate)}
+        if candidate_tokens and candidate_tokens <= evidence_tokens:
+            return
+    raise ValueError(f"{label} is not visibly grounded in its evidence quote")
+
+
+def _singular_token(token: str) -> str:
+    normalized = token.casefold()
+    if len(normalized) > 4 and normalized.endswith("ies"):
+        return f"{normalized[:-3]}y"
+    if len(normalized) > 3 and normalized.endswith("s") and not normalized.endswith("ss"):
+        return normalized[:-1]
+    return normalized
+
+
+def _explicit_requirement_rows(chunk_text: str) -> dict[str, str]:
+    """Return exact source-ID rows emitted by the layout-aware PDF parser."""
+    result: dict[str, str] = {}
+    for line in chunk_text.splitlines():
+        normalized = _normalize(line)
+        match = re.match(r"^([A-Z]{2,}(?:-[A-Z0-9]+){1,})\s+(.+)$", normalized)
+        if match is None:
+            continue
+        source_id, requirement_text = match.groups()
+        if _SOURCE_ID.fullmatch(source_id) and requirement_text:
+            result[source_id] = requirement_text
+    return result
+
+
+def _require_semantic_markers(requirement: LLMRequirementCandidate) -> None:
+    evidence_quotes = requirement.evidence_quotes
+    requirement_text = _normalize(requirement.requirement_text).casefold()
+    evidence_text = " ".join(_normalize(quote) for quote in evidence_quotes)
+    missing = {
+        _normalize(match.group(0)).casefold()
+        for match in _SEMANTIC_MARKERS.finditer(evidence_text)
+        if _normalize(match.group(0)).casefold() not in requirement_text
+    }
+    if missing:
+        raise ValueError(
+            "requirement_text dropped modality, polarity, threshold, timing, or condition markers: "
+            f"{sorted(missing)}"
+        )
 
 
 def _normalize(value: str) -> str:

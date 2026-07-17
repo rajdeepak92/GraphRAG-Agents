@@ -41,12 +41,15 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reasoning_model,
     create_reranker_model,
 )
+from multi_agentic_graph_rag.observability.logging import RunLogger, get_logger
 from multi_agentic_graph_rag.services.checkpointing import workflow_checkpointer
 from multi_agentic_graph_rag.services.manifest import atomic_write_model, load_model
 from multi_agentic_graph_rag.services.retrieval import RetrievalService
 from multi_agentic_graph_rag.services.test_scenario_builder import (
     build_test_scenarios_artifact,
 )
+
+_LOG = get_logger(__name__)
 
 
 class ScenarioGenerationState(TypedDict, total=False):
@@ -234,9 +237,15 @@ def _run_pipeline(
     runtime.postgres.persist_test_scenarios(artifact)
     output_dir = Path(state["artifact_dir"]) / "test-scenario"
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "scenario_context.json").write_text(
+    scenario_context_path = output_dir / "scenario_context.json"
+    scenario_context_path.write_text(
         json.dumps({"contexts": final["contexts"]}, indent=2),
         encoding="utf-8",
+    )
+    _LOG.info(
+        "json.write name=scenario_context.json path=%s contexts=%d",
+        scenario_context_path,
+        len(final["contexts"]),
     )
     counts: dict[str, int] = {story.story_id: 0 for story in stories}
     for story_id, _requirement_ids, _candidate in candidates:
@@ -353,6 +362,11 @@ def _generate_test_scenarios(
         story,
         ScenarioContext.model_validate(state["current_context"]),
     )
+    _LOG.info(
+        "scenario.generated story_id=%s scenarios=%d",
+        story.story_id,
+        len(response.test_scenarios),
+    )
     return {"current_response": response.model_dump(mode="json")}
 
 
@@ -402,6 +416,14 @@ def run_test_scenario_generation(
         status="started",
         payload={},
     )
+    scenario_dir = (
+        resolved.paths.generated_dir
+        / normalize_project(request.project_name)
+        / request.run_id
+        / "test-scenario"
+    )
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    _LOG.info("stage-3.start project=%s run_id=%s", request.project_name, request.run_id)
     with workflow_checkpointer(resolved) as checkpointer:
         neo4j = Neo4jStore(resolved)
         runtime = _Runtime(
@@ -414,7 +436,9 @@ def run_test_scenario_generation(
                 reranker=create_reranker_model(resolved),
                 settings=resolved.retrieval,
             ),
-            agent=TestScenarioGenerationAgent(create_reasoning_model(resolved)),
+            agent=TestScenarioGenerationAgent(
+                create_reasoning_model(resolved, logger=RunLogger(_LOG), run_dir=scenario_dir)
+            ),
             checkpointer=checkpointer,
         )
         graph = build_test_scenario_graph(runtime)

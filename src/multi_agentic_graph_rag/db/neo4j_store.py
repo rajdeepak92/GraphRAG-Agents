@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, get_args
 
@@ -17,6 +18,15 @@ from multi_agentic_graph_rag.domain.schemas import (
 )
 
 _RELATIONSHIP_TYPES: set[str] = set(get_args(RelationshipType))
+
+
+@dataclass(frozen=True)
+class SemanticProjectionReadback:
+    """Existing deterministic semantic records for resume-safe projection."""
+
+    entity_ids: set[str]
+    mentioned_entity_ids: set[str]
+    relationship_ids: set[str]
 
 
 class Neo4jStore:
@@ -213,13 +223,170 @@ class Neo4jStore:
             records = session.run(
                 """
                 MATCH ()-[r]->()
-                WHERE r.project = $project AND r.relationship_id IN $relationship_ids
+                WHERE type(r) IN $relationship_types
+                  AND r.project = $project
+                  AND r.relationship_id IN $relationship_ids
                 RETURN r.relationship_id AS relationship_id
                 """,
                 project=project,
                 relationship_ids=list(relationship_ids),
+                relationship_types=sorted(_RELATIONSHIP_TYPES),
             )
             return {str(record["relationship_id"]) for record in records}
+
+    def read_semantic_projection(
+        self,
+        *,
+        project: str,
+        chunk_id: str,
+        entity_ids: set[str],
+        relationship_ids: set[str],
+    ) -> SemanticProjectionReadback:
+        """Read deterministic IDs without scanning MENTIONS as semantic relationships."""
+        if self.settings.neo4j.mode == "local_json":
+            rows = self._local_rows()
+            return SemanticProjectionReadback(
+                entity_ids={
+                    str(row["entity_id"])
+                    for row in rows
+                    if row.get("kind") == "entity"
+                    and row.get("project") == project
+                    and row.get("entity_id") in entity_ids
+                },
+                mentioned_entity_ids={
+                    str(row["entity_id"])
+                    for row in rows
+                    if row.get("kind") == "mention"
+                    and row.get("project") == project
+                    and row.get("chunk_id") == chunk_id
+                    and row.get("entity_id") in entity_ids
+                },
+                relationship_ids={
+                    str(row["relationship_id"])
+                    for row in rows
+                    if row.get("kind") == "relationship"
+                    and row.get("project") == project
+                    and row.get("relationship_type") in _RELATIONSHIP_TYPES
+                    and row.get("relationship_id") in relationship_ids
+                },
+            )
+        with self._session() as session:
+            entity_records = session.run(
+                """
+                MATCH (e:Entity)
+                WHERE e.project = $project AND e.entity_id IN $entity_ids
+                OPTIONAL MATCH (c:Chunk {project: $project, chunk_id: $chunk_id})
+                  -[m:MENTIONS {project: $project}]->(e)
+                RETURN e.entity_id AS entity_id, m IS NOT NULL AS mentioned
+                """,
+                project=project,
+                chunk_id=chunk_id,
+                entity_ids=list(entity_ids),
+            )
+            found_entities: set[str] = set()
+            mentioned_entities: set[str] = set()
+            for record in entity_records:
+                entity_id = str(record["entity_id"])
+                found_entities.add(entity_id)
+                if bool(record["mentioned"]):
+                    mentioned_entities.add(entity_id)
+            relationship_records = session.run(
+                """
+                MATCH ()-[r]->()
+                WHERE type(r) IN $relationship_types
+                  AND r.project = $project
+                  AND r.relationship_id IN $relationship_ids
+                RETURN r.relationship_id AS relationship_id
+                """,
+                project=project,
+                relationship_ids=list(relationship_ids),
+                relationship_types=sorted(_RELATIONSHIP_TYPES),
+            )
+            return SemanticProjectionReadback(
+                entity_ids=found_entities,
+                mentioned_entity_ids=mentioned_entities,
+                relationship_ids={
+                    str(record["relationship_id"]) for record in relationship_records
+                },
+            )
+
+    def validate_semantic_projection(
+        self,
+        *,
+        project: str,
+        chunk_id: str,
+        entities: list[CanonicalEntity],
+        relationships: list[CanonicalRelationship],
+        requirement_text_hash_by_relationship: dict[str, str],
+    ) -> None:
+        """Validate IDs, types, endpoints, provenance, evidence, confidence, and method."""
+        if self.settings.neo4j.mode == "local_json":
+            rows = self._local_rows()
+            by_id = {
+                str(row["relationship_id"]): row
+                for row in rows
+                if row.get("kind") == "relationship" and row.get("project") == project
+            }
+            for relationship in relationships:
+                row = by_id.get(relationship.relationship_id)
+                evidence = relationship.evidence[0]
+                if row is None or any(
+                    (
+                        row.get("relationship_type") != relationship.relationship_type,
+                        row.get("source_entity_id") != relationship.source_entity_id,
+                        row.get("target_entity_id") != relationship.target_entity_id,
+                        row.get("chunk_id") != chunk_id,
+                        row.get("requirement_text_hash")
+                        != requirement_text_hash_by_relationship[relationship.relationship_id],
+                        (row.get("evidence") or [{}])[0].get("quote") != evidence.quote,
+                        row.get("confidence") != relationship.confidence,
+                        row.get("extraction_method") != "llm",
+                    )
+                ):
+                    raise ValueError("local semantic relationship read-back mismatch")
+            return
+        for relationship in relationships:
+            evidence = relationship.evidence[0]
+            with self._session() as session:
+                record = session.run(
+                    """
+                    MATCH (s:Entity)-[r]->(t:Entity)
+                    WHERE type(r) IN $relationship_types
+                      AND r.project = $project
+                      AND r.relationship_id = $relationship_id
+                    RETURN type(r) AS relationship_type,
+                           s.entity_id AS source_entity_id,
+                           t.entity_id AS target_entity_id,
+                           r.project AS project,
+                           r.chunk_id AS chunk_id,
+                           r.requirement_text_hash AS requirement_text_hash,
+                           r.evidence_quote AS evidence_quote,
+                           r.evidence_start_char AS evidence_start_char,
+                           r.evidence_end_char AS evidence_end_char,
+                           r.confidence AS confidence,
+                           r.extraction_method AS extraction_method
+                    """,
+                    project=project,
+                    relationship_id=relationship.relationship_id,
+                    relationship_types=sorted(_RELATIONSHIP_TYPES),
+                ).single()
+            expected = {
+                "relationship_type": relationship.relationship_type,
+                "source_entity_id": relationship.source_entity_id,
+                "target_entity_id": relationship.target_entity_id,
+                "project": project,
+                "chunk_id": chunk_id,
+                "requirement_text_hash": requirement_text_hash_by_relationship[
+                    relationship.relationship_id
+                ],
+                "evidence_quote": evidence.quote,
+                "evidence_start_char": evidence.start_char,
+                "evidence_end_char": evidence.end_char,
+                "confidence": relationship.confidence,
+                "extraction_method": "llm",
+            }
+            if record is None or dict(record) != expected:
+                raise ValueError("Neo4j semantic relationship read-back mismatch")
 
     def fetch_chunks(self, project: str, chunk_ids: set[str]) -> list[tuple[str, str]]:
         """Hydrate exact evidence directly from Chunk.text."""
@@ -300,6 +467,7 @@ class Neo4jStore:
                   )
                 MATCH path=(seed)-[rels*1..{hop_limit}]-(other:Entity)
                 WHERE all(r IN rels WHERE r.project = $project)
+                  AND all(r IN rels WHERE type(r) IN $relationship_types)
                   AND any(r IN rels WHERE r.chunk_id IN $allowed_chunk_ids)
                 UNWIND rels AS r
                 WITH DISTINCT r
@@ -316,6 +484,7 @@ class Neo4jStore:
                 anchor_entity_ids=list(anchor_entity_ids),
                 anchor_relationship_ids=list(anchor_relationship_ids),
                 allowed_chunk_ids=list(allowed_chunk_ids),
+                relationship_types=sorted(_RELATIONSHIP_TYPES),
                 max_hops=max_hops,
                 limit=limit,
             )
@@ -329,6 +498,20 @@ class Neo4jStore:
                 )
                 for row in records
             ]
+
+    def delete_project(self, project: str) -> int:
+        """Delete all project-scoped nodes/relationships. Returns nodes removed."""
+        if self.settings.neo4j.mode == "local_json":
+            rows = [row for row in self._local_rows() if row.get("project") != project]
+            removed = len(self._local_rows()) - len(rows)
+            _write_rows(self.settings.neo4j.local_path, rows)
+            return removed
+        with self._session() as session:
+            summary = session.run(
+                "MATCH (n) WHERE n.project = $project DETACH DELETE n",
+                project=project,
+            ).consume()
+            return int(summary.counters.nodes_deleted)
 
     def _driver(self) -> Any:
         from neo4j import GraphDatabase
@@ -384,4 +567,4 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     )
 
 
-__all__ = ["Neo4jStore"]
+__all__ = ["Neo4jStore", "SemanticProjectionReadback"]

@@ -10,7 +10,7 @@ from typing import Any, TypeVar, cast
 from pydantic import BaseModel, ValidationError
 
 from multi_agentic_graph_rag.config.settings import HuggingFaceSettings
-from multi_agentic_graph_rag.domain.errors import ModelOutputError
+from multi_agentic_graph_rag.domain.errors import ConfigurationError, MalformedModelOutputError
 from multi_agentic_graph_rag.llm_models.json_output import (
     parse_json_object,
     sanitized_output_preview,
@@ -165,7 +165,7 @@ class HuggingFaceReasoningModel:
                 call_index=call_index,
             )
             if attempt_limit == 1:
-                raise ModelOutputError(
+                raise MalformedModelOutputError(
                     "Hugging Face model output could not be validated within the attempt limit: "
                     f"{sanitized_exception_summary(first_error)}; "
                     f"diagnostic={sanitized_output_preview(first_completion)}"
@@ -202,7 +202,7 @@ class HuggingFaceReasoningModel:
                 max_attempts=attempt_limit,
                 call_index=call_index,
             )
-            raise ModelOutputError(
+            raise MalformedModelOutputError(
                 "Hugging Face model output could not be validated after retry: "
                 f"{sanitized_exception_summary(retry_error)}; "
                 f"diagnostic={sanitized_output_preview(retry_completion)}"
@@ -231,7 +231,12 @@ class HuggingFaceReasoningModel:
             str: The typed result produced by the operation.
         """
         tokenizer, model = self._load_components()
-        rendered_prompt = _build_chat_prompt(tokenizer, prompt, system_message)
+        rendered_prompt = _build_chat_prompt(
+            tokenizer,
+            prompt,
+            system_message,
+            enable_thinking=not self.settings.disable_thinking,
+        )
         inputs = tokenizer(rendered_prompt, return_tensors="pt")
         inputs = _move_inputs_to_model(inputs, model)
         generate_kwargs: dict[str, Any] = {
@@ -244,7 +249,9 @@ class HuggingFaceReasoningModel:
             pad_token_id = getattr(tokenizer, "eos_token_id", None)
         if pad_token_id is not None:
             generate_kwargs["pad_token_id"] = pad_token_id
-        output_ids = model.generate(**generate_kwargs)
+        torch = import_module("torch")
+        with torch.inference_mode():
+            output_ids = model.generate(**generate_kwargs)
         prompt_token_count = _prompt_token_count(inputs["input_ids"])
         completion_ids = output_ids[0][prompt_token_count:]
         return cast(str, tokenizer.decode(completion_ids, skip_special_tokens=True))
@@ -357,10 +364,38 @@ class HuggingFaceReasoningModel:
             self.settings.reasoning_model,
             **kwargs,
         )
+        device = _resolve_device(self.settings.device)
+        model_kwargs = dict(kwargs)
+        quantized = self.settings.quantization == "bitsandbytes_4bit"
+        if quantized:
+            if device != "cuda":
+                raise ConfigurationError(
+                    "HUGGINGFACE_QUANTIZATION=bitsandbytes_4bit requires a CUDA device"
+                )
+            try:
+                import_module("bitsandbytes")
+            except ImportError as exc:
+                raise ConfigurationError(
+                    "HUGGINGFACE_QUANTIZATION=bitsandbytes_4bit requires bitsandbytes; "
+                    "install with: uv sync --extra local-llm"
+                ) from exc
+            torch = import_module("torch")
+            compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            model_kwargs["quantization_config"] = transformers.BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=compute_dtype,
+            )
+            model_kwargs["device_map"] = {"": 0}
+        elif device == "cuda":
+            model_kwargs["dtype"] = import_module("torch").float16
         model = transformers.AutoModelForCausalLM.from_pretrained(
             self.settings.reasoning_model,
-            **kwargs,
+            **model_kwargs,
         )
+        if not quantized:
+            model.to(device)
         model.eval()
         self._tokenizer = tokenizer
         self._model = model
@@ -396,7 +431,11 @@ class HuggingFaceEmbeddingModel:
         kwargs: dict[str, Any] = {"local_files_only": settings.offline}
         if settings.token:
             kwargs["token"] = settings.token
-        self.model = SentenceTransformer(settings.embedding_model, **kwargs)
+        self.model = SentenceTransformer(
+            settings.embedding_model,
+            device=_resolve_device(settings.device),
+            **kwargs,
+        )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Execute the embed documents operation within its declared architectural boundary.
@@ -429,7 +468,11 @@ class HuggingFaceRerankerModel:
         kwargs: dict[str, Any] = {"local_files_only": settings.offline}
         if settings.token:
             kwargs["token"] = settings.token
-        self.model = CrossEncoder(settings.reranker_model, **kwargs)
+        self.model = CrossEncoder(
+            settings.reranker_model,
+            device=_resolve_device(settings.device),
+            **kwargs,
+        )
 
     def rerank(self, query: str, documents: list[str]) -> list[int]:
         """Execute the rerank operation within its declared architectural boundary.
@@ -452,7 +495,13 @@ class HuggingFaceRerankerModel:
         )
 
 
-def _build_chat_prompt(tokenizer: Any, prompt: str, system_message: str) -> str:
+def _build_chat_prompt(
+    tokenizer: Any,
+    prompt: str,
+    system_message: str,
+    *,
+    enable_thinking: bool = False,
+) -> str:
     """Build chat prompt.
 
     Args:
@@ -476,6 +525,7 @@ def _build_chat_prompt(tokenizer: Any, prompt: str, system_message: str) -> str:
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                enable_thinking=enable_thinking,
             ),
         )
     return f"System: {system_message}\n\nUser: {prompt}\n\nAssistant:"
@@ -517,6 +567,19 @@ def _move_inputs_to_model(inputs: Any, model: Any) -> Any:
     return {
         key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()
     }
+
+
+def _resolve_device(configured_device: str) -> str:
+    """Resolve and validate the device used by local Hugging Face adapters."""
+    torch = import_module("torch")
+    if configured_device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if configured_device == "cuda" and not torch.cuda.is_available():
+        raise ConfigurationError(
+            "HUGGINGFACE_DEVICE=cuda was requested, but CUDA is unavailable. "
+            "Install a CUDA-enabled PyTorch build and verify torch.cuda.is_available()."
+        )
+    return configured_device
 
 
 def _prompt_token_count(input_ids: Any) -> int:

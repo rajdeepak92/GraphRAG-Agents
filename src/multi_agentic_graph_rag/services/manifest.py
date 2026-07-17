@@ -13,6 +13,9 @@ from multi_agentic_graph_rag.domain.schemas import (
     ManifestChunk,
     canonical_checksum,
 )
+from multi_agentic_graph_rag.observability.logging import get_logger
+
+_LOG = get_logger(__name__)
 
 
 def build_chunk_manifest(
@@ -37,11 +40,15 @@ def atomic_write_model(model: BaseModel, path: Path) -> Path:
     """Atomically publish a JSON model."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(model.model_dump(mode="json"), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    payload = json.dumps(model.model_dump(mode="json"), indent=2, ensure_ascii=False)
+    temporary.write_text(payload, encoding="utf-8")
     os.replace(temporary, path)
+    _LOG.info(
+        "json.write model=%s path=%s bytes=%d",
+        type(model).__name__,
+        path,
+        len(payload.encode("utf-8")),
+    )
     return path
 
 

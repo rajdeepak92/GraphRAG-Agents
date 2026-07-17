@@ -20,6 +20,8 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reasoning_model,
     create_reranker_model,
 )
+from multi_agentic_graph_rag.observability.logging import configure_logging
+from multi_agentic_graph_rag.services.project_reset import reset_project
 from multi_agentic_graph_rag.workflows.ingestion_graph import run_ingestion
 from multi_agentic_graph_rag.workflows.requirement_discovery_graph import (
     run_requirement_discovery,
@@ -32,6 +34,19 @@ from multi_agentic_graph_rag.workflows.user_story_graph import (
 )
 
 app = typer.Typer(no_args_is_help=True, help="Multi-Agentic QA Knowledge GraphRAG")
+
+
+@app.callback()
+def _configure(
+    log_level: Annotated[
+        str | None,
+        typer.Option("--log-level", help="Override the console log level (e.g. DEBUG, INFO)."),
+    ] = None,
+) -> None:
+    """Configure runtime console logging before any command executes."""
+    import os
+
+    configure_logging(log_level or os.environ.get("LOG_LEVEL", "INFO"))
 
 
 @app.command("version")
@@ -184,6 +199,20 @@ def ingest(
             "requirement_ids": discovery.item_ids,
         }
     )
+
+
+@app.command("project-reset")
+def project_reset(
+    project: Annotated[str, typer.Option("--project")],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm deletion of this project from every managed store."),
+    ] = False,
+) -> None:
+    """Explicitly delete one project from Neo4j, Chroma, PostgreSQL, and generated files."""
+    if not yes:
+        raise typer.BadParameter("--yes is required for project-reset")
+    _emit({"status": "PASS", "reset": reset_project(project, load_config())})
 
 
 @app.command("generate-user-stories")
