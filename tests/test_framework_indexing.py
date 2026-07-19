@@ -52,8 +52,8 @@ def test_framework_snapshot_is_deterministic_for_a_revision() -> None:
     second = compute_framework_snapshot(_REPO_ROOT, **kwargs)
     assert first.snapshot_id == second.snapshot_id
     assert first.snapshot_id.startswith("FWS-")
-    assert len(first.commit) == 40
-    assert len(first.tree_hash) == 40
+    assert first.filesystem_checksum.startswith("sha256:")
+    assert len(first.filesystem_checksum) == 71
     # A different extractor config must yield a different snapshot identity.
     other = compute_framework_snapshot(
         _REPO_ROOT, **{**kwargs, "extractor_config": {"mode": "deep"}}

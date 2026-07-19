@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 
 from multi_agentic_graph_rag import __version__
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
+from multi_agentic_graph_rag.db.code_graph_store import CodeGraphStore
+from multi_agentic_graph_rag.db.codegen_postgres import CodegenPostgresStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
+from multi_agentic_graph_rag.domain.codegen_schemas import (
+    ReasoningProviderName,
+    Stage4Request,
+    TestDataSnapshotRef,
+)
 from multi_agentic_graph_rag.domain.schemas import IngestionRequest, StageRequest
 from multi_agentic_graph_rag.llm_models.factory import (
     create_embedding_model,
@@ -22,6 +30,7 @@ from multi_agentic_graph_rag.llm_models.factory import (
 )
 from multi_agentic_graph_rag.observability.logging import configure_logging
 from multi_agentic_graph_rag.services.project_reset import reset_project
+from multi_agentic_graph_rag.workflows.codegen_run_graph import run_codegen_run
 from multi_agentic_graph_rag.workflows.ingestion_graph import run_ingestion
 from multi_agentic_graph_rag.workflows.requirement_discovery_graph import (
     run_requirement_discovery,
@@ -64,6 +73,7 @@ def config_check() -> None:
             "status": "PASS",
             "app_env": settings.app_env,
             "reasoning_provider": settings.reasoning_model.provider,
+            "stage4_reasoning_provider": settings.stage4.reasoning_provider,
             "embedding_provider": settings.embedding_model.provider,
             "reranker_provider": settings.reranker_model.provider,
             "postgres_mode": settings.postgres.mode,
@@ -101,17 +111,33 @@ def hf_check(
 def doctor() -> None:
     """Run non-destructive configuration and dependency diagnostics."""
     settings = load_config()
+    python_dependencies = {
+        name: importlib.util.find_spec(name) is not None
+        for name in ("langgraph", "psycopg", "neo4j", "chromadb", "pydantic")
+    }
+    stage4_dependencies = {
+        name: importlib.util.find_spec(name) is not None for name in ("openpyxl", "robot")
+    }
+    graphify_executable = shutil.which(settings.stage4.graphify_command)
+    ready = (
+        all(python_dependencies.values())
+        and all(stage4_dependencies.values())
+        and graphify_executable is not None
+    )
     _emit(
         {
-            "status": "PASS",
-            "python_dependencies": {
-                name: importlib.util.find_spec(name) is not None
-                for name in ("langgraph", "psycopg", "neo4j", "chromadb", "pydantic")
-            },
+            "status": "PASS" if ready else "FAIL",
+            "python_dependencies": python_dependencies,
+            "stage4_dependencies": stage4_dependencies,
+            "stage4_reasoning_provider": settings.stage4.reasoning_provider,
+            "graphify_command": settings.stage4.graphify_command,
+            "graphify_executable": graphify_executable,
             "postgres_mode": settings.postgres.mode,
             "neo4j_mode": settings.neo4j.mode,
         }
     )
+    if not ready:
+        raise typer.Exit(1)
 
 
 @app.command("db-check")
@@ -141,6 +167,21 @@ def db_check() -> None:
     except Exception as exc:
         failures = True
         results["chroma"] = f"FAIL {type(exc).__name__}: {exc}"
+    try:
+        stage4_postgres = CodegenPostgresStore(settings)
+        stage4_postgres.ensure_schema()
+        results["stage4_postgres"] = "PASS Stage-4 sequence and durable coordination schema"
+    except Exception as exc:
+        failures = True
+        results["stage4_postgres"] = f"FAIL {type(exc).__name__}: {exc}"
+    try:
+        stage4_graph = CodeGraphStore(settings)
+        connectivity = stage4_graph.check()
+        stage4_graph.ensure_schema()
+        results["stage4_graph"] = f"{connectivity}; PASS Stage-4 code/test-data schema"
+    except Exception as exc:
+        failures = True
+        results["stage4_graph"] = f"FAIL {type(exc).__name__}: {exc}"
     _emit(
         {
             "status": "FAIL" if failures else "PASS",
@@ -293,8 +334,8 @@ def index_framework_command(
         {
             "status": "completed",
             "snapshot_id": result.snapshot.snapshot_id,
-            "commit": result.snapshot.commit,
-            "tree_hash": result.snapshot.tree_hash,
+            "filesystem_checksum": result.snapshot.filesystem_checksum,
+            "graphify_version": result.graphify_version,
             "files": result.file_count,
             "symbols": result.symbol_count,
             "edges": result.edge_count,
@@ -306,7 +347,9 @@ def index_framework_command(
 @app.command("ingest-test-data")
 def ingest_test_data_command(
     project: Annotated[str, typer.Option("--project")],
-    document: Annotated[Path, typer.Option("--document", help="normalized-test-data.json")],
+    document: Annotated[
+        Path, typer.Option("--document", help="Approved .xlsx or normalized .json test data.")
+    ],
     scenario_id: Annotated[
         list[str] | None,
         typer.Option("--scenario-id", help="Canonical scenario ID (repeatable)."),
@@ -316,7 +359,10 @@ def ingest_test_data_command(
     from multi_agentic_graph_rag.services.test_data_document_reader import read_document
     from multi_agentic_graph_rag.services.test_data_ingestion import ingest_document
 
+    settings = load_config()
     parsed = read_document(document)
+    if parsed.project != project:
+        raise typer.BadParameter("--project does not match the test-data manifest")
     result = ingest_document(parsed, scenario_ids=set(scenario_id or []))
     payload: dict[str, object] = {
         "status": result.report.status,
@@ -324,11 +370,87 @@ def ingest_test_data_command(
         "issues": [issue.model_dump(mode="json") for issue in result.report.issues],
     }
     if result.normalized is not None:
+        normalized = result.normalized
+        snapshot = TestDataSnapshotRef(
+            snapshot_id=normalized.snapshot_id,
+            project=normalized.project,
+            schema_version=normalized.schema_version,
+            workbook_checksum=normalized.workbook_checksum,
+            normalized_checksum=normalized.checksum,
+            decision_revision=normalized.decision_revision,
+            status="ready",
+        )
+        postgres = CodegenPostgresStore(settings)
+        postgres.ensure_schema()
+        postgres.save_test_data_snapshot(snapshot, normalized.model_dump(mode="json"))
+        graph = CodeGraphStore(settings)
+        graph.ensure_schema()
+        graph.publish_test_data(normalized)
         payload["snapshot_id"] = result.normalized.snapshot_id
         payload["record_count"] = len(result.normalized.records)
         payload["binding_count"] = len(result.normalized.bindings)
     _emit(payload)
     if not result.is_ready:
+        raise typer.Exit(1)
+
+
+@app.command("generate-test-code")
+def generate_test_code_command(
+    project: Annotated[str, typer.Option("--project")],
+    run_id: Annotated[str, typer.Option("--run-id")],
+    framework_path: Annotated[Path, typer.Option("--framework-path")],
+    execution_profile: Annotated[str, typer.Option("--execution-profile")],
+    test_data: Annotated[Path, typer.Option("--test-data")],
+    reasoning_provider: Annotated[
+        str | None,
+        typer.Option(
+            "--reasoning-provider",
+            help="Override the configured Stage-4 reasoning provider.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Perform deterministic readiness checks without model calls or framework writes.",
+        ),
+    ] = False,
+) -> None:
+    """Generate frozen Stage-4 scenarios serially with one explicit provider."""
+    settings = load_config()
+    selected_provider = cast(
+        ReasoningProviderName,
+        reasoning_provider or settings.stage4.reasoning_provider,
+    )
+    try:
+        request = Stage4Request(
+            project_name=project,
+            run_id=run_id,
+            framework_path=framework_path,
+            test_data_document=test_data,
+            execution_profile_id=execution_profile,
+            reasoning_provider=selected_provider,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    result = run_codegen_run(request, settings=settings)
+    _emit(
+        {
+            "status": result.status,
+            "project": result.project_name,
+            "run_id": result.run_id,
+            "thread_id": result.thread_id,
+            "manifest_checksum": result.manifest_checksum,
+            "framework_snapshot_id": result.framework_snapshot_id,
+            "test_data_snapshot_id": result.test_data_snapshot_id,
+            "accepted_tc_ids": list(result.accepted_tc_ids),
+            "blocked_tc_ids": list(result.blocked_tc_ids),
+            "revision_required_tc_ids": list(result.revision_required_tc_ids),
+            "artifact": str(result.artifact_path) if result.artifact_path else None,
+        }
+    )
+    if result.status == "PARTIAL_FAILED":
         raise typer.Exit(1)
 
 

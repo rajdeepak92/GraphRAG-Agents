@@ -120,6 +120,44 @@ def test_reasoning_model_is_loaded_in_fp16_and_moved_to_cuda(
     ]
 
 
+def test_reasoning_model_pins_revision_and_offline_loading_for_both_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_torch = _FakeTorch(cuda_available=False)
+    fake_tokenizer = object()
+    fake_model = _FakeModel()
+    tokenizer_factory = _FakeFactory(fake_tokenizer)
+    model_factory = _FakeFactory(fake_model)
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=tokenizer_factory,
+        AutoModelForCausalLM=model_factory,
+    )
+
+    def fake_import(name: str) -> Any:
+        return fake_torch if name == "torch" else fake_transformers
+
+    monkeypatch.setattr(huggingface, "import_module", fake_import)
+    adapter = huggingface.HuggingFaceReasoningModel(
+        HuggingFaceSettings(
+            device="cpu",
+            reasoning_model="private/reasoning-model",
+            model_revision="pinned-revision",
+            offline=True,
+        )
+    )
+
+    tokenizer, model = adapter._load_components()
+
+    assert tokenizer is fake_tokenizer
+    assert model is fake_model
+    expected_kwargs = {
+        "local_files_only": True,
+        "revision": "pinned-revision",
+    }
+    assert tokenizer_factory.calls == [("private/reasoning-model", expected_kwargs)]
+    assert model_factory.calls == [("private/reasoning-model", expected_kwargs)]
+
+
 def test_quantized_reasoning_model_uses_nf4_without_moving_loaded_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -54,16 +54,35 @@
     "max_hops": 2,
     "token_budget": 6000
   },
+  "stage4": {
+    "framework_allowed_roots": [
+      "."
+    ],
+    "rollback_failed_case": true,
+    "robot_dryrun": true,
+    "model_transport_retries": 1,
+    "max_repair_attempts": 2,
+    "reindex_after_each_case": true,
+    "retain_referenced_snapshots": true,
+    "graphify_command": "graphify",
+    "graphify_no_cluster": true,
+    "context_token_budget": 24000,
+    "symbol_search_limit": 20,
+    "max_context_symbols": 80,
+    "reasoning_provider": "azure_openai"
+  },
   "azure_openai": {
     "endpoint": "",
     "api_key": "",
     "api_version": "2024-10-21",
     "reasoning_deployment": "",
-    "embedding_deployment": ""
+    "embedding_deployment": "",
+    "log_llm_responses": false
   },
   "huggingface": {
     "token": "",
     "reasoning_model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "model_revision": null,
     "embedding_model": "BAAI/bge-m3",
     "reranker_model": "BAAI/bge-reranker-base",
     "offline": false,

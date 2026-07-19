@@ -99,7 +99,7 @@ def _is_code(node: Mapping[str, Any]) -> bool:
 
 
 def _is_file(node: Mapping[str, Any]) -> bool:
-    return str(node.get("label", "")).endswith(".py")
+    return str(node.get("label", "")).lower().endswith((".py", ".robot"))
 
 
 def _sha256(text: bytes) -> str:
@@ -196,7 +196,7 @@ class GraphifyAdapter:
             files[relative_path] = CodeFile(
                 snapshot_id=snapshot_id,
                 relative_path=relative_path,
-                language="python",
+                language="robot" if relative_path.lower().endswith(".robot") else "python",
                 content_hash=_sha256(content.encode("utf-8")),
             )
         return list(files.values())
@@ -217,6 +217,10 @@ class GraphifyAdapter:
                 continue
             relative_path = str(node.get("source_file", "")).replace("\\", "/")
             if relative_path not in known_paths:
+                continue
+            # Robot suites are represented as CodeFile artifacts. Graphify does
+            # not expose a stable Python-style symbol model for them.
+            if relative_path.lower().endswith(".robot"):
                 continue
             label = str(node.get("label", "")).strip()
             if not label:

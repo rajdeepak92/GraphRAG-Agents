@@ -42,9 +42,10 @@ def assemble_manifest(
     sequence: int,
     framework_snapshot_id: str,
     test_data_snapshot_id: str,
-    worktree_tree_hash: str,
     candidates: list[RetrievedItem],
     token_budget: int,
+    filesystem_snapshot_checksum: str | None = None,
+    worktree_tree_hash: str | None = None,
 ) -> ContextManifest:
     """Select items by tier within the token budget and build a checksummed manifest."""
     if token_budget <= 0:
@@ -69,7 +70,8 @@ def assemble_manifest(
         scenario_id=scenario_id,
         framework_snapshot_id=framework_snapshot_id,
         test_data_snapshot_id=test_data_snapshot_id,
-        worktree_tree_hash=worktree_tree_hash,
+        filesystem_snapshot_checksum=filesystem_snapshot_checksum or worktree_tree_hash or "",
+        worktree_tree_hash=(worktree_tree_hash if filesystem_snapshot_checksum is None else None),
         items=selected,
         token_budget=token_budget,
         checksum="",

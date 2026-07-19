@@ -408,6 +408,8 @@ class HuggingFaceReasoningModel:
             dict[str, Any]: The typed result produced by the operation.
         """
         kwargs: dict[str, Any] = {"local_files_only": self.settings.offline}
+        if self.settings.model_revision:
+            kwargs["revision"] = self.settings.model_revision
         if self.settings.token:
             kwargs["token"] = self.settings.token
         return kwargs

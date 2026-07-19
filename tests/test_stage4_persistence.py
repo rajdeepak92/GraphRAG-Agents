@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from multi_agentic_graph_rag.config.config_loader import load_config
 from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.code_graph_store import CodeGraphStore
@@ -15,7 +17,18 @@ from multi_agentic_graph_rag.domain.code_graph_schemas import (
     CodeSymbol,
     FrameworkSnapshot,
 )
-from multi_agentic_graph_rag.domain.codegen_schemas import CodegenBlocker, TestCaseRecord
+from multi_agentic_graph_rag.domain.codegen_schemas import (
+    CodegenBlocker,
+    LogicalTestCaseKey,
+    ProviderFingerprint,
+    Stage4TestCaseRecord,
+    TcStep,
+    canonical_checksum,
+)
+from multi_agentic_graph_rag.domain.identifiers import (
+    make_logical_key_hash,
+    make_provider_fingerprint_hash,
+)
 
 
 def _settings(tmp_path: Path) -> AppSettings:
@@ -32,11 +45,7 @@ def _snapshot() -> FrameworkSnapshot:
         snapshot_id="FWS-1",
         repository_id="repo",
         canonical_path="/repo",
-        branch="main",
-        commit="c" * 40,
-        tree_hash="t" * 40,
-        dirty=False,
-        dirty_hash="clean",
+        filesystem_checksum="sha256:" + "c" * 64,
         extractor_version="graphify-test",
         extractor_config_hash="cfg",
     )
@@ -113,45 +122,78 @@ def test_code_graph_snapshot_isolation(tmp_path: Path) -> None:
     store = CodeGraphStore(_settings(tmp_path))
     store.publish_snapshot(_snapshot(), _result())
     assert store.get_symbol("FWS-OTHER", "SYM-A") is None
-    removed = store.delete_snapshot("FWS-1")
-    assert removed > 0
-    assert store.get_symbol("FWS-1", "SYM-A") is None
+    with pytest.raises(ValueError, match="active READY snapshot"):
+        store.delete_snapshot("FWS-1")
+    assert store.get_symbol("FWS-1", "SYM-A") is not None
 
 
 # --- Codegen store -----------------------------------------------------------
 
 
-def _test_case(revision: int, status: str = "EXECUTABLE") -> TestCaseRecord:
-    return TestCaseRecord(
-        test_case_id="TC-1",
-        test_case_revision=revision,
+def _logical_key() -> LogicalTestCaseKey:
+    logical_key_hash = make_logical_key_hash(
+        project_name="alpha",
         scenario_id="TS-1",
-        test_name="test_start",
-        test_file="tests/test_start.py",
-        test_function="test_start",
         execution_profile_id="PROFILE-1",
-        scenario_data_binding_id="BND-1",
-        resolved_test_data_bundle_id="TDB-1",
-        resolved_test_data_bundle_checksum="sha256:x",
-        priority="High",
-        validation_status=status,
-        context_manifest_id="CTX-1",
-        generation_model="claude-opus-4-8",
-        prompt_revision="v1",
+        variant_id="default",
+    )
+    return LogicalTestCaseKey(
+        project_name="alpha",
+        scenario_id="TS-1",
+        execution_profile_id="PROFILE-1",
+        variant_id="default",
+        logical_key_hash=logical_key_hash,
     )
 
 
-def test_codegen_store_rebuilds_latest_test_case_revision(tmp_path: Path) -> None:
+def _test_case() -> Stage4TestCaseRecord:
+    key = _logical_key()
+    parameters = {"temperature": 0.0}
+    fingerprint = ProviderFingerprint(
+        provider="azure_openai",
+        model="deployment",
+        generation_params=parameters,
+        prompt_revision="stage4-v1",
+        fingerprint_hash=make_provider_fingerprint_hash(
+            provider="azure_openai",
+            model="deployment",
+            model_revision=None,
+            generation_params_checksum=canonical_checksum({"params": parameters}),
+            prompt_revision="stage4-v1",
+        ),
+    )
+    digest = "sha256:" + "a" * 64
+    return Stage4TestCaseRecord(
+        tc_id=100001,
+        **key.model_dump(),
+        status="ACCEPTED",
+        tc_steps=[TcStep(step=1, description="Start")],
+        module="network",
+        test_file="tests/network/Tc100001Start.py",
+        robot_file="tests_robot/network/Tc100001Start.robot",
+        generated_file_hashes={
+            "tests/network/Tc100001Start.py": digest,
+            "tests_robot/network/Tc100001Start.robot": digest,
+        },
+        framework_snapshot_id="FWS-1",
+        test_data_snapshot_id="TDS-1",
+        provider_fingerprint=fingerprint,
+        prompt_revision="stage4-v1",
+        input_fingerprint="sha256:input",
+    )
+
+
+def test_codegen_store_rebuilds_run_scoped_accepted_cases(tmp_path: Path) -> None:
     store = CodegenPostgresStore(_settings(tmp_path))
     store.ensure_schema()
-    store.save_test_case("alpha", _test_case(1, status="COLLECTABLE"))
-    store.save_test_case("alpha", _test_case(2, status="EXECUTABLE"))
+    store.mirror_tc_reservation(100001, _logical_key())
+    store.save_stage4_test_case(_test_case(), run_id="RUN-1")
 
     artifact = store.rebuild_test_cases_artifact("alpha", "RUN-1")
     assert artifact.artifact_schema_version == "1.0-test-cases"
     assert len(artifact.test_cases) == 1
-    assert artifact.test_cases[0].test_case_revision == 2
-    assert artifact.test_cases[0].validation_status == "EXECUTABLE"
+    assert artifact.test_cases[0].tc_id == 100001
+    assert artifact.test_cases[0].status == "ACCEPTED"
 
 
 def test_codegen_store_persists_blocker(tmp_path: Path) -> None:
@@ -163,7 +205,9 @@ def test_codegen_store_persists_blocker(tmp_path: Path) -> None:
         blocker_type="BLOCKED_MISSING_DATA",
         evidence="no approved binding",
     )
-    store.save_blocker("alpha", blocker)
+    store.save_blocker("alpha", blocker, run_id="RUN-1")
+    artifact = store.rebuild_test_cases_artifact("alpha", "RUN-1")
+    assert [item.blocker_id for item in artifact.blockers] == ["BLK-1"]
     # A separate project sees no test cases.
     empty = store.rebuild_test_cases_artifact("beta", "RUN-1")
     assert empty.test_cases == []

@@ -1,74 +1,125 @@
-"""Deterministic framework snapshot identity from Git provenance (plan §7.1-7.2).
+"""Deterministic Stage-4 framework identity from filesystem content only.
 
-The snapshot identity is derived from repository identity, the Git tree/dirty
-hashes, and the extractor version/config so that an identical revision produces
-an identical ``snapshot_id`` shareable across projects (plan §6.1, §23.1).
+The coding workflow is intentionally independent of repository metadata.  A
+snapshot is identified by the sorted set of normalized relative paths and the
+SHA-256 of each file.  Tool-owned indexes, orchestration artifacts, caches, and
+logs are excluded so publishing a KG does not change the framework identity it
+is publishing.
 """
 
 from __future__ import annotations
 
 import hashlib
-import subprocess
+import os
+from collections.abc import Iterable
 from pathlib import Path
 
 from multi_agentic_graph_rag.domain.code_graph_schemas import FrameworkSnapshot
 from multi_agentic_graph_rag.domain.identifiers import make_framework_snapshot_id, stable_token
 
+_EXCLUDED_DIRS = frozenset(
+    {
+        ".git",
+        ".global_cache",
+        ".graphify_python",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        ".vscode",
+        "__pycache__",
+        "generated",
+        "graphify-out",
+        "logs",
+        "node_modules",
+        "runtime",
+        "venv",
+    }
+)
+_EXCLUDED_SUFFIXES = frozenset({".log", ".pyc", ".pyo", ".tmp"})
+
 
 class FrameworkPathError(ValueError):
-    """Raised when a framework path is outside the allowed roots or unsafe."""
-
-
-class GitError(RuntimeError):
-    """Raised when Git provenance cannot be established."""
-
-
-def _run_git(repository_root: Path, *args: str) -> str:
-    """Run a read-only Git command inside the repository and return stdout."""
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(repository_root), *args],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
-        )
-    except FileNotFoundError as exc:  # pragma: no cover - environment dependent
-        raise GitError("git executable not found") from exc
-    except subprocess.CalledProcessError as exc:
-        raise GitError(f"git {' '.join(args)} failed: {exc.stderr.strip()}") from exc
-    except subprocess.TimeoutExpired as exc:  # pragma: no cover - timing dependent
-        raise GitError(f"git {' '.join(args)} timed out") from exc
-    return completed.stdout.strip()
+    """The framework path is unsafe or outside the configured roots."""
 
 
 def validate_framework_path(framework_path: Path, allowed_roots: list[Path]) -> Path:
-    """Resolve the path and reject traversal / symlink escapes (plan §7.2 steps 1-2)."""
+    """Resolve the path and reject traversal or symlink escapes."""
     if not allowed_roots:
         raise FrameworkPathError("no allowed roots configured for framework indexing")
-    resolved = framework_path.resolve()
-    if not resolved.exists():
-        raise FrameworkPathError(f"framework path does not exist: {resolved}")
+    resolved = framework_path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise FrameworkPathError(f"framework path is not a directory: {resolved}")
     for root in allowed_roots:
-        root_resolved = root.resolve()
+        root_resolved = root.resolve(strict=True)
         if resolved == root_resolved or root_resolved in resolved.parents:
             return resolved
     raise FrameworkPathError(f"framework path {resolved} is outside the allowed roots")
 
 
-def _repository_root(framework_path: Path) -> Path:
-    top = _run_git(framework_path, "rev-parse", "--show-toplevel")
-    return Path(top).resolve()
+def filesystem_tree_entries(
+    framework_root: Path,
+    *,
+    extra_excluded_dirs: Iterable[str] = (),
+) -> list[tuple[str, str]]:
+    """Return sorted ``(relative_path, sha256)`` entries for snapshot content."""
+    root = framework_root.resolve(strict=True)
+    excluded_dirs = _EXCLUDED_DIRS | frozenset(extra_excluded_dirs)
+    entries: list[tuple[str, str]] = []
+    casefolded: dict[str, str] = {}
+
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for directory in directories:
+            candidate = current_path / directory
+            if candidate.is_symlink():
+                resolved = candidate.resolve(strict=True)
+                if resolved != root and root not in resolved.parents:
+                    raise FrameworkPathError(
+                        f"framework directory symlink escapes root: {candidate}"
+                    )
+        directories[:] = sorted(
+            directory
+            for directory in directories
+            if directory not in excluded_dirs and not (current_path / directory).is_symlink()
+        )
+        for filename in sorted(filenames):
+            path = current_path / filename
+            if path.suffix.lower() in _EXCLUDED_SUFFIXES:
+                continue
+            if path.is_symlink():
+                resolved = path.resolve(strict=True)
+                if resolved != root and root not in resolved.parents:
+                    raise FrameworkPathError(f"framework symlink escapes root: {path}")
+            relative = path.relative_to(root).as_posix()
+            folded = relative.casefold()
+            prior = casefolded.get(folded)
+            if prior is not None and prior != relative:
+                raise FrameworkPathError(
+                    f"case-normalization collision between {prior!r} and {relative!r}"
+                )
+            casefolded[folded] = relative
+            digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            entries.append((relative, digest))
+    return sorted(entries, key=lambda row: row[0])
 
 
-def compute_dirty_hash(repository_root: Path) -> tuple[bool, str]:
-    """Return dirty status and a stable hash of the working-tree overlay (plan §6.1)."""
-    porcelain = _run_git(repository_root, "status", "--porcelain")
-    diff = _run_git(repository_root, "diff", "--no-color")
-    dirty = bool(porcelain.strip())
-    payload = f"{porcelain}\n---\n{diff}"
-    dirty_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return dirty, dirty_hash
+def compute_filesystem_checksum(
+    framework_root: Path,
+    *,
+    extra_excluded_dirs: Iterable[str] = (),
+) -> str:
+    """Hash normalized paths and per-file hashes into one stable tree identity."""
+    hasher = hashlib.sha256()
+    for relative, digest in filesystem_tree_entries(
+        framework_root, extra_excluded_dirs=extra_excluded_dirs
+    ):
+        hasher.update(relative.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(digest.encode("ascii"))
+        hasher.update(b"\n")
+    return "sha256:" + hasher.hexdigest()
 
 
 def compute_framework_snapshot(
@@ -78,46 +129,39 @@ def compute_framework_snapshot(
     extractor_version: str,
     extractor_config: dict[str, object] | None = None,
     repository_id: str | None = None,
+    test_data_snapshot_id: str | None = None,
 ) -> FrameworkSnapshot:
-    """Build an immutable framework snapshot identity for a pinned revision."""
+    """Build a BUILDING snapshot without reading or invoking repository tools."""
     validated = validate_framework_path(framework_path, allowed_roots)
-    repository_root = _repository_root(validated)
-    branch = _run_git(repository_root, "rev-parse", "--abbrev-ref", "HEAD")
-    commit = _run_git(repository_root, "rev-parse", "HEAD")
-    tree_hash = _run_git(repository_root, "rev-parse", "HEAD^{tree}")
-    dirty, dirty_hash = compute_dirty_hash(repository_root)
+    filesystem_checksum = compute_filesystem_checksum(validated)
     config = extractor_config or {}
     extractor_config_hash = stable_token(
-        *(f"{key}={config[key]}" for key in sorted(config)),
-        length=24,
+        *(f"{key}={config[key]}" for key in sorted(config)), length=24
     )
-    resolved_repository_id = repository_id or stable_token(str(repository_root), length=16)
+    resolved_repository_id = repository_id or stable_token(str(validated), length=16)
     snapshot_id = make_framework_snapshot_id(
         repository_id=resolved_repository_id,
-        tree_hash=tree_hash,
-        dirty_hash=dirty_hash if dirty else "clean",
+        filesystem_checksum=filesystem_checksum,
         extractor_version=extractor_version,
         extractor_config_hash=extractor_config_hash,
     )
     return FrameworkSnapshot(
         snapshot_id=snapshot_id,
         repository_id=resolved_repository_id,
-        canonical_path=str(repository_root),
-        branch=branch,
-        commit=commit,
-        tree_hash=tree_hash,
-        dirty=dirty,
-        dirty_hash=dirty_hash if dirty else "clean",
+        canonical_path=str(validated),
+        filesystem_checksum=filesystem_checksum,
         extractor_version=extractor_version,
         extractor_config_hash=extractor_config_hash,
+        test_data_snapshot_id=test_data_snapshot_id,
         status="building",
+        active=False,
     )
 
 
 __all__ = [
     "FrameworkPathError",
-    "GitError",
-    "compute_dirty_hash",
+    "compute_filesystem_checksum",
     "compute_framework_snapshot",
+    "filesystem_tree_entries",
     "validate_framework_path",
 ]

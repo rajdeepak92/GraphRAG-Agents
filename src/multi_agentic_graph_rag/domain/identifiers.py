@@ -123,16 +123,19 @@ def new_test_case_id() -> str:
 def make_framework_snapshot_id(
     *,
     repository_id: str,
-    tree_hash: str,
-    dirty_hash: str,
+    filesystem_checksum: str,
     extractor_version: str,
     extractor_config_hash: str,
 ) -> str:
-    """Build a deterministic framework snapshot identity shareable across projects."""
+    """Build a deterministic filesystem-derived framework snapshot identity.
+
+    Stage 4 deliberately excludes Git metadata.  The normalized filesystem
+    checksum is the complete code-content identity used for replay and KG
+    publication.
+    """
     return "FWS-" + stable_token(
         repository_id,
-        tree_hash,
-        dirty_hash,
+        filesystem_checksum,
         extractor_version,
         extractor_config_hash,
         length=24,
@@ -258,7 +261,82 @@ def make_test_data_record_id(
     return "TDR-" + stable_token(snapshot_id, record_type, natural_key, length=22)
 
 
+# --- Stage 4: permanent six-digit TC identity (plan §8) ----------------------
+
+TC_ID_MIN = 100001
+TC_ID_MAX = 999999
+_TITLE_WORD = re.compile(r"[A-Za-z0-9]+")
+
+
+def make_logical_key_hash(
+    *,
+    project_name: str,
+    scenario_id: str,
+    execution_profile_id: str,
+    variant_id: str,
+) -> str:
+    """Hash the canonical logical test-case key (project+scenario+profile+variant).
+
+    ``variant_id`` is deterministic Stage-3 input, never LLM prose. This hash
+    backs the second uniqueness constraint on the reservation table (plan §8.1).
+    """
+    return "LKH-" + stable_token(
+        normalize_project(project_name),
+        scenario_id,
+        execution_profile_id,
+        variant_id or "default",
+        length=32,
+    )
+
+
+def pascal_title(title: str) -> str:
+    """Convert a free-text scenario title to a PascalCase identifier fragment.
+
+    ``"Validate Temperature Sensor Threshold"`` -> ``"ValidateTemperatureSensorThreshold"``.
+    Guaranteed to start with a letter so it is a legal Python identifier suffix.
+    """
+    words = _TITLE_WORD.findall(title)
+    pascal = "".join(word[:1].upper() + word[1:] for word in words)
+    if not pascal:
+        pascal = "TestCase"
+    if pascal[0].isdigit():
+        pascal = "N" + pascal
+    return pascal
+
+
+def tc_stem(tc_id: int, title: str) -> str:
+    """Build the exact ``Tc<6-digit-id><PascalTitle>`` stem shared by module + class.
+
+    The Python filename stem, the class name, and the Robot library import must
+    all match this exact string (plan §8.3, §12).
+    """
+    if not TC_ID_MIN <= tc_id <= TC_ID_MAX:
+        raise ValueError(f"tc_id {tc_id} outside {TC_ID_MIN}..{TC_ID_MAX}")
+    return f"Tc{tc_id}{pascal_title(title)}"
+
+
+def make_provider_fingerprint_hash(
+    *,
+    provider: str,
+    model: str,
+    model_revision: str | None,
+    generation_params_checksum: str,
+    prompt_revision: str,
+) -> str:
+    """Hash the pinned provider fingerprint; every resume must match it (plan §9.3)."""
+    return "PFP-" + stable_token(
+        provider,
+        model,
+        model_revision or "",
+        generation_params_checksum,
+        prompt_revision,
+        length=28,
+    )
+
+
 __all__ = [
+    "TC_ID_MAX",
+    "TC_ID_MIN",
     "make_capability_binding_id",
     "make_checkpoint_thread_id",
     "make_chunk_id",
@@ -269,6 +347,8 @@ __all__ = [
     "make_entity_id",
     "make_evidence_id",
     "make_framework_snapshot_id",
+    "make_logical_key_hash",
+    "make_provider_fingerprint_hash",
     "make_relationship_id",
     "make_resolved_bundle_id",
     "make_scenario_data_binding_id",
@@ -282,5 +362,7 @@ __all__ = [
     "new_story_id",
     "new_test_case_id",
     "normalize_project",
+    "pascal_title",
     "stable_token",
+    "tc_stem",
 ]

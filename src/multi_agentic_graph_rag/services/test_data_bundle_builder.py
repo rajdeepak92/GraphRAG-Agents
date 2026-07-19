@@ -48,11 +48,55 @@ def _resolve(
 
 def _secret_refs(records: list[TestDataRecord]) -> list[str]:
     refs: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str) and value.startswith("secret://"):
+            if value not in refs:
+                refs.append(value)
+        elif isinstance(value, dict):
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
     for record in records:
-        value = record.payload.get("secret_ref")
-        if isinstance(value, str) and value.startswith("secret://") and value not in refs:
-            refs.append(value)
+        walk(record.payload)
     return refs
+
+
+def _referenced_records(
+    binding: ScenarioDataBinding, index: dict[str, TestDataRecord]
+) -> list[TestDataRecord]:
+    """Resolve the transitive record closure without inventing relationships."""
+    seeds = [
+        binding.execution_profile_id,
+        binding.fixture_id,
+        binding.cleanup_id,
+        *binding.oracle_ids,
+        *binding.test_vector_ids,
+        *binding.fault_profile_ids,
+        *binding.safety_rule_ids,
+    ]
+    for optional in (binding.action_sequence_id, binding.timing_policy_id):
+        if optional:
+            seeds.append(optional)
+    ordered: list[TestDataRecord] = []
+    pending = list(dict.fromkeys(seeds))
+    seen: set[str] = set()
+    while pending:
+        record_id = pending.pop(0)
+        if record_id in seen:
+            continue
+        record = _resolve(record_id, index, binding_id=binding.binding_id)
+        seen.add(record_id)
+        ordered.append(record)
+        for key, value in record.payload.items():
+            if key.endswith("_id") and isinstance(value, str) and value in index:
+                pending.append(value)
+            elif key.endswith("_ids") and isinstance(value, list):
+                pending.extend(str(item) for item in value if str(item) in index)
+    return ordered
 
 
 def _action_steps(
@@ -114,9 +158,7 @@ def build_bundle(
     ]
     action_steps = _action_steps(binding, index)
 
-    resolved_records = [profile, fixture, cleanup, *oracle_records, *vector_records]
-    if timing is not None:
-        resolved_records.append(timing)
+    resolved_records = _referenced_records(binding, index)
     provenance = [
         {
             "record_id": record.record_id,
@@ -140,9 +182,21 @@ def build_bundle(
         binding_id=binding.binding_id,
         snapshot_id=normalized.snapshot_id,
         execution_profile=RecordRef(record_id=profile.record_id),
-        resources=[],
-        endpoints=[],
-        interface_profiles=[],
+        resources=[
+            RecordRef(record_id=record.record_id)
+            for record in resolved_records
+            if record.record_type == "Resource"
+        ],
+        endpoints=[
+            RecordRef(record_id=record.record_id)
+            for record in resolved_records
+            if record.record_type == "Endpoint"
+        ],
+        interface_profiles=[
+            RecordRef(record_id=record.record_id)
+            for record in resolved_records
+            if record.record_type == "InterfaceProfile"
+        ],
         fixture=RecordRef(record_id=fixture.record_id),
         action_steps=action_steps,
         vectors=vectors,
@@ -152,6 +206,9 @@ def build_bundle(
         safety_rules=list(binding.safety_rule_ids),
         secret_refs=_secret_refs(resolved_records),
         source_provenance=provenance,
+        resolved_records={
+            record.record_id: record.model_dump(mode="json") for record in resolved_records
+        },
         checksum="",
     )
     return ResolvedScenarioTestDataBundle.model_validate(

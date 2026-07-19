@@ -48,6 +48,10 @@ local-llm = [
     "torch>=2.12.1",
     "transformers>=5.12.1",
 ]
+stage4 = [
+    "openpyxl>=3.1.5",
+    "robotframework>=7.1.1",
+]
 [build-system]
 requires = ["hatchling>=1.26,<2"]
 build-backend = "hatchling.build"
@@ -63,7 +67,7 @@ line-length = 100
 src = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["sentence_transformers", "sentence_transformers.*"]
+module = ["sentence_transformers", "sentence_transformers.*", "openpyxl", "openpyxl.*"]
 ignore_missing_imports = true
 
 [tool.ruff.lint]

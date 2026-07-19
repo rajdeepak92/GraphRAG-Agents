@@ -21,6 +21,7 @@ class BindingResolution:
 
     scenario_id: str
     execution_profile_id: str
+    variant_id: str
     status: ReadinessStatus
     binding: ScenarioDataBinding | None = None
     candidates: tuple[str, ...] = ()
@@ -34,6 +35,7 @@ def resolve_binding(
     *,
     scenario_id: str,
     execution_profile_id: str,
+    variant_id: str = "default",
     bindings: list[ScenarioDataBinding],
 ) -> BindingResolution:
     """Select exactly one applicable approved binding or return a precise blocker."""
@@ -42,36 +44,43 @@ def resolve_binding(
         for binding in bindings
         if binding.scenario_id == scenario_id
         and binding.execution_profile_id == execution_profile_id
+        and binding.variant_id == variant_id
         and binding.approval_status == "APPROVED"
     ]
     if not applicable:
         return BindingResolution(
             scenario_id=scenario_id,
             execution_profile_id=execution_profile_id,
+            variant_id=variant_id,
             status="BLOCKED_MISSING_DATA",
         )
     if len(applicable) == 1:
-        return _ready(scenario_id, execution_profile_id, applicable[0])
+        return _ready(scenario_id, execution_profile_id, variant_id, applicable[0])
 
     # More than one candidate: an explicit highest priority resolves the choice.
     highest = max(binding.selection_priority for binding in applicable)
     top = [binding for binding in applicable if binding.selection_priority == highest]
     if len(top) == 1:
-        return _ready(scenario_id, execution_profile_id, top[0])
+        return _ready(scenario_id, execution_profile_id, variant_id, top[0])
     return BindingResolution(
         scenario_id=scenario_id,
         execution_profile_id=execution_profile_id,
+        variant_id=variant_id,
         status="BLOCKED_AMBIGUOUS_BINDING",
         candidates=tuple(sorted(binding.binding_id for binding in top)),
     )
 
 
 def _ready(
-    scenario_id: str, execution_profile_id: str, binding: ScenarioDataBinding
+    scenario_id: str,
+    execution_profile_id: str,
+    variant_id: str,
+    binding: ScenarioDataBinding,
 ) -> BindingResolution:
     return BindingResolution(
         scenario_id=scenario_id,
         execution_profile_id=execution_profile_id,
+        variant_id=variant_id,
         status="READY",
         binding=binding,
         candidates=(binding.binding_id,),

@@ -40,6 +40,28 @@ def _scan_placeholders(payload: dict[str, Any]) -> list[str]:
     return found
 
 
+def _scan_invalid_secrets(payload: dict[str, Any]) -> list[str]:
+    invalid: list[str] = []
+    secret_keys = ("secret", "password", "credential", "api_key", "token")
+
+    def walk(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                walk(child, str(child_key).casefold())
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, key)
+        elif (
+            any(part in key for part in secret_keys)
+            and value not in (None, "")
+            and (not isinstance(value, str) or not value.startswith("secret://"))
+        ):
+            invalid.append(key)
+
+    walk(payload)
+    return invalid
+
+
 def validate_test_data(
     *,
     project: str,
@@ -77,6 +99,20 @@ def validate_test_data(
                     issue_code="SEMANTIC_PLACEHOLDER_VALUE",
                     severity="ERROR",
                     message=f"record '{record.record_id}' contains placeholder value '{token}'",
+                    record_id=record.record_id,
+                    sheet=record.source_sheet,
+                    row=record.source_row,
+                )
+            )
+        for key in _scan_invalid_secrets(record.payload):
+            issues.append(
+                ValidationIssue(
+                    issue_code="SEMANTIC_PLAINTEXT_SECRET",
+                    severity="ERROR",
+                    message=(
+                        f"record '{record.record_id}' field '{key}' must contain a "
+                        "secret:// reference"
+                    ),
                     record_id=record.record_id,
                     sheet=record.source_sheet,
                     row=record.source_row,
@@ -179,6 +215,38 @@ def _validate_binding_references(
                 binding=binding,
                 record_id=vector_id,
                 expected_type="TestVector",
+                by_id=by_id,
+                issues=issues,
+            )
+        if binding.action_sequence_id:
+            _check_ref(
+                binding=binding,
+                record_id=binding.action_sequence_id,
+                expected_type="Action",
+                by_id=by_id,
+                issues=issues,
+            )
+        if binding.timing_policy_id:
+            _check_ref(
+                binding=binding,
+                record_id=binding.timing_policy_id,
+                expected_type="TimingPolicy",
+                by_id=by_id,
+                issues=issues,
+            )
+        for fault_id in binding.fault_profile_ids:
+            _check_ref(
+                binding=binding,
+                record_id=fault_id,
+                expected_type="FaultProfile",
+                by_id=by_id,
+                issues=issues,
+            )
+        for safety_id in binding.safety_rule_ids:
+            _check_ref(
+                binding=binding,
+                record_id=safety_id,
+                expected_type="SafetyRule",
                 by_id=by_id,
                 issues=issues,
             )

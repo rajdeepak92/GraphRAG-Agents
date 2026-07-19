@@ -15,7 +15,7 @@ from pydantic import Field, model_validator
 
 from multi_agentic_graph_rag.domain.schemas import StrictModel
 
-CodeLanguage = Literal["python"]
+CodeLanguage = Literal["python", "robot"]
 
 # Structural symbol kinds. Specialized labels layered on CodeSymbol (plan §6.2).
 SymbolKind = Literal[
@@ -158,20 +158,23 @@ class CodeExtractionResult(StrictModel):
 
 
 class FrameworkSnapshot(StrictModel):
-    """Immutable framework snapshot identity plus its Git provenance (plan §6.2)."""
+    """Immutable filesystem-derived framework snapshot (masterplan §15.1).
+
+    Stage 4 never reads Git state. ``filesystem_checksum`` is a deterministic
+    hash over normalized relative paths and file hashes, and ``active`` is set
+    only after the BUILDING snapshot has passed changed-file verification.
+    """
 
     snapshot_id: str
     repository_id: str
     canonical_path: str
-    branch: str
-    commit: str
-    tree_hash: str
-    dirty: bool
-    dirty_hash: str
+    filesystem_checksum: str
     extractor_version: str
     extractor_config_hash: str
+    test_data_snapshot_id: str | None = None
     language: CodeLanguage = "python"
     status: Literal["building", "ready", "failed"] = "building"
+    active: bool = False
 
 
 __all__ = [

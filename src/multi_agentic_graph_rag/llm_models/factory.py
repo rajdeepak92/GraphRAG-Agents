@@ -20,6 +20,50 @@ from multi_agentic_graph_rag.llm_models.huggingface import (
 from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel, ReasoningModel, RerankerModel
 
 
+def create_stage4_reasoning_model(
+    settings: AppSettings,
+    *,
+    provider: str,
+    logger: Any | None = None,
+    run_dir: Path | None = None,
+) -> ReasoningModel:
+    """Create only the explicitly selected Stage-4 reasoning provider.
+
+    Configuration belonging to the other provider is deliberately neither
+    inspected nor initialized. SDK retries remain disabled in the provider
+    adapters, leaving the Stage-4 producer as the single two-attempt authority.
+    """
+    if provider == "azure_openai":
+        azure = settings.azure_openai
+        if not azure.endpoint:
+            raise ConfigurationError("azure_openai Stage 4 mode requires an Azure endpoint")
+        if not azure.api_key:
+            raise ConfigurationError("azure_openai Stage 4 mode requires Azure authentication")
+        if not azure.reasoning_deployment:
+            raise ConfigurationError("azure_openai Stage 4 mode requires a reasoning deployment")
+        if find_spec("openai") is None:
+            raise ConfigurationError("azure_openai Stage 4 mode requires the 'azure' project extra")
+        return AzureOpenAIReasoningModel(
+            azure,
+            discovery_batch_size=1,
+            log_llm_responses=bool(getattr(azure, "log_llm_responses", False)),
+            logger=logger,
+            run_dir=run_dir,
+        )
+    if provider == "huggingface":
+        huggingface = settings.huggingface
+        if not huggingface.reasoning_model:
+            raise ConfigurationError(
+                "huggingface Stage 4 mode requires an explicitly configured private model"
+            )
+        if find_spec("transformers") is None:
+            raise ConfigurationError(
+                "huggingface Stage 4 mode requires the 'local-llm' project extra"
+            )
+        return HuggingFaceReasoningModel(huggingface, logger=logger, run_dir=run_dir)
+    raise ConfigurationError(f"Unsupported Stage 4 reasoning provider: {provider}")
+
+
 def create_reasoning_model(
     settings: AppSettings,
     *,

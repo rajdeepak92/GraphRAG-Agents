@@ -101,6 +101,7 @@ class ScenarioDataBinding(StrictModel):
     binding_id: str
     scenario_id: str
     execution_profile_id: str
+    variant_id: str = "default"
     fixture_id: str
     action_sequence_id: str | None = None
     test_vector_ids: list[str] = Field(default_factory=list)

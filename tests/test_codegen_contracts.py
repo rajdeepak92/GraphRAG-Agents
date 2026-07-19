@@ -58,15 +58,14 @@ def _bundle(**overrides: Any) -> ResolvedScenarioTestDataBundle:
 def test_snapshot_ids_are_deterministic_and_shareable() -> None:
     kwargs = {
         "repository_id": "svc",
-        "tree_hash": "abc",
-        "dirty_hash": "clean",
+        "filesystem_checksum": "sha256:abc",
         "extractor_version": "graphify-8",
         "extractor_config_hash": "cfg",
     }
     first = make_framework_snapshot_id(**kwargs)
     assert first == make_framework_snapshot_id(**kwargs)
     assert first.startswith("FWS-")
-    assert first != make_framework_snapshot_id(**{**kwargs, "tree_hash": "def"})
+    assert first != make_framework_snapshot_id(**{**kwargs, "filesystem_checksum": "sha256:def"})
 
 
 def test_test_data_snapshot_id_is_project_scoped() -> None:
@@ -243,7 +242,8 @@ def test_test_cases_artifact_checksum_roundtrip() -> None:
         TestCasesArtifact,
         project="alpha",
         run_id="RUN-1",
-        test_cases=[_test_case()],
+        test_cases=[],
+        blockers=[],
     )
     assert artifact.artifact_schema_version == "1.0-test-cases"
     assert artifact.checksum == canonical_checksum(artifact)

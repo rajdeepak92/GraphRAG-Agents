@@ -211,7 +211,7 @@ def _build_manifest(
         sequence=request.sequence,
         framework_snapshot_id=request.framework_snapshot.snapshot_id,
         test_data_snapshot_id=request.normalized.snapshot_id,
-        worktree_tree_hash=request.worktree_tree_hash or request.framework_snapshot.tree_hash,
+        filesystem_snapshot_checksum=request.framework_snapshot.filesystem_checksum,
         candidates=items,
         token_budget=request.token_budget,
     )

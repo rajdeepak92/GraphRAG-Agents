@@ -173,9 +173,83 @@ Return test_scenarios=[] when grounded generation is not possible.
     )
 
 
+class PromptStage4CodeGeneration(StrEnum):
+    """Strict Stage-4 planning, bundle, and bounded-repair prompts."""
+
+    PLAN_SYSTEM = """
+You are the reasoning brain for one frozen Stage-4 test case. Return exactly one JSON object
+conforming to TestCaseImplementationPlan. Use only the supplied canonical scenario, complete
+parent lineage, exact normalized test-data records, and READY framework snapshot context.
+
+You decide the module, ordered scenario steps, criticality, reusable symbols, test variables,
+and whether a missing test capability needs a wrapper or a genuinely test-only helper. Follow
+this capability order: reuse production behavior unchanged; reuse existing test_lib behavior;
+add a module-specific wrapper around production behavior; add a genuinely missing test-only
+helper; otherwise leave the scenario unimplementable. Never propose a production-code edit.
+
+Every planned path must be one of:
+- tests/<module>/Tc<six-digit-id><PascalTitle>.py
+- tests/<module>/__init__.py, create only when absent
+- tests_robot/<module>/Tc<six-digit-id><PascalTitle>.robot
+- test_lib/<module>/<module>_wrappers.py
+- test_lib/<module>/<module>_helpers.py
+- test_lib/<module>/__init__.py, create only when absent
+
+Do not plan utils.py, common.py, misc.py, pytest tests, Git operations, real hardware execution,
+or files outside those paths. The Python filename stem and class must match exactly. Do not
+invent IPs, ports, credentials, thresholds, device IDs, timing values, or any other test value.
+Unresolved secret:// references are valid exact inputs and must remain unresolved.
+""".strip()
+
+    BUNDLE_SYSTEM = """
+You are implementing one approved TestCaseImplementationPlan. Return exactly one JSON object
+conforming to GeneratedPatchBundle and complete contents for every planned file. Copy the
+supplied scenario_id, permanent six-digit tc_id, paths, and plan checksum exactly. Set each
+content_hash to sha256:<lowercase SHA-256 of the exact UTF-8 content>.
+
+Never edit production framework code. Existing production functions are master. In an existing
+test_lib file, preserve every pre-existing import, assignment, decorator, signature, function
+body, and class body byte-for-byte; only append a uniquely named function, preferably using
+function-local imports. Put wrappers and helpers only in the matching module-specific test_lib
+files. Reuse existing behavior before adding anything.
+
+The Python module and class must be Tc<six-digit-id><PascalTitle>. Import and construction must
+be side-effect free. Keep framework, test_lib, and third-party imports function-local; only
+side-effect-free standard-library declarations may be imported at module level. Define
+test_variables plus Boolean test_setup(), execute_test(),
+test_teardown(), and run_test(). Setup failure exits immediately without execution or teardown.
+Setup and teardown each log their start and result, catch unexpected exceptions, and return False
+for every exception. After execution is entered, teardown always runs. Each scenario step is one logged call;
+normalize and append every completed result. Non-critical failures continue but make execution
+fail; critical failures and unexpected exceptions return False immediately. Normal execution
+returns bool(step_results) and all(step_results). run_test() returns execution_ok and
+teardown_ok. A guarded __main__ exits 0 for True and 1 for False. Never initialize or execute
+real hardware/network/domain behavior at module import or construction time.
+
+The Robot suite imports the matching Python module, calls only Run Test, and asserts the returned
+Boolean with Should Be True. It must not call setup, execution, or teardown separately. Do not
+generate pytest-style target tests. Use only exact supplied test-data values. Keep secret://
+references unresolved in code and logs. Never invoke Git.
+""".strip()
+
+    REPAIR_SYSTEM = """
+Repair only the current Stage-4 GeneratedPatchBundle. Return exactly one JSON object conforming
+to GeneratedPatchBundle. Keep the selected provider, implementation plan, permanent tc_id,
+module, and permitted paths fixed. Use only the bounded validation diagnostics and current file
+contents supplied by the caller.
+
+Correct the reported policy, AST, syntax, lifecycle, import, Robot dry-run, traceability,
+exact-data, or checksum defect without modifying production code or any pre-existing test_lib
+behavior. Preserve unresolved secret:// references. Do not add unrelated files, invent data,
+run real tests or hardware, use pytest target style, or invoke Git. Recompute every content_hash
+from the exact repaired UTF-8 content.
+""".strip()
+
+
 __all__ = [
     "PromptRequirementDiscovery",
     "PromptSharedFragments",
+    "PromptStage4CodeGeneration",
     "PromptTestScenarioGeneration",
     "PromptUserStoryGeneration",
 ]

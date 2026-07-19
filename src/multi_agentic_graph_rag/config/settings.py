@@ -9,6 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 HuggingFaceDevice = Literal["auto", "cpu", "cuda"]
 HuggingFaceQuantization = Literal["none", "bitsandbytes_4bit"]
+Stage4ReasoningProvider = Literal["azure_openai", "huggingface"]
+
+_STAGE4_WRITE_ALLOWLIST = (
+    "tests/<module>/Tc<id><PascalTitle>.py",
+    "tests/<module>/__init__.py",
+    "tests_robot/<module>/Tc<id><PascalTitle>.robot",
+    "test_lib/<module>/<module>_wrappers.py",
+    "test_lib/<module>/<module>_helpers.py",
+    "test_lib/<module>/__init__.py",
+)
 
 
 class ModelSection(BaseModel):
@@ -82,17 +92,27 @@ class ChromaSettings(BaseModel):
 
 
 class Stage4Settings(BaseModel):
-    """Stage-4 test-code generation controls (plan §15, §25)."""
+    """Optimized no-Git Stage-4 test-code generation controls."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
     code_graph_local_path: Path = Path("runtime/staging/code_graph.jsonl")
     test_data_local_path: Path = Path("runtime/staging/test_data.jsonl")
     codegen_local_path: Path = Path("runtime/staging/codegen_records.jsonl")
-    worktrees_dir: Path = Path("runtime/worktrees")
     framework_allowed_roots: list[Path] = Field(default_factory=list)
+    write_allowlist: list[str] = Field(default_factory=lambda: list(_STAGE4_WRITE_ALLOWLIST))
+    rollback_failed_case: Literal[True] = True
+    robot_dryrun: Literal[True] = True
+    model_transport_retries: int = Field(default=1, ge=1, le=1)
+    reindex_after_each_case: Literal[True] = True
+    retain_referenced_snapshots: Literal[True] = True
+    graphify_command: str = "graphify"
+    graphify_no_cluster: bool = True
     extractor_version: str = "graphify-adapter-1"
     max_repair_attempts: int = Field(default=2, ge=1, le=2)
     context_token_budget: int = Field(default=24000, ge=512)
+    symbol_search_limit: int = Field(default=20, ge=1)
+    max_context_symbols: int = Field(default=80, ge=1)
+    reasoning_provider: Stage4ReasoningProvider = "azure_openai"
     label_prefix: str = "Code"
 
 
@@ -104,6 +124,7 @@ class AzureOpenAISettings(BaseModel):
     api_version: str = "2024-10-21"
     reasoning_deployment: str = ""
     embedding_deployment: str = ""
+    log_llm_responses: bool = False
 
 
 class HuggingFaceSettings(BaseModel):
@@ -111,6 +132,7 @@ class HuggingFaceSettings(BaseModel):
 
     token: str = ""
     reasoning_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
+    model_revision: str | None = None
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-base"
     device: HuggingFaceDevice = "auto"

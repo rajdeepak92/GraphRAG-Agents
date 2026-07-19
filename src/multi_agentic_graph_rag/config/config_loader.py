@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from multi_agentic_graph_rag.config.huggingface_env import (
     env_bool,
@@ -26,6 +26,7 @@ from multi_agentic_graph_rag.config.settings import (
     PostgresSettings,
     RetrievalSettings,
     RuntimeSettings,
+    Stage4ReasoningProvider,
     Stage4Settings,
 )
 
@@ -62,7 +63,16 @@ def _int(value: object, default: int) -> int:
 
 def _build_stage4(root: Path, cfg: dict[str, Any], env: dict[str, str]) -> Stage4Settings:
     raw_roots = cfg.get("framework_allowed_roots") or [str(root)]
+    if isinstance(raw_roots, str):
+        raw_roots = [raw_roots]
     allowed_roots = [_path(root, entry, str(root)) for entry in raw_roots]
+    raw_allowlist: object = env.get("STAGE4_WRITE_ALLOWLIST", cfg.get("write_allowlist"))
+    if isinstance(raw_allowlist, str):
+        write_allowlist = [item.strip() for item in raw_allowlist.split(",") if item.strip()]
+    elif isinstance(raw_allowlist, list):
+        write_allowlist = [str(item) for item in raw_allowlist]
+    else:
+        write_allowlist = Stage4Settings().write_allowlist
     return Stage4Settings(
         code_graph_local_path=_path(
             root, cfg.get("code_graph_local_path"), "runtime/staging/code_graph.jsonl"
@@ -73,13 +83,68 @@ def _build_stage4(root: Path, cfg: dict[str, Any], env: dict[str, str]) -> Stage
         codegen_local_path=_path(
             root, cfg.get("codegen_local_path"), "runtime/staging/codegen_records.jsonl"
         ),
-        worktrees_dir=_path(root, cfg.get("worktrees_dir"), "runtime/worktrees"),
         framework_allowed_roots=allowed_roots,
+        write_allowlist=write_allowlist,
+        rollback_failed_case=cast(
+            Literal[True],
+            env_bool(
+                env.get("STAGE4_ROLLBACK_FAILED_CASE"),
+                default=bool(cfg.get("rollback_failed_case", True)),
+            ),
+        ),
+        robot_dryrun=cast(
+            Literal[True],
+            env_bool(env.get("STAGE4_ROBOT_DRYRUN"), default=bool(cfg.get("robot_dryrun", True))),
+        ),
+        model_transport_retries=_int(
+            env.get("STAGE4_MODEL_TRANSPORT_RETRIES", cfg.get("model_transport_retries")),
+            1,
+        ),
+        reindex_after_each_case=cast(
+            Literal[True],
+            env_bool(
+                env.get("STAGE4_REINDEX_AFTER_EACH_CASE"),
+                default=bool(cfg.get("reindex_after_each_case", True)),
+            ),
+        ),
+        retain_referenced_snapshots=cast(
+            Literal[True],
+            env_bool(
+                env.get("STAGE4_RETAIN_REFERENCED_SNAPSHOTS"),
+                default=bool(cfg.get("retain_referenced_snapshots", True)),
+            ),
+        ),
+        graphify_command=str(
+            env.get("STAGE4_GRAPHIFY_COMMAND", cfg.get("graphify_command", "graphify"))
+        ),
+        graphify_no_cluster=env_bool(
+            env.get("STAGE4_GRAPHIFY_NO_CLUSTER"),
+            default=bool(cfg.get("graphify_no_cluster", True)),
+        ),
         extractor_version=env.get(
             "STAGE4_EXTRACTOR_VERSION", cfg.get("extractor_version", "graphify-adapter-1")
         ),
-        max_repair_attempts=_int(cfg.get("max_repair_attempts"), 2),
-        context_token_budget=_int(cfg.get("context_token_budget"), 24000),
+        max_repair_attempts=_int(
+            env.get("STAGE4_MAX_REPAIR_ATTEMPTS", cfg.get("max_repair_attempts")), 2
+        ),
+        context_token_budget=_int(
+            env.get("STAGE4_CONTEXT_TOKEN_BUDGET", cfg.get("context_token_budget")), 24000
+        ),
+        symbol_search_limit=_int(
+            env.get("STAGE4_SYMBOL_SEARCH_LIMIT", cfg.get("symbol_search_limit")), 20
+        ),
+        max_context_symbols=_int(
+            env.get("STAGE4_MAX_CONTEXT_SYMBOLS", cfg.get("max_context_symbols")), 80
+        ),
+        reasoning_provider=cast(
+            Stage4ReasoningProvider,
+            str(
+                env.get(
+                    "STAGE4_REASONING_PROVIDER",
+                    cfg.get("reasoning_provider", "azure_openai"),
+                )
+            ).lower(),
+        ),
         label_prefix=cfg.get("label_prefix", "Code"),
     )
 
@@ -246,12 +311,20 @@ def load_config(config_path: Path | None = None) -> AppSettings:
                 "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
                 azure_cfg.get("embedding_deployment", ""),
             ),
+            log_llm_responses=env_bool(
+                env.get("AZURE_OPENAI_LOG_LLM_RESPONSES"),
+                default=bool(azure_cfg.get("log_llm_responses", False)),
+            ),
         ),
         huggingface=HuggingFaceSettings(
             token=hf_token,
             reasoning_model=env.get(
                 "HUGGINGFACE_REASONING_MODEL",
                 hf_cfg.get("reasoning_model", "Qwen/Qwen2.5-Coder-7B-Instruct"),
+            ),
+            model_revision=env.get(
+                "HUGGINGFACE_MODEL_REVISION",
+                hf_cfg.get("model_revision"),
             ),
             embedding_model=env.get(
                 "HUGGINGFACE_EMBEDDING_MODEL",
@@ -300,18 +373,6 @@ def load_config(config_path: Path | None = None) -> AppSettings:
             ),
         ),
     )
-    for directory in (
-        settings.paths.generated_dir,
-        settings.paths.chroma_persist_dir,
-        settings.paths.runtime_staging_dir,
-        settings.paths.runtime_logs_dir,
-        settings.postgres.local_path.parent,
-        settings.neo4j.local_path.parent,
-        settings.stage4.code_graph_local_path.parent,
-        settings.stage4.codegen_local_path.parent,
-        settings.stage4.worktrees_dir,
-    ):
-        directory.mkdir(parents=True, exist_ok=True)
     return settings
 
 
