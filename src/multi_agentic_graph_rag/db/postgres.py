@@ -174,7 +174,9 @@ CREATE TABLE IF NOT EXISTS knowledge_graph_readiness (
 CREATE TABLE IF NOT EXISTS master_artifacts (
     project TEXT NOT NULL,
     run_id TEXT NOT NULL,
-    stage TEXT NOT NULL CHECK (stage IN ('requirements','user_stories','test_scenarios')),
+    stage TEXT NOT NULL CHECK (
+        stage IN ('requirements','user_stories','test_scenarios','test_cases')
+    ),
     artifact_schema_version TEXT NOT NULL,
     checksum TEXT NOT NULL,
     payload JSONB NOT NULL,

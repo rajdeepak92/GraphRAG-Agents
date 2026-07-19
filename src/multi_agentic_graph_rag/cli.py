@@ -269,6 +269,94 @@ def generate_test_scenarios(
     )
 
 
+@app.command("index-framework")
+def index_framework_command(
+    framework_path: Annotated[Path, typer.Option("--framework-path")],
+    graphify_out: Annotated[
+        Path | None,
+        typer.Option("--graphify-out", help="Graphify output dir (default <fw>/graphify-out)"),
+    ] = None,
+    repository_id: Annotated[str | None, typer.Option("--repository-id")] = None,
+) -> None:
+    """Stage 4: index a framework revision into the code-property graph."""
+    from multi_agentic_graph_rag.services.framework_indexer import index_framework
+
+    settings = load_config()
+    out_dir = graphify_out or (framework_path / "graphify-out")
+    result = index_framework(
+        settings=settings,
+        framework_path=framework_path,
+        graphify_out_dir=out_dir,
+        repository_id=repository_id,
+    )
+    _emit(
+        {
+            "status": "completed",
+            "snapshot_id": result.snapshot.snapshot_id,
+            "commit": result.snapshot.commit,
+            "tree_hash": result.snapshot.tree_hash,
+            "files": result.file_count,
+            "symbols": result.symbol_count,
+            "edges": result.edge_count,
+            "dependencies": result.dependency_count,
+        }
+    )
+
+
+@app.command("ingest-test-data")
+def ingest_test_data_command(
+    project: Annotated[str, typer.Option("--project")],
+    document: Annotated[Path, typer.Option("--document", help="normalized-test-data.json")],
+    scenario_id: Annotated[
+        list[str] | None,
+        typer.Option("--scenario-id", help="Canonical scenario ID (repeatable)."),
+    ] = None,
+) -> None:
+    """Stage 4A: validate a test-data document and publish an immutable snapshot."""
+    from multi_agentic_graph_rag.services.test_data_document_reader import read_document
+    from multi_agentic_graph_rag.services.test_data_ingestion import ingest_document
+
+    parsed = read_document(document)
+    result = ingest_document(parsed, scenario_ids=set(scenario_id or []))
+    payload: dict[str, object] = {
+        "status": result.report.status,
+        "project": parsed.project,
+        "issues": [issue.model_dump(mode="json") for issue in result.report.issues],
+    }
+    if result.normalized is not None:
+        payload["snapshot_id"] = result.normalized.snapshot_id
+        payload["record_count"] = len(result.normalized.records)
+        payload["binding_count"] = len(result.normalized.bindings)
+    _emit(payload)
+    if not result.is_ready:
+        raise typer.Exit(1)
+
+
+@app.command("codegen-readiness")
+def codegen_readiness_command(
+    readiness_input: Annotated[
+        Path, typer.Option("--readiness-input", help="JSON of ReadinessInputs fields.")
+    ],
+    scenario_id: Annotated[str, typer.Option("--scenario-id")],
+    execution_profile: Annotated[str, typer.Option("--execution-profile")],
+) -> None:
+    """Stage 4: evaluate the deterministic readiness gate for a scenario."""
+    from multi_agentic_graph_rag.services.readiness_gate import (
+        ReadinessInputs,
+        evaluate_readiness,
+    )
+
+    data = json.loads(readiness_input.read_text(encoding="utf-8"))
+    report = evaluate_readiness(
+        scenario_id=scenario_id,
+        execution_profile_id=execution_profile,
+        inputs=ReadinessInputs(**data),
+    )
+    _emit(report.model_dump(mode="json"))
+    if not report.is_ready:
+        raise typer.Exit(1)
+
+
 @app.command("coverage")
 def coverage(
     project: Annotated[str, typer.Option("--project")],

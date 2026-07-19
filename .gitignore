@@ -72,6 +72,9 @@ runtime/locks/*
 runtime/logs/*
 !runtime/logs/.gitkeep
 
+# graphify knowledge-graph output
+graphify-out/
+
 # Generic logs
 *.log
 

@@ -81,6 +81,21 @@ class ChromaSettings(BaseModel):
     collection_prefix: str = "marag"
 
 
+class Stage4Settings(BaseModel):
+    """Stage-4 test-code generation controls (plan §15, §25)."""
+
+    model_config = ConfigDict(extra="forbid")
+    code_graph_local_path: Path = Path("runtime/staging/code_graph.jsonl")
+    test_data_local_path: Path = Path("runtime/staging/test_data.jsonl")
+    codegen_local_path: Path = Path("runtime/staging/codegen_records.jsonl")
+    worktrees_dir: Path = Path("runtime/worktrees")
+    framework_allowed_roots: list[Path] = Field(default_factory=list)
+    extractor_version: str = "graphify-adapter-1"
+    max_repair_attempts: int = Field(default=2, ge=1, le=2)
+    context_token_budget: int = Field(default=24000, ge=512)
+    label_prefix: str = "Code"
+
+
 class AzureOpenAISettings(BaseModel):
     """Azure OpenAI credentials and deployments."""
 
@@ -124,5 +139,6 @@ class AppSettings(BaseModel):
     postgres: PostgresSettings
     neo4j: Neo4jSettings
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
+    stage4: Stage4Settings = Field(default_factory=Stage4Settings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)

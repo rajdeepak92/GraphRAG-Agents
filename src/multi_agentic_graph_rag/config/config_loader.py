@@ -26,6 +26,7 @@ from multi_agentic_graph_rag.config.settings import (
     PostgresSettings,
     RetrievalSettings,
     RuntimeSettings,
+    Stage4Settings,
 )
 
 
@@ -57,6 +58,30 @@ def _int(value: object, default: int) -> int:
         return int(str(value)) if value not in (None, "") else default
     except (TypeError, ValueError):
         return default
+
+
+def _build_stage4(root: Path, cfg: dict[str, Any], env: dict[str, str]) -> Stage4Settings:
+    raw_roots = cfg.get("framework_allowed_roots") or [str(root)]
+    allowed_roots = [_path(root, entry, str(root)) for entry in raw_roots]
+    return Stage4Settings(
+        code_graph_local_path=_path(
+            root, cfg.get("code_graph_local_path"), "runtime/staging/code_graph.jsonl"
+        ),
+        test_data_local_path=_path(
+            root, cfg.get("test_data_local_path"), "runtime/staging/test_data.jsonl"
+        ),
+        codegen_local_path=_path(
+            root, cfg.get("codegen_local_path"), "runtime/staging/codegen_records.jsonl"
+        ),
+        worktrees_dir=_path(root, cfg.get("worktrees_dir"), "runtime/worktrees"),
+        framework_allowed_roots=allowed_roots,
+        extractor_version=env.get(
+            "STAGE4_EXTRACTOR_VERSION", cfg.get("extractor_version", "graphify-adapter-1")
+        ),
+        max_repair_attempts=_int(cfg.get("max_repair_attempts"), 2),
+        context_token_budget=_int(cfg.get("context_token_budget"), 24000),
+        label_prefix=cfg.get("label_prefix", "Code"),
+    )
 
 
 def load_config(config_path: Path | None = None) -> AppSettings:
@@ -205,6 +230,7 @@ def load_config(config_path: Path | None = None) -> AppSettings:
         chroma=ChromaSettings(
             collection_prefix=_section(data, "chroma").get("collection_prefix", "marag")
         ),
+        stage4=_build_stage4(root, _section(data, "stage4"), env),
         azure_openai=AzureOpenAISettings(
             endpoint=env.get("AZURE_OPENAI_ENDPOINT", azure_cfg.get("endpoint", "")),
             api_key=env.get("AZURE_OPENAI_API_KEY", azure_cfg.get("api_key", "")),
@@ -281,6 +307,9 @@ def load_config(config_path: Path | None = None) -> AppSettings:
         settings.paths.runtime_logs_dir,
         settings.postgres.local_path.parent,
         settings.neo4j.local_path.parent,
+        settings.stage4.code_graph_local_path.parent,
+        settings.stage4.codegen_local_path.parent,
+        settings.stage4.worktrees_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     return settings
