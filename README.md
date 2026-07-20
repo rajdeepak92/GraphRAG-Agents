@@ -83,13 +83,18 @@ uv run python -m multi_agentic_graph_rag doctor
 uv run python -m multi_agentic_graph_rag db-check
 ```
 
-Configure Azure OpenAI or a private Hugging Face model in `.env`. Stage 4
-provider selection is explicit on every command (or uses the configured
-`azure_openai` production default). It never discovers a provider from ambient
-credentials and never falls back from one provider to the other. A transport
-failure gets one retry against the same pinned provider and model.
-Set `HUGGINGFACE_DEVICE=auto`, `cpu`, or `cuda`; explicit `cuda` fails fast when
-the installed PyTorch build cannot access an NVIDIA GPU.
+Configure Azure OpenAI or Google Gemini for reasoning and embeddings in `.env`
+(`REASONING_MODEL_PROVIDER` / `EMBEDDING_MODEL_PROVIDER` = `azure_openai` or
+`gemini`). Reranking is always the private Hugging Face reranker
+(`RERANKER_MODEL_PROVIDER=huggingface`). Install the cloud extras you need:
+`uv sync --dev --extra azure`, `uv sync --dev --extra gemini`, and
+`uv sync --dev --extra local-llm` (reranker). Stage 4 provider selection is
+explicit on every command (or uses the configured `azure_openai` production
+default). It never discovers a provider from ambient credentials and never
+falls back from one provider to the other. A transport failure gets one retry
+against the same pinned provider and model.
+Set `HUGGINGFACE_DEVICE=auto`, `cpu`, or `cuda` for the reranker; explicit
+`cuda` fails fast when the installed PyTorch build cannot access an NVIDIA GPU.
 PostgreSQL, Neo4j, and ChromaDB must be reachable for the real workflow.
 `local_json` PostgreSQL and Neo4j modes are available for isolated development
 tests.
@@ -151,7 +156,7 @@ uv run python -m multi_agentic_graph_rag generate-test-code `
 ```
 
 The Azure production run uses the configured Azure deployment name and cannot
-initialize Hugging Face:
+initialize Gemini:
 
 ```powershell
 uv run python -m multi_agentic_graph_rag generate-test-code `
@@ -163,18 +168,17 @@ uv run python -m multi_agentic_graph_rag generate-test-code `
   --reasoning-provider azure_openai
 ```
 
-A private-model run is a separate, explicitly pinned execution. Offline mode
-fails closed if its configured local model revision is unavailable; it cannot
-initialize Azure OpenAI.
+A Gemini run is a separate, explicitly pinned execution. It uses the configured
+`GEMINI_REASONING_MODEL` and cannot initialize Azure OpenAI.
 
 ```powershell
 uv run python -m multi_agentic_graph_rag generate-test-code `
-  --project customer-portal-hf `
-  --run-id RUN-HF-001 `
+  --project customer-portal-gemini `
+  --run-id RUN-GEMINI-001 `
   --framework-path C:\frameworks\customer-portal `
   --execution-profile EP-DEFAULT `
   --test-data C:\frameworks\customer-portal\test-data\test-data.xlsx `
-  --reasoning-provider huggingface
+  --reasoning-provider gemini
 ```
 
 Stage 4 does not execute the generated domain test. Validation is limited to

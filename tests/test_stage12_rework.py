@@ -13,6 +13,8 @@ from pydantic import ValidationError
 from multi_agentic_graph_rag.agents.requirement_discovery_agent import (
     RequirementDiscoveryAgent,
     _entity_grounded,
+    _evidence_quote_candidates,
+    _require_semantic_markers,
 )
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.config.config_loader import load_config
@@ -29,7 +31,6 @@ from multi_agentic_graph_rag.domain.schemas import (
     ManifestChunk,
     RequirementDiscoveryChunkResponse,
 )
-from multi_agentic_graph_rag.llm_models.factory import create_reasoning_model
 from multi_agentic_graph_rag.services.chunking import chunk_blocks
 from multi_agentic_graph_rag.services.manifest import build_chunk_manifest
 from multi_agentic_graph_rag.services.parsing import parse_document
@@ -295,6 +296,55 @@ def test_siimcs_rows_reconstruct_split_ids_and_wrapped_sentences() -> None:
     assert not any(block.normalized_text.endswith("/ 7") for block in blocks)
 
 
+def test_evidence_candidates_preserve_visible_row_label_across_wrapped_text() -> None:
+    text = (
+        "Maintenance Use historical readings, operating history, and equipment condition "
+        "changes to plan\nmaintenance and reduce unplanned downtime."
+    )
+    assert _evidence_quote_candidates(text) == [
+        "Maintenance Use historical readings, operating history, and equipment condition "
+        "changes to plan maintenance and reduce unplanned downtime."
+    ]
+
+
+def test_semantic_markers_ignore_bare_decimal_section_identifier() -> None:
+    requirement = LLMRequirementCandidate(
+        requirement_ref="REQREF-1",
+        source_req_id=None,
+        source_req_id_type="generated",
+        requirement_type="Business Requirement",
+        priority="Medium",
+        requirement_text="Controller-based polling of three configured sensors is in scope.",
+        constraints=[],
+        entity_refs=[],
+        relationship_refs=[],
+        evidence_quotes=[
+            "Business Scope 3.1 In Scope Controller-based polling of three configured "
+            "sensors is in scope."
+        ],
+        confidence=0.9,
+    )
+    _require_semantic_markers(requirement)
+
+
+def test_semantic_markers_keep_decimal_threshold_with_unit() -> None:
+    requirement = LLMRequirementCandidate(
+        requirement_ref="REQREF-1",
+        source_req_id=None,
+        source_req_id_type="generated",
+        requirement_type="Functional Requirement",
+        priority="High",
+        requirement_text="The controller shall respond promptly.",
+        constraints=[],
+        entity_refs=[],
+        relationship_refs=[],
+        evidence_quotes=["The controller shall respond within 3.1 seconds."],
+        confidence=0.9,
+    )
+    with pytest.raises(ValueError, match=r"3\.1 seconds"):
+        _require_semantic_markers(requirement)
+
+
 def test_siimcs_requirement_subsections_are_separate_chunks() -> None:
     blocks, _ = parse_document(Path("documents/inbox/SIIMCS/SIIMCS_BRD_V1.pdf"))
     chunks, chunker_fingerprint = chunk_blocks(blocks, ChunkingSettings())
@@ -321,6 +371,24 @@ def test_transient_failure_retries_exactly_once() -> None:
         calls += 1
         if calls == 1:
             raise TransientError
+        return "ok"
+
+    assert retry_transient_once(operation) == "ok"
+    assert calls == 2
+
+
+def test_gemini_unavailable_status_retries_exactly_once() -> None:
+    calls = 0
+
+    class ServerError(Exception):
+        code = 503
+        status = "UNAVAILABLE"
+
+    def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ServerError
         return "ok"
 
     assert retry_transient_once(operation) == "ok"
@@ -370,15 +438,6 @@ def test_validated_checkpoint_prevents_repeated_model_call() -> None:
     assert model.calls == 1
 
 
-def test_stage12_huggingface_cap_does_not_lower_other_stages() -> None:
-    settings = load_config()
-    settings.reasoning_model.provider = "huggingface"
-    regular = create_reasoning_model(settings)
-    discovery = create_reasoning_model(settings, stage12=True)
-    assert regular.settings.max_new_tokens == settings.huggingface.max_new_tokens  # type: ignore[attr-defined]
-    assert discovery.settings.max_new_tokens == 1536  # type: ignore[attr-defined]
-
-
 def test_reset_is_explicit_and_clears_local_project_state(tmp_path: Path) -> None:
     settings = load_config()
     settings.paths.generated_dir = tmp_path / "generated"
@@ -416,6 +475,9 @@ def test_prompt_and_stage_boundary_document_strict_contract() -> None:
         "COMMUNICATES_VIA",
         "exactly one requirement",
         "one atomic sentence",
+        "evidence_quote_candidates as the only allowed quote values",
+        "source_requirement_rows maps every visible explicit source ID",
+        "Preserve visible category labels",
     ):
         assert token in prompt
     workflow = Path(

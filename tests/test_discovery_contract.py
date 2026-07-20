@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 import pytest
@@ -20,9 +21,11 @@ class _Model:
     def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
         self.max_attempts: list[int] = []
+        self.prompts: list[str] = []
 
     def generate_structured(self, **kwargs: Any) -> Any:
         self.max_attempts.append(int(kwargs["max_attempts"]))
+        self.prompts.append(str(kwargs["prompt"]))
         return kwargs["schema"].model_validate(self.payload)
 
 
@@ -105,6 +108,21 @@ def test_discovery_uses_one_call_and_preserves_source_id() -> None:
     response = RequirementDiscoveryAgent(model).discover(_chunk())
     assert model.max_attempts == [1]
     assert response.requirements[0].source_req_id == "BR-COM-001"
+
+
+def test_discovery_supplies_normalized_canonical_evidence_source() -> None:
+    model = _Model(_payload())
+    RequirementDiscoveryAgent(model).discover(_chunk())
+
+    prompt = json.loads(model.prompts[0])
+    assert prompt["evidence_source_text"] == ("BR-COM-001 The gateway shall communicate via TLS.")
+    assert prompt["evidence_quote_candidates"] == [
+        "The gateway shall communicate via TLS.",
+        "BR-COM-001 The gateway shall communicate via TLS.",
+    ]
+    assert prompt["source_requirement_rows"] == {
+        "BR-COM-001": "The gateway shall communicate via TLS."
+    }
 
 
 def test_discovery_keeps_allowlisted_relationship_type() -> None:

@@ -147,7 +147,7 @@ def test_readme_documents_stage4_safety_and_provider_modes() -> None:
     for required in (
         "generate-test-code",
         "--reasoning-provider azure_openai",
-        "--reasoning-provider huggingface",
+        "--reasoning-provider gemini",
         "--dry-run",
         "no Git operation",
         "reset_stage4_project(project, settings)",

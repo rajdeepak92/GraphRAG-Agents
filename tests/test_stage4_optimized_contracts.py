@@ -171,24 +171,24 @@ def test_config_loader_populates_optimized_stage4_fields(
         json.dumps(
             {
                 "stage4": {
-                    "reasoning_provider": "huggingface",
+                    "reasoning_provider": "gemini",
                     "graphify_command": "graphify-custom",
                     "symbol_search_limit": 12,
                     "max_context_symbols": 44,
                     "write_allowlist": ["tests/<module>/Tc<id><PascalTitle>.py"],
                 },
-                "huggingface": {"model_revision": "revision-123"},
+                "gemini": {"reasoning_model": "gemini-2.5-flash"},
                 "azure_openai": {"log_llm_responses": True},
             }
         ),
         encoding="utf-8",
     )
     settings = load_config(config_path)
-    assert settings.stage4.reasoning_provider == "huggingface"
+    assert settings.stage4.reasoning_provider == "gemini"
     assert settings.stage4.graphify_command == "graphify-custom"
     assert settings.stage4.symbol_search_limit == 12
     assert settings.stage4.max_context_symbols == 44
-    assert settings.huggingface.model_revision == "revision-123"
+    assert settings.gemini.reasoning_model == "gemini-2.5-flash"
     assert settings.azure_openai.log_llm_responses is True
 
 

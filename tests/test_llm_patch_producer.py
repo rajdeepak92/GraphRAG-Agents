@@ -21,7 +21,7 @@ from multi_agentic_graph_rag.domain.codegen_schemas import (
 )
 from multi_agentic_graph_rag.domain.errors import (
     AzureOpenAIModelFailure,
-    HuggingFaceModelFailure,
+    GeminiModelFailure,
     InputManifestChanged,
 )
 from multi_agentic_graph_rag.domain.identifiers import make_provider_fingerprint_hash
@@ -74,13 +74,13 @@ def _fingerprint(provider: str = "azure_openai", model: str = "deployment") -> P
     return ProviderFingerprint(
         provider=provider,
         model=model,
-        model_revision="rev-1" if provider == "huggingface" else None,
+        model_revision=None,
         generation_params=params,
         prompt_revision="stage4-v1",
         fingerprint_hash=make_provider_fingerprint_hash(
             provider=provider,
             model=model,
-            model_revision="rev-1" if provider == "huggingface" else None,
+            model_revision=None,
             generation_params_checksum=canonical_checksum({"params": params}),
             prompt_revision="stage4-v1",
         ),
@@ -180,7 +180,7 @@ def test_one_adapter_retry_emits_required_event() -> None:
     ("provider", "error_type"),
     [
         ("azure_openai", AzureOpenAIModelFailure),
-        ("huggingface", HuggingFaceModelFailure),
+        ("gemini", GeminiModelFailure),
     ],
 )
 def test_second_failure_is_sanitized_and_provider_specific(
@@ -219,7 +219,7 @@ def test_producer_source_has_no_provider_factory_or_cross_provider_construction(
     )
     assert "create_reasoning_model" not in source
     assert "AzureOpenAIReasoningModel" not in source
-    assert "HuggingFaceReasoningModel" not in source
+    assert "GeminiReasoningModel" not in source
 
 
 def test_stage4_prompts_lock_python_robot_data_and_no_production_contracts() -> None:

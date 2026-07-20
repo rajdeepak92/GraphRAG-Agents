@@ -25,6 +25,21 @@ class ChromaStore:
         collection = self._client().get_or_create_collection(self.collection_name(project))
         return f"PASS chroma collection={collection.name}"
 
+    def embedding_metadata(self, project: str) -> dict[str, Any] | None:
+        """Return the persisted embedding contract for a non-empty collection."""
+        result = (
+            self._client()
+            .get_or_create_collection(self.collection_name(project))
+            .get(limit=1, include=["metadatas"])
+        )
+        ids = _as_list(result.get("ids"))
+        if not ids:
+            return None
+        metadatas = _as_list(result.get("metadatas"))
+        if not metadatas or metadatas[0] is None:
+            return {}
+        return dict(metadatas[0])
+
     def upsert_chunk(
         self,
         *,

@@ -312,7 +312,7 @@ class TestCaseRecord(StrictModel):
 # point the integer-identity ``Stage4TestCaseRecord`` supersedes it.
 
 # Selected reasoning execution mode. There is no provider fallback (plan §9).
-ReasoningProviderName = Literal["azure_openai", "huggingface"]
+ReasoningProviderName = Literal["azure_openai", "gemini"]
 
 # TC lifecycle for the integer-identity master (plan §16.1).
 TcStatus = Literal["RESERVED", "GENERATING", "VALIDATED", "ACCEPTED", "BLOCKED"]

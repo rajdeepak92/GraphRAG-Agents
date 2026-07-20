@@ -8,8 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 HuggingFaceDevice = Literal["auto", "cpu", "cuda"]
-HuggingFaceQuantization = Literal["none", "bitsandbytes_4bit"]
-Stage4ReasoningProvider = Literal["azure_openai", "huggingface"]
+Stage4ReasoningProvider = Literal["azure_openai", "gemini"]
 
 _STAGE4_WRITE_ALLOWLIST = (
     "tests/<module>/Tc<id><PascalTitle>.py",
@@ -127,22 +126,22 @@ class AzureOpenAISettings(BaseModel):
     log_llm_responses: bool = False
 
 
+class GeminiSettings(BaseModel):
+    """Google Gemini (Developer API) credentials and model selection."""
+
+    api_key: str = ""
+    reasoning_model: str = "gemini-2.5-flash"
+    embedding_model: str = "gemini-embedding-001"
+    log_llm_responses: bool = False
+
+
 class HuggingFaceSettings(BaseModel):
-    """Private Hugging Face model configuration."""
+    """Private Hugging Face reranker model configuration."""
 
     token: str = ""
-    reasoning_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
-    model_revision: str | None = None
-    embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-base"
     device: HuggingFaceDevice = "auto"
-    quantization: HuggingFaceQuantization = "none"
-    disable_thinking: bool = True
     offline: bool = False
-    max_new_tokens: int = 4096
-    stage12_max_new_tokens: int = Field(default=1536, ge=1)
-    discovery_batch_size: int = 1
-    log_llm_responses: bool = False
 
 
 class AppSettings(BaseModel):
@@ -163,4 +162,5 @@ class AppSettings(BaseModel):
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     stage4: Stage4Settings = Field(default_factory=Stage4Settings)
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     huggingface: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)

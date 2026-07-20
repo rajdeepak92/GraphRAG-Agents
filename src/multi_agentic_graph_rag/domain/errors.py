@@ -80,10 +80,10 @@ class AzureOpenAIModelFailure(ProviderModelFailure):
     code = "AZURE_OPENAI_MODEL_FAILURE"
 
 
-class HuggingFaceModelFailure(ProviderModelFailure):
-    """The private Hugging Face model failed twice (plan §9.2)."""
+class GeminiModelFailure(ProviderModelFailure):
+    """The Gemini model failed twice; correct Gemini and retry the run (plan §9.2)."""
 
-    code = "HUGGINGFACE_MODEL_FAILURE"
+    code = "GEMINI_MODEL_FAILURE"
 
 
 __all__ = [
@@ -91,7 +91,7 @@ __all__ = [
     "ConfigurationError",
     "ContentFilterError",
     "ExistingBehaviorChangeForbidden",
-    "HuggingFaceModelFailure",
+    "GeminiModelFailure",
     "InputManifestChanged",
     "MalformedModelOutputError",
     "MaragError",

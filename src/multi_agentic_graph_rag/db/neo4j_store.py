@@ -207,6 +207,64 @@ class Neo4jStore:
                     confidence=relationship.confidence,
                 ).consume()
 
+    def prune_semantic_projection(
+        self,
+        *,
+        project: str,
+        chunk_id: str,
+        entity_ids: set[str],
+        relationship_ids: set[str],
+    ) -> None:
+        """Remove stale chunk-scoped edges before authoritative replay."""
+        if self.settings.neo4j.mode == "local_json":
+            rows = [
+                row
+                for row in self._local_rows()
+                if not (
+                    row.get("project") == project
+                    and (
+                        (
+                            row.get("kind") == "relationship"
+                            and row.get("chunk_id") == chunk_id
+                            and row.get("relationship_id") not in relationship_ids
+                        )
+                        or (
+                            row.get("kind") == "mention"
+                            and row.get("chunk_id") == chunk_id
+                            and row.get("entity_id") not in entity_ids
+                        )
+                    )
+                )
+            ]
+            _write_rows(self.settings.neo4j.local_path, rows)
+            return
+        with self._session() as session:
+            session.run(
+                """
+                MATCH ()-[r]->()
+                WHERE type(r) IN $relationship_types
+                  AND r.project = $project
+                  AND r.chunk_id = $chunk_id
+                  AND NOT r.relationship_id IN $relationship_ids
+                DELETE r
+                """,
+                project=project,
+                chunk_id=chunk_id,
+                relationship_ids=list(relationship_ids),
+                relationship_types=sorted(_RELATIONSHIP_TYPES),
+            ).consume()
+            session.run(
+                """
+                MATCH (c:Chunk {project: $project, chunk_id: $chunk_id})
+                  -[m:MENTIONS {project: $project}]->(e:Entity)
+                WHERE NOT e.entity_id IN $entity_ids
+                DELETE m
+                """,
+                project=project,
+                chunk_id=chunk_id,
+                entity_ids=list(entity_ids),
+            ).consume()
+
     def validate_relationships(self, project: str, relationship_ids: set[str]) -> set[str]:
         """Return relationship IDs that exist in the requested project."""
         if not relationship_ids:

@@ -1220,7 +1220,7 @@ def _validation_evidence(
 
 def make_provider_fingerprint(
     settings: AppSettings,
-    provider: Literal["azure_openai", "huggingface"],
+    provider: Literal["azure_openai", "gemini"],
     *,
     prompt_revision: str = PROMPT_REVISION,
 ) -> ProviderFingerprint:
@@ -1231,14 +1231,9 @@ def make_provider_fingerprint(
         revision = None
         params: dict[str, Any] = {"structured_output": True, "sdk_retries": 0}
     else:
-        model = settings.huggingface.reasoning_model
-        revision = settings.huggingface.model_revision
-        params = {
-            "max_new_tokens": settings.huggingface.max_new_tokens,
-            "disable_thinking": settings.huggingface.disable_thinking,
-            "offline": settings.huggingface.offline,
-            "sdk_retries": 0,
-        }
+        model = settings.gemini.reasoning_model
+        revision = None
+        params = {"structured_output": True, "sdk_retries": 0}
     if not model:
         raise ValueError(f"selected Stage-4 provider {provider} has no configured model")
     params_checksum = canonical_checksum({"params": params})

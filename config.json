@@ -10,12 +10,10 @@
     "runtime_logs_dir": "runtime/logs"
   },
   "reasoning_model": {
-    "provider": "huggingface",
-    "model": "Qwen/Qwen2.5-14B-Instruct"
+    "provider": "azure_openai"
   },
   "embedding_model": {
-    "provider": "huggingface",
-    "model": "BAAI/bge-m3"
+    "provider": "azure_openai"
   },
   "reranker_model": {
     "provider": "huggingface",
@@ -79,14 +77,15 @@
     "embedding_deployment": "",
     "log_llm_responses": false
   },
+  "gemini": {
+    "api_key": "",
+    "reasoning_model": "gemini-2.5-flash",
+    "embedding_model": "gemini-embedding-001",
+    "log_llm_responses": false
+  },
   "huggingface": {
     "token": "",
-    "reasoning_model": "Qwen/Qwen2.5-14B-Instruct",
-    "model_revision": null,
-    "embedding_model": "BAAI/bge-m3",
     "reranker_model": "BAAI/bge-reranker-base",
-    "offline": false,
-    "max_new_tokens": 4096,
-    "log_llm_responses": false
+    "offline": false
   }
 }

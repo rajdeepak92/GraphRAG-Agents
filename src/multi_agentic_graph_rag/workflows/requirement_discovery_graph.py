@@ -120,11 +120,6 @@ def _validate_session_input_stack(
     runtime.postgres.ensure_schema()
     runtime.neo4j.check()
     runtime.neo4j.ensure_schema()
-    if (
-        runtime.settings.reasoning_model.provider == "huggingface"
-        and runtime.settings.runtime.concurrency != 1
-    ):
-        raise ValueError("CPU Hugging Face Stage 1.2 requires WORKFLOW_CONCURRENCY=1")
     runtime.postgres.set_readiness(
         KnowledgeGraphReadiness(
             project=request.project_name,

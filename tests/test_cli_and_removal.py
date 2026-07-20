@@ -53,7 +53,7 @@ def test_normal_ingest_does_not_reset_project_implicitly() -> None:
 
 def test_config_check_reports_stage4_provider_separately(monkeypatch: Any) -> None:
     settings = load_config()
-    settings.reasoning_model.provider = "huggingface"
+    settings.reasoning_model.provider = "gemini"
     settings.stage4.reasoning_provider = "azure_openai"
     monkeypatch.setattr(cli_module, "load_config", lambda: settings)
 
@@ -61,7 +61,7 @@ def test_config_check_reports_stage4_provider_separately(monkeypatch: Any) -> No
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["reasoning_provider"] == "huggingface"
+    assert payload["reasoning_provider"] == "gemini"
     assert payload["stage4_reasoning_provider"] == "azure_openai"
 
 

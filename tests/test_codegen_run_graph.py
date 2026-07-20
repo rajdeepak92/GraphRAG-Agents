@@ -426,12 +426,12 @@ def test_generate_test_code_cli_has_locked_flags(monkeypatch: Any, tmp_path: Pat
             "--test-data",
             str(tmp_path / "data.xlsx"),
             "--reasoning-provider",
-            "huggingface",
+            "gemini",
             "--dry-run",
         ],
     )
     assert result.exit_code == 0, result.output
-    assert captured[0].reasoning_provider == "huggingface"
+    assert captured[0].reasoning_provider == "gemini"
     assert captured[0].dry_run is True
     assert '"status": "DRY_RUN_READY"' in result.stdout
 
@@ -441,7 +441,7 @@ def test_generate_test_code_cli_uses_configured_provider_by_default(
 ) -> None:
     captured: list[Stage4Request] = []
     settings = load_config()
-    settings.stage4.reasoning_provider = "huggingface"
+    settings.stage4.reasoning_provider = "gemini"
 
     def fake_run(request: Stage4Request, **_kwargs: Any) -> Stage4RunResult:
         captured.append(request)
@@ -468,4 +468,4 @@ def test_generate_test_code_cli_uses_configured_provider_by_default(
     )
 
     assert result.exit_code == 0, result.output
-    assert captured[0].reasoning_provider == "huggingface"
+    assert captured[0].reasoning_provider == "gemini"

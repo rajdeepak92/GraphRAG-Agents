@@ -17,6 +17,7 @@ class ProviderName(StrEnum):
     """Supported model providers."""
 
     AZURE_OPENAI = "azure_openai"
+    GEMINI = "gemini"
     HUGGINGFACE = "huggingface"
 
 

@@ -14,6 +14,7 @@ from multi_agentic_graph_rag.config.settings import AppSettings
 from multi_agentic_graph_rag.db.chroma_store import ChromaStore
 from multi_agentic_graph_rag.db.neo4j_store import Neo4jStore
 from multi_agentic_graph_rag.db.postgres import PostgresStore
+from multi_agentic_graph_rag.domain.errors import ConfigurationError
 from multi_agentic_graph_rag.domain.identifiers import (
     make_checkpoint_thread_id,
     new_run_id,
@@ -129,7 +130,31 @@ def _validate_ingest_tech_stack(
     probe = runtime.embedding.embed_documents(["embedding compatibility probe"])
     if len(probe) != 1 or not probe[0] or any(not math.isfinite(value) for value in probe[0]):
         raise ValueError("embedding model compatibility probe failed")
+    current_dimension = len(probe[0])
+    current_fingerprint = runtime.embedding.embedding_fingerprint
+    existing = runtime.chroma.embedding_metadata(project)
+    if existing is not None:
+        existing_dimension = existing.get("embedding_dimension")
+        existing_fingerprint = existing.get("embedding_fingerprint")
+        if existing_dimension != current_dimension or existing_fingerprint != current_fingerprint:
+            stored_model = _embedding_contract_label(existing_fingerprint, existing_dimension)
+            current_model = _embedding_contract_label(current_fingerprint, current_dimension)
+            raise ConfigurationError(
+                f"project {project!r} was built with {stored_model}; "
+                f"current model is {current_model}. "
+                "Run project-reset before re-ingesting."
+            )
     return {}
+
+
+def _embedding_contract_label(fingerprint: Any, dimension: Any) -> str:
+    fingerprint_label = fingerprint if isinstance(fingerprint, str) and fingerprint else "unknown"
+    dimension_label = (
+        f"{dimension}-dim"
+        if isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0
+        else "unknown dimension"
+    )
+    return f"{fingerprint_label} ({dimension_label})"
 
 
 def _run_ingest_pipeline(

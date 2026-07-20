@@ -40,6 +40,9 @@ class RequirementDiscoveryAgent:
             {
                 "chunk_id": chunk.chunk_id,
                 "chunk_text": chunk.chunk_text,
+                "evidence_source_text": _normalize(chunk.chunk_text),
+                "evidence_quote_candidates": _evidence_quote_candidates(chunk.chunk_text),
+                "source_requirement_rows": _explicit_requirement_rows(chunk.chunk_text),
                 "layout": chunk.layout.model_dump(mode="json"),
             },
             ensure_ascii=False,
@@ -305,6 +308,27 @@ def _explicit_requirement_rows(chunk_text: str) -> dict[str, str]:
     return result
 
 
+def _evidence_quote_candidates(chunk_text: str) -> list[str]:
+    """Build exact quote choices without modifying or repairing model output."""
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        normalized = _normalize(value)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    for requirement_text in _explicit_requirement_rows(chunk_text).values():
+        add(requirement_text)
+
+    normalized_chunk = _normalize(chunk_text)
+    start = 0
+    for match in _SENTENCE_END.finditer(normalized_chunk):
+        add(normalized_chunk[start : match.end()])
+        start = match.end()
+    add(normalized_chunk[start:])
+    return candidates
+
+
 def _require_semantic_markers(requirement: LLMRequirementCandidate) -> None:
     evidence_quotes = requirement.evidence_quotes
     requirement_text = _normalize(requirement.requirement_text).casefold()
@@ -312,6 +336,7 @@ def _require_semantic_markers(requirement: LLMRequirementCandidate) -> None:
     missing = {
         _normalize(match.group(0)).casefold()
         for match in _SEMANTIC_MARKERS.finditer(evidence_text)
+        if not _is_bare_decimal_marker(match.group(0))
         if _normalize(match.group(0)).casefold() not in requirement_text
     }
     if missing:
@@ -319,6 +344,11 @@ def _require_semantic_markers(requirement: LLMRequirementCandidate) -> None:
             "requirement_text dropped modality, polarity, threshold, timing, or condition markers: "
             f"{sorted(missing)}"
         )
+
+
+def _is_bare_decimal_marker(value: str) -> bool:
+    """Exclude section/version identifiers while retaining decimal values with units."""
+    return re.fullmatch(r"\d+\.\d+", _normalize(value)) is not None
 
 
 def _normalize(value: str) -> str:

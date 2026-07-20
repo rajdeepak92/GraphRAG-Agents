@@ -486,31 +486,21 @@ def build_provider_fingerprint(
         model = selected.reasoning_deployment
         revision = None
         params: dict[str, Any] = {"structured_output": True, "sdk_retries": 0}
+    elif provider == "gemini":
+        selected_gemini = settings.gemini
+        if not selected_gemini.api_key:
+            raise ConfigurationError("gemini Stage 4 mode requires GEMINI_API_KEY")
+        if not selected_gemini.reasoning_model:
+            raise ConfigurationError(
+                "gemini Stage 4 mode requires an explicitly configured reasoning model"
+            )
+        if find_spec("google.genai") is None:
+            raise ConfigurationError("gemini Stage 4 mode requires the gemini extra")
+        model = selected_gemini.reasoning_model
+        revision = None
+        params = {"structured_output": True, "sdk_retries": 0}
     else:
-        selected_hf = settings.huggingface
-        if not selected_hf.reasoning_model:
-            raise ConfigurationError(
-                "huggingface Stage 4 mode requires an explicitly configured private model"
-            )
-        model_path = Path(selected_hf.reasoning_model)
-        if selected_hf.offline and not model_path.exists():
-            raise ConfigurationError(
-                "offline huggingface Stage 4 mode requires an existing local model path"
-            )
-        if not model_path.exists() and not selected_hf.model_revision:
-            raise ConfigurationError(
-                "huggingface Stage 4 mode requires a pinned model revision or local path"
-            )
-        if find_spec("transformers") is None:
-            raise ConfigurationError("huggingface Stage 4 mode requires the local-llm extra")
-        model = selected_hf.reasoning_model
-        revision = selected_hf.model_revision
-        params = {
-            "disable_thinking": selected_hf.disable_thinking,
-            "max_new_tokens": selected_hf.max_new_tokens,
-            "offline": selected_hf.offline,
-            "sdk_retries": 0,
-        }
+        raise ConfigurationError(f"Unsupported Stage 4 reasoning provider: {provider}")
     return _make_provider_fingerprint(
         provider=provider,
         model=model,

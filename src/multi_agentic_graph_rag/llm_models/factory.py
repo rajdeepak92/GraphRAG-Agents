@@ -12,11 +12,11 @@ from multi_agentic_graph_rag.llm_models.azure_openai import (
     AzureOpenAIEmbeddingModel,
     AzureOpenAIReasoningModel,
 )
-from multi_agentic_graph_rag.llm_models.huggingface import (
-    HuggingFaceEmbeddingModel,
-    HuggingFaceReasoningModel,
-    HuggingFaceRerankerModel,
+from multi_agentic_graph_rag.llm_models.gemini import (
+    GeminiEmbeddingModel,
+    GeminiReasoningModel,
 )
+from multi_agentic_graph_rag.llm_models.huggingface import HuggingFaceRerankerModel
 from multi_agentic_graph_rag.llm_models.ports import EmbeddingModel, ReasoningModel, RerankerModel
 
 
@@ -50,17 +50,21 @@ def create_stage4_reasoning_model(
             logger=logger,
             run_dir=run_dir,
         )
-    if provider == "huggingface":
-        huggingface = settings.huggingface
-        if not huggingface.reasoning_model:
-            raise ConfigurationError(
-                "huggingface Stage 4 mode requires an explicitly configured private model"
-            )
-        if find_spec("transformers") is None:
-            raise ConfigurationError(
-                "huggingface Stage 4 mode requires the 'local-llm' project extra"
-            )
-        return HuggingFaceReasoningModel(huggingface, logger=logger, run_dir=run_dir)
+    if provider == "gemini":
+        gemini = settings.gemini
+        if not gemini.api_key:
+            raise ConfigurationError("gemini Stage 4 mode requires GEMINI_API_KEY")
+        if not gemini.reasoning_model:
+            raise ConfigurationError("gemini Stage 4 mode requires a reasoning model")
+        if find_spec("google.genai") is None:
+            raise ConfigurationError("gemini Stage 4 mode requires the 'gemini' project extra")
+        return GeminiReasoningModel(
+            gemini,
+            discovery_batch_size=1,
+            log_llm_responses=gemini.log_llm_responses,
+            logger=logger,
+            run_dir=run_dir,
+        )
     raise ConfigurationError(f"Unsupported Stage 4 reasoning provider: {provider}")
 
 
@@ -103,32 +107,26 @@ def create_reasoning_model(
         return AzureOpenAIReasoningModel(
             settings.azure_openai,
             discovery_batch_size=1,
-            log_llm_responses=settings.huggingface.log_llm_responses,
+            log_llm_responses=settings.azure_openai.log_llm_responses,
             logger=logger,
             run_dir=run_dir,
         )
-    if provider == "huggingface":
-        if not settings.huggingface.reasoning_model:
+    if provider == "gemini":
+        if not settings.gemini.api_key:
+            raise ConfigurationError("REASONING_MODEL_PROVIDER=gemini requires GEMINI_API_KEY")
+        if not settings.gemini.reasoning_model:
             raise ConfigurationError(
-                "REASONING_MODEL_PROVIDER=huggingface requires HUGGINGFACE_REASONING_MODEL"
+                "REASONING_MODEL_PROVIDER=gemini requires GEMINI_REASONING_MODEL"
             )
-        if find_spec("transformers") is None:
+        if find_spec("google.genai") is None:
             raise ConfigurationError(
-                "REASONING_MODEL_PROVIDER=huggingface requires transformers; "
-                "install with: uv sync --dev --extra local-llm"
+                "REASONING_MODEL_PROVIDER=gemini requires google-genai; "
+                "install with: uv sync --dev --extra gemini"
             )
-        huggingface_settings = settings.huggingface
-        if stage12:
-            huggingface_settings = huggingface_settings.model_copy(
-                update={
-                    "max_new_tokens": min(
-                        huggingface_settings.max_new_tokens,
-                        huggingface_settings.stage12_max_new_tokens,
-                    )
-                }
-            )
-        return HuggingFaceReasoningModel(
-            huggingface_settings,
+        return GeminiReasoningModel(
+            settings.gemini,
+            discovery_batch_size=1,
+            log_llm_responses=settings.gemini.log_llm_responses,
             logger=logger,
             run_dir=run_dir,
         )
@@ -174,17 +172,19 @@ def create_embedding_model(
                 "install with: uv sync --dev --extra azure"
             )
         return AzureOpenAIEmbeddingModel(settings.azure_openai, logger=logger)
-    if provider == "huggingface":
-        if not settings.huggingface.embedding_model:
+    if provider == "gemini":
+        if not settings.gemini.api_key:
+            raise ConfigurationError("EMBEDDING_MODEL_PROVIDER=gemini requires GEMINI_API_KEY")
+        if not settings.gemini.embedding_model:
             raise ConfigurationError(
-                "EMBEDDING_MODEL_PROVIDER=huggingface requires HUGGINGFACE_EMBEDDING_MODEL"
+                "EMBEDDING_MODEL_PROVIDER=gemini requires GEMINI_EMBEDDING_MODEL"
             )
-        if find_spec("sentence_transformers") is None:
+        if find_spec("google.genai") is None:
             raise ConfigurationError(
-                "EMBEDDING_MODEL_PROVIDER=huggingface requires sentence-transformers; "
-                "install with: uv sync --dev --extra local-llm"
+                "EMBEDDING_MODEL_PROVIDER=gemini requires google-genai; "
+                "install with: uv sync --dev --extra gemini"
             )
-        return HuggingFaceEmbeddingModel(settings.huggingface)
+        return GeminiEmbeddingModel(settings.gemini, logger=logger)
     raise ConfigurationError(f"Unsupported embedding model provider: {provider}")
 
 

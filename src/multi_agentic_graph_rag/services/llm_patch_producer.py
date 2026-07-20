@@ -23,7 +23,7 @@ from multi_agentic_graph_rag.domain.codegen_schemas import (
 from multi_agentic_graph_rag.domain.errors import (
     AzureOpenAIModelFailure,
     ConfigurationError,
-    HuggingFaceModelFailure,
+    GeminiModelFailure,
     InputManifestChanged,
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
@@ -51,7 +51,7 @@ class LLMPatchProducer:
             raise ConfigurationError(
                 "selected reasoning model does not match the Stage-4 provider fingerprint"
             )
-        if provider_fingerprint.provider not in {"azure_openai", "huggingface"}:
+        if provider_fingerprint.provider not in {"azure_openai", "gemini"}:
             raise ConfigurationError(
                 f"unsupported Stage-4 reasoning provider: {provider_fingerprint.provider}"
             )
@@ -226,9 +226,9 @@ class LLMPatchProducer:
                 f"deployment, endpoint, authentication, or service issue and retry the run. "
                 f"Sanitized diagnostic: {diagnostic}"
             )
-        return HuggingFaceModelFailure(
-            "Hugging Face model request failed after two attempts. Correct the pinned private "
-            "model installation/configuration and retry the run. Sanitized diagnostic: "
+        return GeminiModelFailure(
+            "Gemini model request failed after two attempts. Correct the Gemini API key, model "
+            "name, or service issue and retry the run. Sanitized diagnostic: "
             f"{diagnostic}"
         )
 

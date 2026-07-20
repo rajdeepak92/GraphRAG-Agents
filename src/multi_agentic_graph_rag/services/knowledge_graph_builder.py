@@ -170,28 +170,19 @@ class KnowledgeGraphBuilder:
         expected_entities = {item.entity_id for item in entities}
         expected_mentions = expected_entities
         expected_relationships = {item.relationship_id for item in relationships}
-        existing = self.store.read_semantic_projection(
+        self.store.prune_semantic_projection(
             project=project,
             chunk_id=chunk.chunk_id,
             entity_ids=expected_entities,
             relationship_ids=expected_relationships,
         )
-        missing_entities = expected_entities - existing.entity_ids
-        missing_mentions = expected_mentions - existing.mentioned_entity_ids
-        missing_relationships = expected_relationships - existing.relationship_ids
         self.store.upsert_semantic_projection(
             project=project,
             chunk_id=chunk.chunk_id,
-            entities=[item for item in entities if item.entity_id in missing_entities],
-            mentioned_entity_ids=missing_mentions,
-            relationships=[
-                item for item in relationships if item.relationship_id in missing_relationships
-            ],
-            requirement_text_hash_by_relationship={
-                key: value
-                for key, value in relationship_hashes.items()
-                if key in missing_relationships
-            },
+            entities=entities,
+            mentioned_entity_ids=expected_mentions,
+            relationships=relationships,
+            requirement_text_hash_by_relationship=relationship_hashes,
         )
         validated = self.store.read_semantic_projection(
             project=project,

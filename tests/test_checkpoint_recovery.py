@@ -48,6 +48,10 @@ class _Chroma:
 class _Neo4j:
     def __init__(self) -> None:
         self.writes = 0
+        self.prunes = 0
+
+    def prune_semantic_projection(self, **_: Any) -> None:
+        self.prunes += 1
 
     def upsert_semantic_projection(self, **_: Any) -> None:
         self.writes += 1
@@ -102,3 +106,4 @@ def test_completed_semantic_projection_is_not_repeated_before_map_insert() -> No
     state.update(update)
     _project_chunk_semantics(state, runtime)  # type: ignore[arg-type]
     assert neo4j.writes == 1
+    assert neo4j.prunes == 1

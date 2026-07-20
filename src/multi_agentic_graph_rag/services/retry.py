@@ -18,7 +18,17 @@ _TRANSIENT_NAMES = {
 
 def is_transient(exc: Exception) -> bool:
     """Classify only known provider/connectivity failures as retryable."""
-    return exc.__class__.__name__ in _TRANSIENT_NAMES
+    if exc.__class__.__name__ in _TRANSIENT_NAMES:
+        return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, int) and code in {408, 500, 502, 503, 504}:
+        return True
+    status = getattr(exc, "status", None)
+    return isinstance(status, str) and status.upper() in {
+        "DEADLINE_EXCEEDED",
+        "INTERNAL",
+        "UNAVAILABLE",
+    }
 
 
 def retry_transient_once[T](operation: Callable[[], T]) -> T:

@@ -86,6 +86,7 @@ graphify-out/
 # Markdown docs
 *.md
 !/README.md
+!/workflow.md
 
 # # Local test workspace
 # tests/*

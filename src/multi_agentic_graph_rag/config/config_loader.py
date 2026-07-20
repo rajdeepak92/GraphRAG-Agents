@@ -17,8 +17,8 @@ from multi_agentic_graph_rag.config.settings import (
     AzureOpenAISettings,
     ChromaSettings,
     ChunkingSettings,
+    GeminiSettings,
     HuggingFaceDevice,
-    HuggingFaceQuantization,
     HuggingFaceSettings,
     ModelSection,
     Neo4jSettings,
@@ -189,6 +189,7 @@ def load_config(config_path: Path | None = None) -> AppSettings:
     postgres_cfg = _section(data, "postgres")
     neo4j_cfg = _section(data, "neo4j")
     azure_cfg = _section(data, "azure_openai")
+    gemini_cfg = _section(data, "gemini")
     hf_cfg = _section(data, "huggingface")
     runtime_cfg = _section(data, "runtime")
     retrieval_cfg = _section(data, "retrieval")
@@ -207,11 +208,11 @@ def load_config(config_path: Path | None = None) -> AppSettings:
         reasoning_model=ModelSection(
             provider=env.get(
                 "REASONING_MODEL_PROVIDER",
-                reasoning_cfg.get("provider", "huggingface"),
+                reasoning_cfg.get("provider", "azure_openai"),
             ),
             model=env.get(
-                "HUGGINGFACE_REASONING_MODEL",
-                reasoning_cfg.get("model", "Qwen/Qwen2.5-Coder-7B-Instruct"),
+                "GEMINI_REASONING_MODEL",
+                reasoning_cfg.get("model"),
             ),
             deployment=env.get(
                 "AZURE_OPENAI_REASONING_DEPLOYMENT",
@@ -221,11 +222,11 @@ def load_config(config_path: Path | None = None) -> AppSettings:
         embedding_model=ModelSection(
             provider=env.get(
                 "EMBEDDING_MODEL_PROVIDER",
-                embedding_cfg.get("provider", "huggingface"),
+                embedding_cfg.get("provider", "azure_openai"),
             ),
             model=env.get(
-                "HUGGINGFACE_EMBEDDING_MODEL",
-                embedding_cfg.get("model", "BAAI/bge-m3"),
+                "GEMINI_EMBEDDING_MODEL",
+                embedding_cfg.get("model"),
             ),
             deployment=env.get(
                 "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
@@ -316,20 +317,23 @@ def load_config(config_path: Path | None = None) -> AppSettings:
                 default=bool(azure_cfg.get("log_llm_responses", False)),
             ),
         ),
-        huggingface=HuggingFaceSettings(
-            token=hf_token,
+        gemini=GeminiSettings(
+            api_key=env.get("GEMINI_API_KEY", gemini_cfg.get("api_key", "")),
             reasoning_model=env.get(
-                "HUGGINGFACE_REASONING_MODEL",
-                hf_cfg.get("reasoning_model", "Qwen/Qwen2.5-Coder-7B-Instruct"),
-            ),
-            model_revision=env.get(
-                "HUGGINGFACE_MODEL_REVISION",
-                hf_cfg.get("model_revision"),
+                "GEMINI_REASONING_MODEL",
+                gemini_cfg.get("reasoning_model", "gemini-2.5-flash"),
             ),
             embedding_model=env.get(
-                "HUGGINGFACE_EMBEDDING_MODEL",
-                hf_cfg.get("embedding_model", "BAAI/bge-m3"),
+                "GEMINI_EMBEDDING_MODEL",
+                gemini_cfg.get("embedding_model", "gemini-embedding-001"),
             ),
+            log_llm_responses=env_bool(
+                env.get("GEMINI_LOG_LLM_RESPONSES"),
+                default=bool(gemini_cfg.get("log_llm_responses", False)),
+            ),
+        ),
+        huggingface=HuggingFaceSettings(
+            token=hf_token,
             reranker_model=env.get(
                 "HUGGINGFACE_RERANKER_MODEL",
                 hf_cfg.get("reranker_model", "BAAI/bge-reranker-base"),
@@ -343,34 +347,7 @@ def load_config(config_path: Path | None = None) -> AppSettings:
                     )
                 ).lower(),
             ),
-            quantization=cast(
-                HuggingFaceQuantization,
-                str(
-                    env.get(
-                        "HUGGINGFACE_QUANTIZATION",
-                        hf_cfg.get("quantization", "none"),
-                    )
-                ).lower(),
-            ),
-            disable_thinking=env_bool(
-                env.get("HUGGINGFACE_DISABLE_THINKING"),
-                default=bool(hf_cfg.get("disable_thinking", True)),
-            ),
             offline=hf_offline,
-            max_new_tokens=_int(
-                env.get("HUGGINGFACE_MAX_NEW_TOKENS", hf_cfg.get("max_new_tokens")), 4096
-            ),
-            stage12_max_new_tokens=_int(
-                env.get(
-                    "HUGGINGFACE_STAGE12_MAX_NEW_TOKENS",
-                    hf_cfg.get("stage12_max_new_tokens"),
-                ),
-                1536,
-            ),
-            log_llm_responses=env_bool(
-                env.get("LOG_LLM_RESPONSES"),
-                default=bool(hf_cfg.get("log_llm_responses", False)),
-            ),
         ),
     )
     return settings

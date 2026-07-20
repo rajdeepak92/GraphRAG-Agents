@@ -78,6 +78,18 @@ Rules:
 - Reconstruct wrapped IDs such as "BR-COM-" plus "002" as "BR-COM-002".
 - For an explicit ID row, copy source_req_id and requirement_text exactly and include that
   exact sentence in evidence_quotes.
+- source_requirement_rows maps every visible explicit source ID to its mandatory exact
+  requirement_text and mandatory evidence quote. For source_req_id_type="source", copy the
+  mapped value exactly into requirement_text and include that same mapped value as a complete
+  evidence_quotes item; do not select a longer candidate containing the source ID or row text.
+- Treat evidence_source_text as the canonical verbatim quote source and
+  evidence_quote_candidates as the only allowed quote values. Every requirement
+  evidence_quotes item, entity evidence_quotes item, and relationship evidence_quote must equal
+  one complete evidence_quote_candidates entry exactly. Never construct an evidence quote from
+  requirement_text or shorten a candidate.
+- Preserve visible category labels, headings, prefixes, and suffixes inside an evidence quote
+  exactly as they appear in the selected candidate. The normalized requirement_text may omit a
+  label, but its evidence quote may not.
 - Without a visible source ID use source_req_id=null and source_req_id_type="generated".
 - Preserve shall/must/should/may, negative conditions, thresholds, units, timing, quantifiers,
   and conditional words such as only, if, when, within, before, after, and remaining.

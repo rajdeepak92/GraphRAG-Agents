@@ -26,22 +26,26 @@ class _SelectedProviderSettings:
             reasoning_deployment="deployment",
             log_llm_responses=False,
         )
-        self._huggingface = SimpleNamespace(reasoning_model="private/model")
+        self._gemini = SimpleNamespace(
+            api_key="secret",
+            reasoning_model="gemini-2.5-pro",
+            log_llm_responses=False,
+        )
 
     @property
     def azure_openai(self) -> Any:
         if self.selected != "azure_openai":
-            raise AssertionError("Hugging Face selection inspected Azure configuration")
+            raise AssertionError("Gemini selection inspected Azure configuration")
         return self._azure
 
     @property
-    def huggingface(self) -> Any:
-        if self.selected != "huggingface":
-            raise AssertionError("Azure selection inspected Hugging Face configuration")
-        return self._huggingface
+    def gemini(self) -> Any:
+        if self.selected != "gemini":
+            raise AssertionError("Azure selection inspected Gemini configuration")
+        return self._gemini
 
 
-@pytest.mark.parametrize("provider", ["azure_openai", "huggingface"])
+@pytest.mark.parametrize("provider", ["azure_openai", "gemini"])
 def test_stage4_factory_reads_and_initializes_only_selected_provider(
     provider: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -51,14 +55,14 @@ def test_stage4_factory_reads_and_initializes_only_selected_provider(
 
     def azure_constructor(*_args: Any, **_kwargs: Any) -> object:
         if provider != "azure_openai":
-            raise AssertionError("Hugging Face selection initialized Azure")
+            raise AssertionError("Gemini selection initialized Azure")
         constructed.append("azure_openai")
         return object()
 
-    def huggingface_constructor(*_args: Any, **_kwargs: Any) -> object:
-        if provider != "huggingface":
-            raise AssertionError("Azure selection initialized Hugging Face")
-        constructed.append("huggingface")
+    def gemini_constructor(*_args: Any, **_kwargs: Any) -> object:
+        if provider != "gemini":
+            raise AssertionError("Azure selection initialized Gemini")
+        constructed.append("gemini")
         return object()
 
     def find_selected_dependency(name: str) -> object:
@@ -67,7 +71,7 @@ def test_stage4_factory_reads_and_initializes_only_selected_provider(
 
     monkeypatch.setattr(factory, "find_spec", find_selected_dependency)
     monkeypatch.setattr(factory, "AzureOpenAIReasoningModel", azure_constructor)
-    monkeypatch.setattr(factory, "HuggingFaceReasoningModel", huggingface_constructor)
+    monkeypatch.setattr(factory, "GeminiReasoningModel", gemini_constructor)
 
     result = factory.create_stage4_reasoning_model(
         _SelectedProviderSettings(selected=provider),  # type: ignore[arg-type]
@@ -76,10 +80,10 @@ def test_stage4_factory_reads_and_initializes_only_selected_provider(
 
     assert result is not None
     assert constructed == [provider]
-    assert dependency_checks == ["openai" if provider == "azure_openai" else "transformers"]
+    assert dependency_checks == ["openai" if provider == "azure_openai" else "google.genai"]
 
 
-@pytest.mark.parametrize("provider", ["azure_openai", "huggingface"])
+@pytest.mark.parametrize("provider", ["azure_openai", "gemini"])
 def test_stage4_factory_never_cross_provider_falls_back_after_selected_failure(
     provider: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -89,18 +93,18 @@ def test_stage4_factory_never_cross_provider_falls_back_after_selected_failure(
     def azure_constructor(*_args: Any, **_kwargs: Any) -> object:
         constructor_calls.append("azure_openai")
         if provider != "azure_openai":
-            raise AssertionError("Hugging Face failure fell back to Azure")
+            raise AssertionError("Gemini failure fell back to Azure")
         raise RuntimeError("selected Azure constructor failed")
 
-    def huggingface_constructor(*_args: Any, **_kwargs: Any) -> object:
-        constructor_calls.append("huggingface")
-        if provider != "huggingface":
-            raise AssertionError("Azure failure fell back to Hugging Face")
-        raise RuntimeError("selected Hugging Face constructor failed")
+    def gemini_constructor(*_args: Any, **_kwargs: Any) -> object:
+        constructor_calls.append("gemini")
+        if provider != "gemini":
+            raise AssertionError("Azure failure fell back to Gemini")
+        raise RuntimeError("selected Gemini constructor failed")
 
     monkeypatch.setattr(factory, "find_spec", lambda _name: object())
     monkeypatch.setattr(factory, "AzureOpenAIReasoningModel", azure_constructor)
-    monkeypatch.setattr(factory, "HuggingFaceReasoningModel", huggingface_constructor)
+    monkeypatch.setattr(factory, "GeminiReasoningModel", gemini_constructor)
 
     with pytest.raises(RuntimeError, match="selected"):
         factory.create_stage4_reasoning_model(

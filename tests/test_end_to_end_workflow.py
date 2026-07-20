@@ -61,6 +61,9 @@ class _Chroma:
     def check(self, project: str) -> str:
         return "PASS"
 
+    def embedding_metadata(self, project: str) -> dict[str, Any] | None:
+        return None
+
     def upsert_chunk(
         self,
         *,
