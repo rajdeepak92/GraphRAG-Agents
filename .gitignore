@@ -35,6 +35,11 @@ dist/
 !.vscode/settings.json
 *.code-workspace
 
+# Local AI-agent/tooling configuration
+.claude/
+.codex/
+.agents/
+
 # Operating-system files
 .DS_Store
 Thumbs.db
