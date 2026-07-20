@@ -9,6 +9,7 @@ from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscover
 from multi_agentic_graph_rag.domain.errors import SemanticValidationError
 from multi_agentic_graph_rag.domain.schemas import (
     LLMEntityCandidate,
+    LLMRelationshipCandidate,
     LLMRequirementCandidate,
     ManifestChunk,
     RequirementDiscoveryChunkResponse,
@@ -25,6 +26,13 @@ _SEMANTIC_MARKERS = re.compile(
     r"\d+(?:\.\d+)?(?:\s*(?:%|ms|s|sec(?:ond)?s?|min(?:ute)?s?|hours?|days?|"
     r"hz|°c|psi|mm/s))?)\b",
     re.IGNORECASE,
+)
+# Non-requirement document framing that a generated requirement may quote verbatim.
+# Only the acceptance-criteria preamble is stripped, and only its trailing marker word
+# ("when") rides inside the phrase, so no requirement-bearing text is removed.
+_GENERATED_EVIDENCE_FRAMING = (
+    re.compile(r"\bdefinition of done\b\s*:?\s*", re.IGNORECASE),
+    re.compile(r"\bthe feature is complete when\b\s*:?\s*", re.IGNORECASE),
 )
 
 
@@ -56,6 +64,8 @@ class RequirementDiscoveryAgent:
             max_attempts=1,
         )
         response = self._prune_ungrounded_entities(response)
+        response = self._prune_ungrounded_relationships(response)
+        response = self._repair_source_evidence(chunk, response)
         try:
             self.validate_response(chunk, response)
         except ValueError as error:
@@ -149,6 +159,124 @@ class RequirementDiscoveryAgent:
             entities=pruned_entities,
             relationships=relationships,
         )
+
+    @staticmethod
+    def _prune_ungrounded_relationships(
+        response: RequirementDiscoveryChunkResponse,
+    ) -> RequirementDiscoveryChunkResponse:
+        """Drop relationships whose evidence quote does not visibly ground both
+        endpoints, instead of failing the whole chunk.
+
+        validate_response requires each relationship's evidence quote to visibly
+        contain the name or an alias of both endpoint entities. A reasoning model
+        sometimes asserts a relationship whose selected evidence quote supports only
+        one endpoint (or neither) — a relationship that is not textually supported.
+        Such relationships are removed here rather than aborting the chunk. Every
+        relationship that survives is still endpoint-grounded, so the storage
+        guarantee is preserved; this only tolerates model over-assertion. Dropped
+        relationship_refs are cascaded out of their owning requirements, and any
+        entity left referenced by nothing is dropped in turn, so the result still
+        satisfies RequirementDiscoveryChunkResponse's referential rules.
+        """
+        entities_by_ref = {entity.entity_ref: entity for entity in response.entities}
+        kept_relationships: list[LLMRelationshipCandidate] = []
+        dropped = False
+        for relationship in response.relationships:
+            source = entities_by_ref.get(relationship.source_entity_ref)
+            target = entities_by_ref.get(relationship.target_entity_ref)
+            if (
+                source is not None
+                and target is not None
+                and _entity_grounded(source.name, source.aliases, relationship.evidence_quote)
+                and _entity_grounded(target.name, target.aliases, relationship.evidence_quote)
+            ):
+                kept_relationships.append(relationship)
+            else:
+                dropped = True
+        if not dropped:
+            return response
+
+        surviving_relationship_refs = {
+            relationship.relationship_ref for relationship in kept_relationships
+        }
+        referenced_entities: set[str] = set()
+        pruned_requirements: list[LLMRequirementCandidate] = []
+        for requirement in response.requirements:
+            relationship_refs = [
+                ref for ref in requirement.relationship_refs if ref in surviving_relationship_refs
+            ]
+            if len(relationship_refs) != len(requirement.relationship_refs):
+                requirement = requirement.model_copy(
+                    update={"relationship_refs": relationship_refs}
+                )
+            pruned_requirements.append(requirement)
+            referenced_entities.update(requirement.entity_refs)
+        for relationship in kept_relationships:
+            referenced_entities.update(
+                (relationship.source_entity_ref, relationship.target_entity_ref)
+            )
+        pruned_entities = [
+            entity for entity in response.entities if entity.entity_ref in referenced_entities
+        ]
+        return RequirementDiscoveryChunkResponse(
+            chunk_id=response.chunk_id,
+            requirements=pruned_requirements,
+            entities=pruned_entities,
+            relationships=kept_relationships,
+        )
+
+    @staticmethod
+    def _repair_source_evidence(
+        chunk: ManifestChunk,
+        response: RequirementDiscoveryChunkResponse,
+    ) -> RequirementDiscoveryChunkResponse:
+        """Deterministically strip the source-ID prefix from a whole-row evidence
+        quote on an explicit source requirement, before validation.
+
+        The layout-aware parser stores an explicit requirement row as
+        ``"<source_req_id> <requirement_text>"``, but the canonical requirement
+        text is only the portion after the ID. When a reasoning model quotes the
+        entire row verbatim (ID prefix included) as evidence for that exact source
+        row, the quote is still grounded yet fails the strict rule that the row's
+        requirement text appear as a standalone evidence quote. This replaces only
+        that whole-row quote with the expected requirement text; every other quote,
+        the requirement text itself, and all generated (non-source) requirements
+        are left untouched. Nothing is loosened: a quote is repaired only when it
+        is exactly ``"<source_req_id> <expected_text>"`` up to whitespace, so
+        arbitrary longer evidence is never accepted.
+        """
+        explicit_rows = _explicit_requirement_rows(chunk.chunk_text)
+        if not explicit_rows:
+            return response
+        repaired_requirements: list[LLMRequirementCandidate] = []
+        changed = False
+        for requirement in response.requirements:
+            expected_text = (
+                explicit_rows.get(requirement.source_req_id or "")
+                if requirement.source_req_id_type == "source"
+                else None
+            )
+            if expected_text is None:
+                repaired_requirements.append(requirement)
+                continue
+            prefixed = _normalize(f"{requirement.source_req_id} {expected_text}")
+            new_quotes: list[str] = []
+            requirement_changed = False
+            for quote in requirement.evidence_quotes:
+                if _normalize(quote) == prefixed:
+                    requirement_changed = True
+                    candidate = expected_text
+                else:
+                    candidate = quote
+                if candidate not in new_quotes:
+                    new_quotes.append(candidate)
+            if requirement_changed:
+                changed = True
+                requirement = requirement.model_copy(update={"evidence_quotes": new_quotes})
+            repaired_requirements.append(requirement)
+        if not changed:
+            return response
+        return response.model_copy(update={"requirements": repaired_requirements})
 
     @staticmethod
     def validate_response(
@@ -329,10 +457,33 @@ def _evidence_quote_candidates(chunk_text: str) -> list[str]:
     return candidates
 
 
+def _strip_generated_evidence_framing(text: str) -> str:
+    """Remove known non-requirement document framing from a normalized quote."""
+    stripped = text
+    for pattern in _GENERATED_EVIDENCE_FRAMING:
+        stripped = pattern.sub(" ", stripped)
+    return _normalize(stripped)
+
+
+def _semantic_marker_evidence_text(requirement: LLMRequirementCandidate) -> str:
+    """Join evidence quotes for semantic-marker scanning.
+
+    For generated requirements only, deterministically strip known document framing
+    such as a "Definition of Done ... the feature is complete when:" acceptance
+    preamble, so a framing-only marker word (e.g. the "when" in that preamble) is not
+    mistaken for a requirement condition that the requirement_text dropped. Source
+    requirements and all other evidence text keep their exact normalized form, so real
+    dropped modality, threshold, timing, or condition markers still fail validation.
+    """
+    quotes = [_normalize(quote) for quote in requirement.evidence_quotes]
+    if requirement.source_req_id_type != "source":
+        quotes = [_strip_generated_evidence_framing(quote) for quote in quotes]
+    return " ".join(quote for quote in quotes if quote)
+
+
 def _require_semantic_markers(requirement: LLMRequirementCandidate) -> None:
-    evidence_quotes = requirement.evidence_quotes
     requirement_text = _normalize(requirement.requirement_text).casefold()
-    evidence_text = " ".join(_normalize(quote) for quote in evidence_quotes)
+    evidence_text = _semantic_marker_evidence_text(requirement)
     missing = {
         _normalize(match.group(0)).casefold()
         for match in _SEMANTIC_MARKERS.finditer(evidence_text)

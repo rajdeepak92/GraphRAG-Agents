@@ -21,6 +21,11 @@ from multi_agentic_graph_rag.observability.logging import get_logger
 _LOG = get_logger(__name__)
 
 _STAGE4_ARTIFACT_DIRECTORIES = ("stage-4", "test-cases")
+_STAGE123_ARTIFACT_DIRECTORIES: dict[str, tuple[str, ...]] = {
+    "1": ("requirements", "user-stories", "test-scenario"),
+    "2": ("user-stories", "test-scenario"),
+    "3": ("test-scenario",),
+}
 _STAGE4_POSTGRES_DELETES = (
     (
         "idempotency_records",
@@ -71,6 +76,65 @@ def reset_stage4_project(project: str, settings: AppSettings) -> dict[str, Any]:
         summary["postgres_rows_deleted"],
         summary["code_graph_rows_deleted"],
         len(removed),
+    )
+    return summary
+
+
+def reset_stage_run(
+    project: str,
+    run_id: str,
+    stage: str,
+    settings: AppSettings,
+) -> dict[str, Any]:
+    """Clear one failed Stage 1-3 run while preserving valid upstream state.
+
+    Reset scope cascades forward because regenerated upstream artifacts invalidate
+    their downstream consumers: Stage 1 clears Stages 1-3, Stage 2 clears Stages
+    2-3, and Stage 3 clears only Stage 3. Stage 4 and user-owned source documents
+    are always retained.
+    """
+    if not project.strip():
+        raise ValueError("project must not be empty")
+    if not run_id.strip():
+        raise ValueError("run_id must not be empty")
+    if stage not in _STAGE123_ARTIFACT_DIRECTORIES:
+        raise ValueError("stage must be one of: 1, 2, 3")
+
+    postgres = PostgresStore(settings)
+    postgres.ensure_schema()
+    summary: dict[str, Any] = {
+        "project": project,
+        "run_id": run_id,
+        "scope": f"stage-{stage}",
+        "cleared_stages": list(range(int(stage), 4)),
+        "stage4_retained": True,
+        "source_documents_retained": True,
+    }
+    with postgres.project_maintenance_lease(project):
+        if stage == "1":
+            summary["neo4j_rows_deleted"] = Neo4jStore(settings).delete_run(project, run_id)
+            summary["chroma_embeddings_deleted"] = ChromaStore(settings).delete_run(project, run_id)
+        else:
+            summary["neo4j_rows_deleted"] = {}
+            summary["chroma_embeddings_deleted"] = 0
+
+        summary["postgres_rows_deleted"] = postgres.delete_stage_run(project, run_id, stage)
+        summary["artifact_directories_removed"] = _remove_stage_run_artifacts(
+            project,
+            run_id,
+            stage,
+            settings.paths.generated_dir,
+        )
+
+    _LOG.info(
+        "reset.stage_run project=%s run_id=%s stage=%s postgres=%s neo4j=%s chroma=%s artifacts=%s",
+        project,
+        run_id,
+        stage,
+        summary["postgres_rows_deleted"],
+        summary["neo4j_rows_deleted"],
+        summary["chroma_embeddings_deleted"],
+        len(summary["artifact_directories_removed"]),
     )
     return summary
 
@@ -148,11 +212,46 @@ def _remove_stage4_artifacts(project: str, generated_dir: Path) -> list[str]:
     return sorted(removed)
 
 
+def _remove_stage_run_artifacts(
+    project: str,
+    run_id: str,
+    stage: str,
+    generated_dir: Path,
+) -> list[str]:
+    generated_root = generated_dir.resolve()
+    run_component = Path(run_id)
+    if run_id in {"", ".", ".."} or run_component.name != run_id:
+        raise ValueError("run_id must be a single directory name")
+    run_root = generated_root / normalize_project(project) / run_id
+    _assert_within(run_root, generated_root)
+    if not run_root.exists():
+        return []
+    if run_root.is_symlink():
+        raise ValueError("generated run directory must not be a symlink")
+    if not run_root.is_dir():
+        raise ValueError("generated run path must be a directory")
+
+    removed: list[str] = []
+    for directory_name in _STAGE123_ARTIFACT_DIRECTORIES[stage]:
+        target = run_root / directory_name
+        _assert_within(target, generated_root)
+        if target.is_symlink():
+            target.unlink()
+            removed.append(str(target))
+        elif target.is_dir():
+            shutil.rmtree(target)
+            removed.append(str(target))
+        elif target.exists():
+            target.unlink()
+            removed.append(str(target))
+    return sorted(removed)
+
+
 def _assert_within(path: Path, root: Path) -> None:
     try:
         path.resolve(strict=False).relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"Stage-4 artifact path escapes generated_dir: {path}") from exc
+        raise ValueError(f"generated artifact path escapes generated_dir: {path}") from exc
 
 
 def _row_project(row: dict[str, Any]) -> str | None:
@@ -227,4 +326,4 @@ def reset_project(project: str, settings: AppSettings) -> dict[str, Any]:
     return summary
 
 
-__all__ = ["reset_project", "reset_stage4_project"]
+__all__ = ["reset_project", "reset_stage4_project", "reset_stage_run"]

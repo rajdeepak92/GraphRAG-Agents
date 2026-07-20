@@ -132,6 +132,25 @@ class ChromaStore:
             return False
         return True
 
+    def delete_run(self, project: str, run_id: str) -> int:
+        """Delete Stage 1 embeddings written by one project/run."""
+        if not project.strip():
+            raise ValueError("project must not be empty")
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        try:
+            collection = self._client().get_collection(self.collection_name(project))
+        except Exception:
+            return 0
+        result = collection.get(
+            where={"$and": [{"project": project}, {"run_id": run_id}]},
+            include=[],
+        )
+        ids = [str(value) for value in _as_list(result.get("ids"))]
+        if ids:
+            collection.delete(ids=ids)
+        return len(ids)
+
     def _client(self) -> Any:
         import chromadb
 

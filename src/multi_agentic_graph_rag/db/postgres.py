@@ -106,6 +106,214 @@ _PROJECT_DELETE_STEPS: tuple[tuple[str, str], ...] = (
 )
 _CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
 
+# --- Run-scoped, stage-based reset ------------------------------------------
+# Every step below is FK-safe (children before parents) and takes exactly
+# ``(project, run_id)`` parameters. Resetting a stage always cascades FORWARD:
+# re-running stage N invalidates every downstream stage, so stage 1 clears 1-3,
+# stage 2 clears 2-3, and stage 3 clears itself. workflow_runs (stage LIKE) and
+# LangGraph checkpoints are handled in ``delete_stage_run`` using _STAGE_PREFIXES.
+_STAGE3_RUN_DELETES: tuple[tuple[str, str], ...] = (
+    (
+        "scenario_criteria",
+        "DELETE FROM scenario_criteria c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "scenario_evidence",
+        "DELETE FROM scenario_evidence c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "scenario_entities",
+        "DELETE FROM scenario_entities c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "scenario_relationships",
+        "DELETE FROM scenario_relationships c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "story_scenarios",
+        "DELETE FROM story_scenarios c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "requirement_scenarios",
+        "DELETE FROM requirement_scenarios c USING test_scenarios p"
+        " WHERE c.scenario_id = p.scenario_id AND p.project = %s AND p.run_id = %s",
+    ),
+    ("test_scenarios", "DELETE FROM test_scenarios WHERE project = %s AND run_id = %s"),
+    (
+        "generation_context.test_scenario",
+        "DELETE FROM generation_context"
+        " WHERE project = %s AND run_id = %s AND stage = 'test_scenario'",
+    ),
+    (
+        "master_artifacts.test_scenarios",
+        "DELETE FROM master_artifacts"
+        " WHERE project = %s AND run_id = %s AND stage = 'test_scenarios'",
+    ),
+)
+_STAGE2_RUN_DELETES: tuple[tuple[str, str], ...] = (
+    (
+        "acceptance_criteria",
+        "DELETE FROM acceptance_criteria c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "story_evidence",
+        "DELETE FROM story_evidence c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "story_entities",
+        "DELETE FROM story_entities c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "story_relationships",
+        "DELETE FROM story_relationships c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "requirement_stories",
+        "DELETE FROM requirement_stories c USING user_stories p"
+        " WHERE c.story_id = p.story_id AND p.project = %s AND p.run_id = %s",
+    ),
+    ("user_stories", "DELETE FROM user_stories WHERE project = %s AND run_id = %s"),
+    (
+        "generation_context.user_story",
+        "DELETE FROM generation_context"
+        " WHERE project = %s AND run_id = %s AND stage = 'user_story'",
+    ),
+    (
+        "master_artifacts.user_stories",
+        "DELETE FROM master_artifacts"
+        " WHERE project = %s AND run_id = %s AND stage = 'user_stories'",
+    ),
+)
+_STAGE1_RUN_DELETES: tuple[tuple[str, str], ...] = (
+    (
+        "requirement_evidence",
+        "DELETE FROM requirement_evidence c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "requirement_chunks",
+        "DELETE FROM requirement_chunks c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "requirement_entities",
+        "DELETE FROM requirement_entities c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "requirement_relationships",
+        "DELETE FROM requirement_relationships c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "requirement_stories.by_requirement",
+        "DELETE FROM requirement_stories c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s AND p.run_id = %s",
+    ),
+    (
+        "requirement_scenarios.by_requirement",
+        "DELETE FROM requirement_scenarios c USING requirements p"
+        " WHERE c.requirement_id = p.requirement_id AND p.project = %s AND p.run_id = %s",
+    ),
+    ("requirements", "DELETE FROM requirements WHERE project = %s AND run_id = %s"),
+    (
+        "generation_context.run",
+        "DELETE FROM generation_context WHERE project = %s AND run_id = %s",
+    ),
+    (
+        "master_artifacts.requirements",
+        "DELETE FROM master_artifacts"
+        " WHERE project = %s AND run_id = %s AND stage = 'requirements'",
+    ),
+    (
+        "knowledge_graph_readiness",
+        "DELETE FROM knowledge_graph_readiness WHERE project = %s AND build_run_id = %s",
+    ),
+)
+_STAGE_RUN_DELETES: dict[str, tuple[tuple[str, str], ...]] = {
+    "3": _STAGE3_RUN_DELETES,
+    "2": _STAGE3_RUN_DELETES + _STAGE2_RUN_DELETES,
+    "1": _STAGE3_RUN_DELETES + _STAGE2_RUN_DELETES + _STAGE1_RUN_DELETES,
+}
+# workflow_runs stage values + LangGraph checkpoint thread stage labels, cascaded
+# forward. A LIKE '<prefix>%' catches sub-stages (stage-1.1, stage-1.2-chunks,
+# stage-2-requirements, stage-3-stories).
+_STAGE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "3": ("stage-3",),
+    "2": ("stage-2", "stage-3"),
+    "1": ("stage-1", "stage-2", "stage-3"),
+}
+# local_json equivalents (artifacts stored as whole-blob rows, keyed by stage).
+_STAGE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
+    "3": frozenset({"test_scenarios"}),
+    "2": frozenset({"user_stories", "test_scenarios"}),
+    "1": frozenset({"requirements", "user_stories", "test_scenarios"}),
+}
+# generation_context stage values per reset; None means "every context for the run".
+_STAGE_CONTEXT_KINDS: dict[str, frozenset[str] | None] = {
+    "3": frozenset({"test_scenario"}),
+    "2": frozenset({"user_story", "test_scenario"}),
+    "1": None,
+}
+
+
+def _stage_reset_local_label(
+    row: dict[str, Any],
+    *,
+    project: str,
+    run_id: str,
+    stage: str,
+) -> str | None:
+    """Return the logical store label when a local row is in reset scope."""
+    kind = str(row.get("kind", ""))
+    key = str(row.get("key", ""))
+    payload = row.get("payload")
+    data = payload if isinstance(payload, dict) else {}
+    prefixes = _STAGE_PREFIXES[stage]
+
+    if kind == "run":
+        row_stage = str(data.get("stage", ""))
+        if (
+            data.get("project") == project
+            and data.get("run_id") == run_id
+            and any(row_stage.startswith(prefix) for prefix in prefixes)
+        ):
+            return "workflow_runs"
+        return None
+
+    key_prefix = f"{project}:{run_id}:"
+    if kind == "artifact" and key.startswith(key_prefix):
+        artifact_kind = key[len(key_prefix) :]
+        if artifact_kind in _STAGE_ARTIFACT_KINDS[stage]:
+            return f"master_artifacts.{artifact_kind}"
+        return None
+
+    if kind == "context" and key.startswith(key_prefix):
+        context_kind = key[len(key_prefix) :].split(":", 1)[0]
+        allowed = _STAGE_CONTEXT_KINDS[stage]
+        if allowed is None or context_kind in allowed:
+            return f"generation_context.{context_kind}"
+        return None
+
+    if (
+        stage == "1"
+        and kind == "readiness"
+        and key == project
+        and data.get("build_run_id") == run_id
+    ):
+        return "knowledge_graph_readiness"
+    return None
+
+
 _BASELINE_REQUIRED_COLUMNS = {
     "requirements": {
         "requirement_id",
@@ -405,6 +613,67 @@ class PostgresStore:
                 cursor.execute(
                     f"DELETE FROM {table} WHERE thread_id LIKE %s",
                     (thread_prefix,),
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    removed[table] = cursor.rowcount
+            connection.commit()
+        return removed
+
+    def delete_stage_run(self, project: str, run_id: str, stage: str) -> dict[str, int]:
+        """Delete one run's selected stage and all downstream Stage 1-3 state."""
+        if stage not in _STAGE_RUN_DELETES:
+            raise ValueError("stage must be one of: 1, 2, 3")
+        if not project.strip():
+            raise ValueError("project must not be empty")
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+
+        if self.settings.postgres.mode == "local_json":
+            removed: dict[str, int] = {}
+            kept: list[dict[str, Any]] = []
+            for row in self._local_rows():
+                label = _stage_reset_local_label(
+                    row,
+                    project=project,
+                    run_id=run_id,
+                    stage=stage,
+                )
+                if label is None:
+                    kept.append(row)
+                else:
+                    removed[label] = removed.get(label, 0) + 1
+            _write_rows(self.settings.postgres.local_path, kept)
+            return removed
+
+        removed = {}
+        workflow_patterns = [f"{prefix}%" for prefix in _STAGE_PREFIXES[stage]]
+        thread_patterns = [
+            f"{normalize_project(project)}:{run_id}:{prefix}%" for prefix in _STAGE_PREFIXES[stage]
+        ]
+        with self._connect() as connection, connection.cursor() as cursor:
+            for table, statement in _STAGE_RUN_DELETES[stage]:
+                cursor.execute(statement, (project, run_id))
+                if cursor.rowcount and cursor.rowcount > 0:
+                    removed[table] = cursor.rowcount
+
+            workflow_clause = " OR ".join("stage LIKE %s" for _ in workflow_patterns)
+            cursor.execute(
+                "DELETE FROM workflow_runs WHERE project = %s AND run_id = %s AND ("
+                f"{workflow_clause})",
+                (project, run_id, *workflow_patterns),
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                removed["workflow_runs"] = cursor.rowcount
+
+            checkpoint_clause = " OR ".join("thread_id LIKE %s" for _ in thread_patterns)
+            for table in _CHECKPOINT_TABLES:
+                cursor.execute("SELECT to_regclass(%s)", (table,))
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    continue
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE {checkpoint_clause}",
+                    tuple(thread_patterns),
                 )
                 if cursor.rowcount and cursor.rowcount > 0:
                     removed[table] = cursor.rowcount

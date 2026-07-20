@@ -204,6 +204,24 @@ development PostgreSQL database:
 uv run python -m multi_agentic_graph_rag postgres-reset --yes
 ```
 
+Reset one failed Stage 1-3 run without deleting valid upstream work:
+
+```powershell
+uv run python -m multi_agentic_graph_rag stage-reset `
+  --project customer-portal `
+  --run-id RUN-20260721T010203Z-ABC123 `
+  --stage 2 `
+  --yes
+```
+
+The reset is scoped by both project and run ID and cascades forward: Stage 1
+clears Stages 1-3, Stage 2 clears Stages 2-3, and Stage 3 clears only Stage 3.
+It removes the selected stages' PostgreSQL artifacts, contexts, workflow rows,
+LangGraph checkpoints, and generated directories. Stage 1 additionally removes
+that run's Neo4j chunks/semantic projection and Chroma embeddings. User source
+documents and all Stage 4 state are retained. Use `project-reset` only when the
+entire project must be removed.
+
 Reset one project across Neo4j, ChromaDB, PostgreSQL checkpoints/artifacts, and
 generated files only when explicitly intended:
 

@@ -473,8 +473,13 @@ class AcceptanceCriterion(LLMAcceptanceCriterion):
     criterion_id: str
 
 
-class LLMUserStoryCandidate(SourceProvenance):
-    """Temporary Stage 2 story candidate."""
+class LLMUserStoryDraft(StrictModel):
+    """Stage 2 story body as returned by the model, before provenance stamping.
+
+    Provenance (``source_req_id``/``source_req_id_type``) is intentionally absent:
+    it is deterministically inherited from the active requirement by the agent, so
+    the model is never asked to reproduce it.
+    """
 
     story_ref: str
     title: str
@@ -487,6 +492,28 @@ class LLMUserStoryCandidate(SourceProvenance):
     supporting_entity_ids: list[str]
     supporting_relationship_ids: list[str]
     confidence: Confidence
+
+
+class LLMUserStoryCandidate(LLMUserStoryDraft, SourceProvenance):
+    """Temporary Stage 2 story candidate with provenance inherited from the requirement."""
+
+
+class UserStoryGenerationDraft(StrictModel):
+    """Model-facing Stage 2 response: story bodies without provenance.
+
+    The agent stamps the requirement's provenance onto each draft to build the
+    canonical :class:`UserStoryGenerationResponse`.
+    """
+
+    requirement_id: str
+    user_stories: list[LLMUserStoryDraft]
+
+    @model_validator(mode="after")
+    def unique_refs(self) -> UserStoryGenerationDraft:
+        refs = [story.story_ref for story in self.user_stories]
+        if len(refs) != len(set(refs)):
+            raise ValueError("story_ref values must be unique")
+        return self
 
 
 class UserStoryGenerationResponse(StrictModel):
@@ -544,8 +571,13 @@ class UserStoriesArtifact(StrictModel):
         return self
 
 
-class LLMTestScenarioCandidate(SourceProvenance):
-    """Temporary Stage 3 scenario candidate."""
+class LLMTestScenarioDraft(StrictModel):
+    """Stage 3 scenario body as returned by the model, before provenance stamping.
+
+    Provenance is intentionally absent because it is deterministically inherited
+    from the active story by the agent.  Keeping it out of the model-facing schema
+    prevents canonical requirement IDs from being confused with source IDs.
+    """
 
     scenario_ref: str
     title: str
@@ -560,6 +592,25 @@ class LLMTestScenarioCandidate(SourceProvenance):
     supporting_entity_ids: list[str]
     supporting_relationship_ids: list[str]
     confidence: Confidence
+
+
+class LLMTestScenarioCandidate(LLMTestScenarioDraft, SourceProvenance):
+    """Temporary Stage 3 scenario candidate with provenance inherited from the story."""
+
+
+class TestScenarioGenerationDraft(StrictModel):
+    """Model-facing Stage 3 response containing scenario bodies without provenance."""
+
+    story_id: str
+    requirement_ids: list[str]
+    test_scenarios: list[LLMTestScenarioDraft]
+
+    @model_validator(mode="after")
+    def unique_refs(self) -> TestScenarioGenerationDraft:
+        refs = [scenario.scenario_ref for scenario in self.test_scenarios]
+        if len(refs) != len(set(refs)):
+            raise ValueError("scenario_ref values must be unique")
+        return self
 
 
 class TestScenarioGenerationResponse(StrictModel):
@@ -732,7 +783,9 @@ __all__ = [
     "LLMRelationshipCandidate",
     "LLMRequirementCandidate",
     "LLMTestScenarioCandidate",
+    "LLMTestScenarioDraft",
     "LLMUserStoryCandidate",
+    "LLMUserStoryDraft",
     "ManifestChunk",
     "ParsedBlock",
     "ProgressItem",
@@ -748,10 +801,12 @@ __all__ = [
     "StageRequest",
     "StoryContext",
     "StrictModel",
+    "TestScenarioGenerationDraft",
     "TestScenarioGenerationResponse",
     "TestScenariosArtifact",
     "Traceability",
     "UserStoriesArtifact",
+    "UserStoryGenerationDraft",
     "UserStoryGenerationResponse",
     "canonical_checksum",
     "utc_now",

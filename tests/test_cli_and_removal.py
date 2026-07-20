@@ -23,6 +23,7 @@ def test_cli_exposes_only_current_workflow_commands() -> None:
         "coverage",
         "postgres-reset",
         "project-reset",
+        "stage-reset",
     ):
         assert command in result.stdout
     for removed in (

@@ -264,7 +264,12 @@ def test_ungrounded_entity_quote_is_pruned_not_fatal() -> None:
             assert _entity_grounded(entity.name, entity.aliases, quote)
 
 
-def test_relationship_quote_must_ground_both_endpoints() -> None:
+def test_relationship_quote_ungrounded_endpoint_is_pruned_not_fatal() -> None:
+    # Both entities are individually grounded, but the relationship's chosen quote
+    # grounds only the source endpoint, not the target. Rather than halting the chunk,
+    # the unsupported relationship is pruned and cascaded out of its owning requirement,
+    # mirroring the tolerance already applied to over-attached entity quotes. Every
+    # relationship that survives is still endpoint-grounded.
     sentence = "The controller shall collect data from configured sensors."
     interface_evidence = "The Modbus communication interface is available."
     payload = _response(sentence, source_id="BR-SEN-001")
@@ -272,8 +277,11 @@ def test_relationship_quote_must_ground_both_endpoints() -> None:
     payload["entities"][1]["normalized_name"] = "modbus communication interface"
     payload["entities"][1]["evidence_quotes"] = [interface_evidence]
     chunk_text = f"BR-SEN-001 {sentence}\n{interface_evidence}"
-    with pytest.raises(SemanticValidationError, match="target endpoint"):
-        RequirementDiscoveryAgent(_Model(payload)).discover(_chunk(chunk_text))
+    response = RequirementDiscoveryAgent(_Model(payload)).discover(_chunk(chunk_text))
+    assert response.relationships == []
+    assert response.requirements[0].relationship_refs == []
+    # Both entities remain: the requirement itself still references them via entity_refs.
+    assert [entity.entity_ref for entity in response.entities] == ["ENTREF-1", "ENTREF-2"]
 
 
 def test_valid_relationship_is_owned_and_grounded() -> None:

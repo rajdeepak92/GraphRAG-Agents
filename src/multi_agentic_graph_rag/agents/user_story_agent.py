@@ -7,7 +7,9 @@ import json
 from multi_agentic_graph_rag.common_prompt_defs import PromptUserStoryGeneration
 from multi_agentic_graph_rag.domain.schemas import (
     CanonicalRequirement,
+    LLMUserStoryCandidate,
     StoryContext,
+    UserStoryGenerationDraft,
     UserStoryGenerationResponse,
 )
 from multi_agentic_graph_rag.llm_models.ports import ReasoningModel
@@ -38,14 +40,15 @@ class UserStoryGenerationAgent:
                     "Return a corrected object for the same requirement and frozen context."
                 )
             try:
-                response = self.reasoning_model.generate_structured(
+                draft = self.reasoning_model.generate_structured(
                     prompt=json.dumps(prompt_payload, ensure_ascii=False),
-                    schema=UserStoryGenerationResponse,
+                    schema=UserStoryGenerationDraft,
                     system_message=PromptUserStoryGeneration.SYSTEM.value,
                     operation="user_story.generate" if attempt == 1 else "user_story.repair",
                     request_id=requirement.requirement_id,
-                    max_attempts=1,
+                    max_attempts=2,
                 )
+                response = self._stamp_provenance(requirement, draft)
                 self._validate(requirement, context, response)
                 return response
             except Exception as exc:
@@ -53,6 +56,29 @@ class UserStoryGenerationAgent:
                     raise
                 feedback = str(exc)
         raise AssertionError("unreachable")
+
+    @staticmethod
+    def _stamp_provenance(
+        requirement: CanonicalRequirement,
+        draft: UserStoryGenerationDraft,
+    ) -> UserStoryGenerationResponse:
+        """Inherit provenance from the requirement instead of trusting the model.
+
+        Provenance is deterministic (it must equal the requirement's, see
+        :meth:`_validate`), so it is stamped here rather than reproduced by the
+        model, which otherwise conflates ``requirement_id`` with ``source_req_id``.
+        """
+        return UserStoryGenerationResponse(
+            requirement_id=draft.requirement_id,
+            user_stories=[
+                LLMUserStoryCandidate(
+                    source_req_id=requirement.source_req_id,
+                    source_req_id_type=requirement.source_req_id_type,
+                    **story.model_dump(),
+                )
+                for story in draft.user_stories
+            ],
+        )
 
     @staticmethod
     def _validate(

@@ -571,6 +571,135 @@ class Neo4jStore:
             ).consume()
             return int(summary.counters.nodes_deleted)
 
+    def delete_run(self, project: str, run_id: str) -> dict[str, int]:
+        """Delete Stage 1 graph state owned by one project/run."""
+        if not project.strip():
+            raise ValueError("project must not be empty")
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+
+        if self.settings.neo4j.mode == "local_json":
+            rows = self._local_rows()
+            local_chunk_ids = {
+                str(row["chunk_id"])
+                for row in rows
+                if row.get("kind") == "chunk"
+                and row.get("project") == project
+                and row.get("run_id") == run_id
+            }
+            removed = {
+                "chunks": sum(
+                    row.get("kind") == "chunk"
+                    and row.get("project") == project
+                    and row.get("chunk_id") in local_chunk_ids
+                    for row in rows
+                ),
+                "mentions": sum(
+                    row.get("kind") == "mention"
+                    and row.get("project") == project
+                    and row.get("chunk_id") in local_chunk_ids
+                    for row in rows
+                ),
+                "semantic_relationships": sum(
+                    row.get("kind") == "relationship"
+                    and row.get("project") == project
+                    and row.get("chunk_id") in local_chunk_ids
+                    for row in rows
+                ),
+            }
+            kept = [
+                row
+                for row in rows
+                if not (
+                    row.get("project") == project
+                    and (
+                        (row.get("kind") == "chunk" and row.get("chunk_id") in local_chunk_ids)
+                        or (
+                            row.get("kind") in {"mention", "relationship"}
+                            and row.get("chunk_id") in local_chunk_ids
+                        )
+                    )
+                )
+            ]
+            referenced_entities = {
+                str(value)
+                for row in kept
+                if row.get("project") == project
+                for value in (
+                    row.get("entity_id") if row.get("kind") == "mention" else None,
+                    row.get("source_entity_id") if row.get("kind") == "relationship" else None,
+                    row.get("target_entity_id") if row.get("kind") == "relationship" else None,
+                )
+                if value is not None
+            }
+            before_orphans = len(kept)
+            kept = [
+                row
+                for row in kept
+                if not (
+                    row.get("kind") == "entity"
+                    and row.get("project") == project
+                    and row.get("entity_id") not in referenced_entities
+                )
+            ]
+            removed["orphan_entities"] = before_orphans - len(kept)
+            _write_rows(self.settings.neo4j.local_path, kept)
+            return removed
+
+        with self._session() as session:
+            remote_chunk_ids = [
+                str(record["chunk_id"])
+                for record in session.run(
+                    """
+                    MATCH (c:Chunk {project: $project, run_id: $run_id})
+                    RETURN c.chunk_id AS chunk_id
+                    """,
+                    project=project,
+                    run_id=run_id,
+                )
+            ]
+            if not remote_chunk_ids:
+                return {
+                    "chunks": 0,
+                    "mentions": 0,
+                    "semantic_relationships": 0,
+                    "orphan_entities": 0,
+                }
+            semantic = session.run(
+                """
+                MATCH ()-[r]->()
+                WHERE type(r) IN $relationship_types
+                  AND r.project = $project
+                  AND r.chunk_id IN $chunk_ids
+                DELETE r
+                """,
+                project=project,
+                chunk_ids=remote_chunk_ids,
+                relationship_types=sorted(_RELATIONSHIP_TYPES),
+            ).consume()
+            chunks = session.run(
+                """
+                MATCH (c:Chunk {project: $project, run_id: $run_id})
+                DETACH DELETE c
+                """,
+                project=project,
+                run_id=run_id,
+            ).consume()
+            orphans = session.run(
+                """
+                MATCH (e:Entity {project: $project})
+                WHERE NOT (e)--()
+                DELETE e
+                """,
+                project=project,
+            ).consume()
+        return {
+            "chunks": int(chunks.counters.nodes_deleted),
+            "mentions": int(chunks.counters.relationships_deleted),
+            "semantic_relationships": int(semantic.counters.relationships_deleted),
+            "orphan_entities": int(orphans.counters.nodes_deleted),
+        }
+
     def _driver(self) -> Any:
         from neo4j import GraphDatabase
 

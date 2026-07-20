@@ -278,7 +278,92 @@ serves reasoning/embedding.
 
 ---
 
-## 4. Provider-override cheat-sheet
+## 4. Stage-scoped failure recovery
+
+Stages 1-3 can leave durable partial state when a provider, validation gate, or
+backing service fails. Before retrying, reset the failed run at the stage where
+the failure occurred. The reset is scoped by both `--project` and `--run-id`
+and automatically clears downstream stages whose inputs are no longer valid.
+
+Use the exact run ID from the command output or stage log (for example,
+`stage-1.2.start ... run_id=RUN-...`). It also appears as the directory name
+under `generated/<normalized-project>/` once local artifacts have been written.
+
+```powershell
+uv run python -m multi_agentic_graph_rag stage-reset `
+  --project customer-portal `
+  --run-id RUN-abc123 `
+  --stage 2 `
+  --yes
+```
+
+`--yes` is mandatory because the command permanently deletes the selected
+run's managed state. It does not delete user source documents, Stage-4 state,
+other runs, or other projects.
+
+| Failure point | Reset scope | State cleared | State retained | Retry sequence |
+|---------------|-------------|---------------|----------------|----------------|
+| Stage 1.1 or 1.2 | `--stage 1` | Stages 1-3 PostgreSQL artifacts, contexts, workflow rows and LangGraph checkpoints; generated `requirements`, `user-stories`, and `test-scenario` directories; this run's Neo4j projection and Chroma embeddings | Source document and Stage 4 | Run `ingest` again; it creates a new run ID, then run Stages 2 and 3 with that new ID |
+| Stage 2 | `--stage 2` | Stage 2 and 3 PostgreSQL artifacts, contexts, workflow rows and checkpoints; generated `user-stories` and `test-scenario` directories | Stage-1 requirements, Neo4j/Chroma state, source document, and Stage 4 | Run `generate-user-stories` with the same run ID, then `generate-test-scenarios` |
+| Stage 3 | `--stage 3` | Stage-3 PostgreSQL artifacts, contexts, workflow rows and checkpoints; generated `test-scenario` directory | Stages 1 and 2, source document, and Stage 4 | Run `generate-test-scenarios` with the same run ID |
+
+### 4.1 Stage 1 retry
+
+```powershell
+uv run python -m multi_agentic_graph_rag stage-reset `
+  --project customer-portal --run-id RUN-abc123 --stage 1 --yes
+
+# A fresh ingest creates a new run ID.
+uv run python -m multi_agentic_graph_rag ingest `
+  --project customer-portal `
+  --document .\documents\requirements.docx
+```
+
+### 4.2 Stage 2 retry
+
+```powershell
+uv run python -m multi_agentic_graph_rag stage-reset `
+  --project customer-portal --run-id RUN-abc123 --stage 2 --yes
+
+uv run python -m multi_agentic_graph_rag generate-user-stories `
+  --project customer-portal --run-id RUN-abc123
+
+uv run python -m multi_agentic_graph_rag generate-test-scenarios `
+  --project customer-portal --run-id RUN-abc123
+```
+
+### 4.3 Stage 3 retry
+
+```powershell
+uv run python -m multi_agentic_graph_rag stage-reset `
+  --project customer-portal --run-id RUN-abc123 --stage 3 --yes
+
+uv run python -m multi_agentic_graph_rag generate-test-scenarios `
+  --project customer-portal --run-id RUN-abc123
+```
+
+> A stage reset is not an embedding-model migration. If the embedding provider,
+> model, or vector dimension changed, the existing Chroma collection is
+> semantically incompatible and may retain its original dimension even after a
+> run-scoped deletion. Use `project-reset --project <name> --yes`, then re-ingest
+> the project's documents with the new embedding configuration.
+
+Use `project-reset` only when all Stage 1-3 data for a project must be removed:
+
+```powershell
+uv run python -m multi_agentic_graph_rag project-reset `
+  --project customer-portal `
+  --yes
+```
+
+Stage 4 has a separate lifecycle. Stage 1-3 resets deliberately retain its
+state; Stage-4 maintenance integrations use
+`reset_stage4_project(project, settings)` when replayable code-generation
+coordination state must be cleared.
+
+---
+
+## 5. Provider-override cheat-sheet
 
 Precedence: **per-command flag** > **environment variable / `.env`** > default.
 
@@ -294,7 +379,7 @@ Precedence: **per-command flag** > **environment variable / `.env`** > default.
 
 ---
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
@@ -306,3 +391,6 @@ Precedence: **per-command flag** > **environment variable / `.env`** > default.
 | `HUGGINGFACE_DEVICE=cuda ... CUDA is unavailable` | install CUDA-enabled PyTorch or set `HUGGINGFACE_DEVICE=cpu` |
 | Reranker slow / re-downloading on first run | expected once — `bge-reranker-base` populates the HF cache |
 | Unsupported reasoning/embedding provider error | provider must be `azure_openai` or `gemini` (not `huggingface`) |
+| Stage 1, 2, or 3 failed after writing partial state | run `stage-reset` for that project, run ID, and failed stage, then follow the retry sequence in Section 4 |
+| `stage-reset` says `--yes is required` | review the project, run ID, and stage, then repeat with the explicit `--yes` confirmation |
+| Chroma reports that the collection expects a different embedding dimension | run `project-reset`, not `stage-reset`; then re-ingest with one embedding model so the collection is recreated in a compatible vector space |

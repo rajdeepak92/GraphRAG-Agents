@@ -29,7 +29,7 @@ from multi_agentic_graph_rag.llm_models.factory import (
     create_reranker_model,
 )
 from multi_agentic_graph_rag.observability.logging import configure_logging
-from multi_agentic_graph_rag.services.project_reset import reset_project
+from multi_agentic_graph_rag.services.project_reset import reset_project, reset_stage_run
 from multi_agentic_graph_rag.workflows.codegen_run_graph import run_codegen_run
 from multi_agentic_graph_rag.workflows.ingestion_graph import run_ingestion
 from multi_agentic_graph_rag.workflows.requirement_discovery_graph import (
@@ -254,6 +254,27 @@ def project_reset(
     if not yes:
         raise typer.BadParameter("--yes is required for project-reset")
     _emit({"status": "PASS", "reset": reset_project(project, load_config())})
+
+
+@app.command("stage-reset")
+def stage_reset(
+    project: Annotated[str, typer.Option("--project")],
+    run_id: Annotated[str, typer.Option("--run-id")],
+    stage: Annotated[int, typer.Option("--stage", min=1, max=3)],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm deletion of this run's stage-scoped state."),
+    ] = False,
+) -> None:
+    """Reset one Stage 1-3 run and invalidate only its downstream stages."""
+    if not yes:
+        raise typer.BadParameter("--yes is required for stage-reset")
+    _emit(
+        {
+            "status": "PASS",
+            "reset": reset_stage_run(project, run_id, str(stage), load_config()),
+        }
+    )
 
 
 @app.command("generate-user-stories")

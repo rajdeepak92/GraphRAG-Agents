@@ -74,6 +74,10 @@ relationships[]:
 - confidence: number from 0.0 through 1.0
 
 Rules:
+- Never extract from an "Out of Scope" or "Definition of Done" section, heading, table, row,
+  bullet, or object. Skip such content completely: emit no requirement, entity, or relationship
+  for it. When the whole chunk is Out of Scope or Definition of Done content, return all four
+  arrays empty. This exclusion overrides every other extraction rule below.
 - Extract every explicit requirement or acceptance-criteria row. Never return a partial table.
 - Reconstruct wrapped IDs such as "BR-COM-" plus "002" as "BR-COM-002".
 - For an explicit ID row, copy source_req_id and requirement_text exactly and include that
@@ -154,7 +158,7 @@ class PromptUserStoryGeneration(StrEnum):
         + """
 
 Generate grounded user-story candidates for exactly one active canonical requirement.
-Copy source_req_id and source_req_id_type unchanged.
+Do not emit source_req_id or source_req_id_type; provenance is assigned by the system.
 Each story has one supported persona, one capability, one outcome, and at least one
 Given/When/Then acceptance criterion. Preserve all thresholds, timing, conditions, polarity,
 and security constraints. Reference only supplied chunk, entity, and relationship IDs.
@@ -172,7 +176,7 @@ class PromptTestScenarioGeneration(StrEnum):
         + """
 
 Generate declarative behavioral test scenarios for exactly one active canonical story.
-Copy source_req_id and source_req_id_type unchanged.
+Do not emit source_req_id or source_req_id_type; provenance is assigned by the system.
 Generate only applicable Positive, Negative, Boundary, Alternative, Exception, Performance,
 Security, or Usability scenarios. Do not force categories.
 Each scenario verifies one observable behavior with required preconditions, one action, and one
