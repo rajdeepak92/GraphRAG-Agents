@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from multi_agentic_graph_rag.agents.requirement_discovery_agent import (
     RequirementDiscoveryAgent,
+    _entity_grounded,
 )
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.config.config_loader import load_config
@@ -242,13 +243,24 @@ def test_relationship_must_have_one_requirement_owner() -> None:
         RequirementDiscoveryAgent(_Model(payload)).discover(chunk)
 
 
-def test_entity_and_relationship_endpoints_must_be_visibly_grounded() -> None:
+def test_ungrounded_entity_quote_is_pruned_not_fatal() -> None:
+    # A model that over-attaches an ungrounded quote to an entity must not halt the
+    # chunk. The ungrounded quote is pruned; an entity left with no grounded quote is
+    # dropped and its references cascade out of requirements and relationships so
+    # every stored evidence quote stays grounded.
     sentence = "The controller shall collect data from configured sensors."
     payload = _response(sentence, source_id="BR-SEN-001")
     payload["entities"][1]["name"] = "Modbus communication interface"
     payload["entities"][1]["normalized_name"] = "modbus communication interface"
-    with pytest.raises(SemanticValidationError, match="entity is not visibly grounded"):
-        RequirementDiscoveryAgent(_Model(payload)).discover(_chunk(f"BR-SEN-001 {sentence}"))
+    response = RequirementDiscoveryAgent(_Model(payload)).discover(_chunk(f"BR-SEN-001 {sentence}"))
+    assert [entity.entity_ref for entity in response.entities] == ["ENTREF-1"]
+    assert response.relationships == []
+    requirement = response.requirements[0]
+    assert requirement.entity_refs == ["ENTREF-1"]
+    assert requirement.relationship_refs == []
+    for entity in response.entities:
+        for quote in entity.evidence_quotes:
+            assert _entity_grounded(entity.name, entity.aliases, quote)
 
 
 def test_relationship_quote_must_ground_both_endpoints() -> None:

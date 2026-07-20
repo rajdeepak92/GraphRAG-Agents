@@ -8,6 +8,7 @@ import re
 from multi_agentic_graph_rag.common_prompt_defs import PromptRequirementDiscovery
 from multi_agentic_graph_rag.domain.errors import SemanticValidationError
 from multi_agentic_graph_rag.domain.schemas import (
+    LLMEntityCandidate,
     LLMRequirementCandidate,
     ManifestChunk,
     RequirementDiscoveryChunkResponse,
@@ -51,11 +52,100 @@ class RequirementDiscoveryAgent:
             request_id=chunk.chunk_id,
             max_attempts=1,
         )
+        response = self._prune_ungrounded_entities(response)
         try:
             self.validate_response(chunk, response)
         except ValueError as error:
             raise SemanticValidationError(str(error)) from error
         return response
+
+    @staticmethod
+    def _prune_ungrounded_entities(
+        response: RequirementDiscoveryChunkResponse,
+    ) -> RequirementDiscoveryChunkResponse:
+        """Drop entity evidence quotes that are not visibly grounded in the entity's
+        own name or aliases instead of failing the whole chunk.
+
+        Every quote that survives is still grounded, so the storage guarantee is
+        preserved; this only tolerates a reasoning model over-attaching spurious
+        quotes to an entity. An entity left with no grounded quote is dropped, and
+        references to it are cascaded out of requirements and relationships (and any
+        entity that becomes an orphan is dropped in turn) so the result still
+        satisfies RequirementDiscoveryChunkResponse's referential rules.
+        """
+        pruned_entities: list[LLMEntityCandidate] = []
+        dropped_refs: set[str] = set()
+        changed = False
+        for entity in response.entities:
+            grounded = [
+                quote
+                for quote in entity.evidence_quotes
+                if _entity_grounded(entity.name, entity.aliases, quote)
+            ]
+            if not grounded:
+                dropped_refs.add(entity.entity_ref)
+                changed = True
+                continue
+            if len(grounded) != len(entity.evidence_quotes):
+                changed = True
+                entity = entity.model_copy(update={"evidence_quotes": grounded})
+            pruned_entities.append(entity)
+
+        # Cascade entity drops to a fixpoint: recompute surviving relationships and
+        # the referenced-entity set, then drop any entity nothing references.
+        relationships = list(response.relationships)
+        while True:
+            relationships = [
+                relationship
+                for relationship in response.relationships
+                if relationship.source_entity_ref not in dropped_refs
+                and relationship.target_entity_ref not in dropped_refs
+            ]
+            referenced: set[str] = set()
+            for requirement in response.requirements:
+                referenced.update(ref for ref in requirement.entity_refs if ref not in dropped_refs)
+            for relationship in relationships:
+                referenced.update((relationship.source_entity_ref, relationship.target_entity_ref))
+            orphans = {
+                entity.entity_ref
+                for entity in pruned_entities
+                if entity.entity_ref not in referenced
+            }
+            if not orphans:
+                break
+            dropped_refs |= orphans
+            pruned_entities = [
+                entity for entity in pruned_entities if entity.entity_ref not in orphans
+            ]
+            changed = True
+
+        if not changed:
+            return response
+
+        surviving_relationship_refs = {
+            relationship.relationship_ref for relationship in relationships
+        }
+        pruned_requirements = [
+            requirement.model_copy(
+                update={
+                    "entity_refs": [
+                        ref for ref in requirement.entity_refs if ref not in dropped_refs
+                    ],
+                    "relationship_refs": [
+                        ref
+                        for ref in requirement.relationship_refs
+                        if ref in surviving_relationship_refs
+                    ],
+                }
+            )
+            for requirement in response.requirements
+        ]
+        return RequirementDiscoveryChunkResponse(
+            chunk_id=response.chunk_id,
+            requirements=pruned_requirements,
+            entities=pruned_entities,
+            relationships=relationships,
+        )
 
     @staticmethod
     def validate_response(
@@ -171,6 +261,16 @@ def _require_atomic_generated_requirement(requirement_text: str) -> None:
         raise ValueError("generated requirement must be one complete atomic sentence")
 
 
+def _entity_grounded(name: str, aliases: list[str], quote: str) -> bool:
+    """Return True when the entity name or one alias is visibly present in the quote."""
+    evidence_tokens = {_singular_token(token) for token in _WORD.findall(quote)}
+    for candidate in (name, *aliases):
+        candidate_tokens = {_singular_token(token) for token in _WORD.findall(candidate)}
+        if candidate_tokens and candidate_tokens <= evidence_tokens:
+            return True
+    return False
+
+
 def _require_entity_grounding(
     name: str,
     aliases: list[str],
@@ -178,13 +278,8 @@ def _require_entity_grounding(
     label: str,
 ) -> None:
     """Require a visible name or alias in each entity-bearing evidence quote."""
-    evidence_tokens = {_singular_token(token) for token in _WORD.findall(quote)}
-    candidates = (name, *aliases)
-    for candidate in candidates:
-        candidate_tokens = {_singular_token(token) for token in _WORD.findall(candidate)}
-        if candidate_tokens and candidate_tokens <= evidence_tokens:
-            return
-    raise ValueError(f"{label} is not visibly grounded in its evidence quote")
+    if not _entity_grounded(name, aliases, quote):
+        raise ValueError(f"{label} is not visibly grounded in its evidence quote")
 
 
 def _singular_token(token: str) -> str:
